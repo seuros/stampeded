@@ -1,0 +1,29 @@
+[package]
+name = "stampede-mcp"
+description = "Stampede MCP control plane: inspect and operate queues from an AI client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+stampede-core = { path = "../stampede-core" }
+mcp-host = { version = "0.3", features = ["macros", "http", "stdio"] }
+tokio.workspace = true
+sqlx.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+schemars = "1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
+[[bin]]
+name = "stampede-mcp"
+path = "src/bin/stampede-mcp.rs"

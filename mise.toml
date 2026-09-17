@@ -1,0 +1,3 @@
+[tools]
+# 1.98 because mcp-host 0.3.2 requires it (mcphost-rs pins the same).
+rust = "1.98"
