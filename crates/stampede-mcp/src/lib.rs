@@ -67,6 +67,45 @@ pub struct JobIdArgs {
     pub id: String,
 }
 
+/// No parameters. A unit struct still needs a schema, since the tool contract
+/// is "takes an object", not "takes nothing".
+#[derive(Debug, Default, Deserialize, Serialize, JsonSchema)]
+pub struct EmptyArgs {}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct ScheduleUpsertArgs {
+    /// Stable identifier. Upserting the same key edits the schedule in place.
+    pub key: String,
+    /// Queue the fired jobs land in.
+    pub queue: String,
+    /// Task name to enqueue.
+    pub task: String,
+    /// Five-field cron expression: minute hour day-of-month month day-of-week.
+    /// Mutually exclusive with `every_secs`.
+    #[serde(default)]
+    pub cron: Option<String>,
+    /// Fixed interval in seconds. Mutually exclusive with `cron`.
+    #[serde(default)]
+    pub every_secs: Option<u64>,
+    /// IANA timezone for a cron schedule (default UTC).
+    #[serde(default)]
+    pub timezone: Option<String>,
+    /// "wall_clock" fires once per local time (a daily report runs once on a
+    /// fall-back day); "instant" fires per real instant (so it runs twice).
+    /// Omit to let the expression decide.
+    #[serde(default)]
+    pub dst_policy: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct ScheduleKeyArgs {
+    /// Schedule key.
+    pub key: String,
+    /// True to pause, false to resume.
+    #[serde(default)]
+    pub paused: bool,
+}
+
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct SearchArgs {
     /// Queue to search.

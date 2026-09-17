@@ -22,6 +22,13 @@ pub enum Error {
     #[error("serialization: {0}")]
     Serde(#[from] serde_json::Error),
 
+    /// A schedule cannot produce a next run: a malformed cron expression, an
+    /// unknown timezone, or one whose occurrences fall outside the search
+    /// horizon. Distinct from `Handler` because it is a bad *definition*, not a
+    /// failed execution — and it surfaces to users as a rejected write.
+    #[error("{0}")]
+    InvalidSchedule(String),
+
     /// The task's circuit is open — the downstream is failing and we are not
     /// adding to it. Not the job's fault, so it retries rather than discarding.
     #[error("circuit open: {0}")]

@@ -5,7 +5,8 @@
 //! signature rather than listing instances, because "47 jobs failed" is noise
 //! and "47 jobs failed with the same connection timeout" is a diagnosis.
 
-use crate::{JobIdArgs, QueueArgs, SearchArgs, StampedeServer};
+use crate::{EmptyArgs, JobIdArgs, QueueArgs, ScheduleKeyArgs, ScheduleUpsertArgs, SearchArgs, StampedeServer};
+use stampede_core::DstPolicy;
 use mcp_host::prelude::*;
 use mcp_host::registry::router::McpToolRouter;
 
@@ -289,7 +290,156 @@ impl StampedeServer {
             )
         }))
     }
+
+    /// Every schedule and when it next fires.
+    #[mcp_tool(
+        name = "schedule_list",
+        description = "Every recurring schedule: its rule, timezone, DST policy, and when it next fires",
+        read_only = true
+    )]
+    async fn schedule_list(&self, _ctx: Ctx<'_>, _params: Parameters<EmptyArgs>) -> ToolResult {
+        let rows: Vec<ScheduleRow> = sqlx::query_as(
+            "SELECT key, queue, task, cron_expr, interval_secs, timezone, dst_policy, \
+                    paused, next_run_at::text, last_run_at::text \
+               FROM stampede_schedules ORDER BY next_run_at",
+        )
+        .fetch_all(self.queue().pool())
+        .await
+        .map_err(|e| ToolError::Internal(format!("schedule query failed: {e}")))?;
+
+        if rows.is_empty() {
+            return Ok(ToolOutput::text("no schedules registered"));
+        }
+
+        let mut out = String::new();
+        for (key, queue, task, cron, every, tz, dst, paused, next, last) in rows {
+            let rule = match (cron, every) {
+                (Some(c), _) => format!("{c:?} {tz} ({dst})"),
+                (_, Some(n)) => format!("every {n}s"),
+                _ => "<no rule>".into(),
+            };
+            out.push_str(&format!(
+                "{key}\n  {rule}\n  -> {queue}/{task}{}\n  next {next}  last {}\n",
+                if paused { "  [PAUSED]" } else { "" },
+                last.as_deref().unwrap_or("never")
+            ));
+        }
+        Ok(ToolOutput::text(out))
+    }
+
+    /// Create or edit a schedule.
+    ///
+    /// Runtime-mutable schedules are the point: Oban, River and good_job keep
+    /// theirs in config, so changing one is a deploy. Here it is a tool call.
+    #[mcp_tool(
+        name = "schedule_upsert",
+        description = "Create or edit a recurring schedule by key, using either a cron expression or a fixed interval",
+        visible = "ctx.has_role(\"operator\")"
+    )]
+    async fn schedule_upsert(
+        &self,
+        _ctx: Ctx<'_>,
+        params: Parameters<ScheduleUpsertArgs>,
+    ) -> ToolResult {
+        let a = params.0;
+
+        let policy = match a.dst_policy.as_deref() {
+            None => None,
+            Some("wall_clock") => Some(DstPolicy::WallClock),
+            Some("instant") => Some(DstPolicy::Instant),
+            Some(other) => {
+                return Err(ToolError::InvalidArguments(format!(
+                    "dst_policy must be \"wall_clock\" or \"instant\", got {other:?}"
+                )))
+            }
+        };
+
+        match (a.cron, a.every_secs) {
+            (Some(expr), None) => {
+                let tz = a.timezone.as_deref().unwrap_or("UTC");
+                self.queue()
+                    .upsert_cron_schedule(&a.key, &a.queue, &a.task, &expr, tz, policy)
+                    .await
+                    // Parsing happens on write, so a typo comes back here as a
+                    // usable message rather than becoming a row that fails
+                    // silently once a minute forever.
+                    .map_err(|e| ToolError::InvalidArguments(format!("{e}")))?;
+                Ok(ToolOutput::text(format!(
+                    "schedule {:?} set to {expr:?} ({tz})",
+                    a.key
+                )))
+            }
+            (None, Some(secs)) => {
+                self.queue()
+                    .upsert_schedule(
+                        &a.key,
+                        &a.queue,
+                        &a.task,
+                        std::time::Duration::from_secs(secs),
+                    )
+                    .await
+                    .map_err(|e| ToolError::Internal(format!("upsert failed: {e}")))?;
+                Ok(ToolOutput::text(format!(
+                    "schedule {:?} set to every {secs}s",
+                    a.key
+                )))
+            }
+            (Some(_), Some(_)) => Err(ToolError::InvalidArguments(
+                "give either cron or every_secs, not both".into(),
+            )),
+            (None, None) => Err(ToolError::InvalidArguments(
+                "give either cron or every_secs".into(),
+            )),
+        }
+    }
+
+    /// Pause or resume a schedule.
+    ///
+    /// Pausing rather than deleting: a paused row keeps its key, its history in
+    /// the occurrence ledger, and its next_run_at, so resuming is not a
+    /// re-creation and the ledger still refuses a duplicate occurrence.
+    #[mcp_tool(
+        name = "schedule_pause",
+        description = "Pause or resume a schedule by key without deleting it",
+        visible = "ctx.has_role(\"operator\")"
+    )]
+    async fn schedule_pause(&self, _ctx: Ctx<'_>, params: Parameters<ScheduleKeyArgs>) -> ToolResult {
+        let n = sqlx::query(
+            "UPDATE stampede_schedules SET paused = $2, updated_at = now() WHERE key = $1",
+        )
+        .bind(&params.0.key)
+        .bind(params.0.paused)
+        .execute(self.queue().pool())
+        .await
+        .map_err(|e| ToolError::Internal(format!("pause failed: {e}")))?
+        .rows_affected();
+
+        Ok(ToolOutput::text(if n == 1 {
+            format!(
+                "schedule {:?} {}",
+                params.0.key,
+                if params.0.paused { "paused" } else { "resumed" }
+            )
+        } else {
+            format!("no schedule named {:?}", params.0.key)
+        }))
+    }
 }
+
+/// One schedule row as `schedule_list` reads it. Named for the same reason as
+/// `JobRow`: wide enough that a mis-ordered column would type-check.
+type ScheduleRow = (
+    String,          // key
+    String,          // queue
+    String,          // task
+    Option<String>,  // cron_expr
+    Option<i64>,     // interval_secs
+    String,          // timezone
+    String,          // dst_policy
+    bool,            // paused
+    String,          // next_run_at
+    Option<String>,  // last_run_at
+);
 
 /// Mount the read tools, and optionally the guarded write tools.
 ///
@@ -314,6 +464,11 @@ pub fn mount(
         .with_tool(
             StampedeServer::job_inspect_tool_info(),
             StampedeServer::job_inspect_handler,
+            None,
+        )
+        .with_tool(
+            StampedeServer::schedule_list_tool_info(),
+            StampedeServer::schedule_list_handler,
             None,
         )
         .with_tool(
@@ -346,5 +501,15 @@ pub fn mount(
             StampedeServer::job_cancel_tool_info(),
             StampedeServer::job_cancel_handler,
             Some(StampedeServer::job_cancel_visibility),
+        )
+        .with_tool(
+            StampedeServer::schedule_upsert_tool_info(),
+            StampedeServer::schedule_upsert_handler,
+            Some(StampedeServer::schedule_upsert_visibility),
+        )
+        .with_tool(
+            StampedeServer::schedule_pause_tool_info(),
+            StampedeServer::schedule_pause_handler,
+            Some(StampedeServer::schedule_pause_visibility),
         )
 }

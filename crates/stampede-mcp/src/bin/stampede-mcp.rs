@@ -6,6 +6,7 @@
 //! Point an MCP client at this command. Read tools work for any session; the
 //! write tools additionally require the session to carry an `operator` role.
 
+use mcp_host::SESSION_ROLES_KEY;
 use mcp_host::transport::StdioTransport;
 use stampede_core::Queue;
 use stampede_mcp::{StampedeServer, router, server};
@@ -33,7 +34,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Build first, then mount: mcp-host attaches a router to an already-built
     // server rather than taking state through the builder.
-    let mcp = server("stampede", env!("CARGO_PKG_VERSION")).build();
+    let mut mcp = server("stampede", env!("CARGO_PKG_VERSION")).build();
+
+    // The write tools are gated on the session carrying an `operator` role,
+    // and over stdio nothing else can grant one -- there is no auth layer to
+    // do it, so without this they would be mounted and permanently invisible.
+    //
+    // On stdio the operator IS whoever launched the process: it is a local,
+    // single-client pipe, and STAMPEDE_MCP_ALLOW_WRITES is their decision. On
+    // the HTTP transport the role comes from the authenticating proxy instead,
+    // which is why this lives in the binary rather than in `router()`.
+    if allow_writes {
+        mcp.set_session_initializer(|session| {
+            session.set_state(SESSION_ROLES_KEY, serde_json::json!(["operator"]));
+        });
+    }
     mcp.register_router(router(allow_writes), std::sync::Arc::new(state));
 
     tracing::info!(allow_writes, "stampede mcp server ready");

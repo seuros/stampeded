@@ -315,13 +315,9 @@ impl Queue {
         timezone: &str,
         policy: Option<DstPolicy>,
     ) -> Result<()> {
-        let cron = Cron::parse(expr)
-            .map_err(|e| Error::Handler(Box::new(crate::schedule::SchedulingError::new(e.to_string()))))?;
-        let tz = TimeZone::get(timezone).map_err(|e| {
-            Error::Handler(Box::new(crate::schedule::SchedulingError::new(format!(
-                "unknown timezone {timezone:?}: {e}"
-            ))))
-        })?;
+        let cron = Cron::parse(expr).map_err(|e| Error::InvalidSchedule(e.to_string()))?;
+        let tz = TimeZone::get(timezone)
+            .map_err(|e| Error::InvalidSchedule(format!("unknown timezone {timezone:?}: {e}")))?;
 
         // `None` takes the expression's own advice rather than guessing.
         let policy = policy.unwrap_or_else(|| cron.suggested_dst_policy());
@@ -329,11 +325,9 @@ impl Queue {
         let now = Timestamp::from_second(Utc::now().timestamp())
             .unwrap_or(Timestamp::UNIX_EPOCH)
             .to_zoned(tz.clone());
-        let first = cron.next_after(&now, &tz, policy).ok_or_else(|| {
-            Error::Handler(Box::new(crate::schedule::SchedulingError::new(format!(
-                "{expr:?} has no occurrence within four years"
-            ))))
-        })?;
+        let first = cron
+            .next_after(&now, &tz, policy)
+            .ok_or_else(|| Error::InvalidSchedule(format!("{expr:?} has no occurrence within four years")))?;
         let first = DateTime::from_timestamp(first.timestamp().as_second(), 0).unwrap_or_default();
 
         let dst_policy = match policy {

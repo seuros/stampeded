@@ -79,51 +79,24 @@ impl Schedule {
     /// One step forward. The only place the two rule kinds differ.
     fn step(&self, from: &Zoned, tz: &TimeZone) -> Result<Zoned> {
         if let Some(expr) = &self.cron_expr {
-            let cron = Cron::parse(expr).map_err(|e| {
-                crate::Error::Handler(Box::new(SchedulingError(format!(
-                    "schedule {:?}: {e}",
-                    self.key
-                ))))
-            })?;
+            let cron = Cron::parse(expr)
+                .map_err(|e| crate::Error::InvalidSchedule(format!("schedule {:?}: {e}", self.key)))?;
             return cron.next_after(from, tz, self.policy()).ok_or_else(|| {
-                crate::Error::Handler(Box::new(SchedulingError(format!(
+                crate::Error::InvalidSchedule(format!(
                     "schedule {:?}: {expr:?} has no occurrence within four years",
                     self.key
-                ))))
+                ))
             });
         }
 
         let secs = self.interval_secs.unwrap_or(60).max(1);
-        from.checked_add(secs.seconds()).map_err(|e| {
-            crate::Error::Handler(Box::new(SchedulingError(format!(
-                "schedule {:?}: {e}",
-                self.key
-            ))))
-        })
+        from.checked_add(secs.seconds())
+            .map_err(|e| crate::Error::InvalidSchedule(format!("schedule {:?}: {e}", self.key)))
     }
 }
 
 /// 24h of one-second ticks. Past this, realigning costs more than it is worth.
 const MAX_CATCHUP_STEPS: u32 = 86_400;
-
-/// A schedule that cannot produce a next run: a malformed expression, or one
-/// whose occurrences fall outside the search horizon.
-#[derive(Debug)]
-pub struct SchedulingError(String);
-
-impl SchedulingError {
-    pub fn new(msg: impl Into<String>) -> Self {
-        Self(msg.into())
-    }
-}
-
-impl std::fmt::Display for SchedulingError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for SchedulingError {}
 
 /// chrono is what sqlx binds (0.9 has no jiff support), jiff is what does the
 /// arithmetic. These two functions are the entire boundary between them, and
