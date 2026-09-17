@@ -107,6 +107,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tasks.push(tokio::spawn(async move { m.run(rx).await }));
     }
 
+    if let Some(addr) = config.http.clone() {
+        let q = queue.clone();
+        info!(%addr, "starting http api");
+        tasks.push(tokio::spawn(async move {
+            if let Err(e) = stampede_http::serve(&addr, q).await {
+                error!(error = %e, "http server stopped");
+            }
+            Ok(())
+        }));
+    }
+
     if tasks.is_empty() {
         eprintln!("error: nothing to do — all roles disabled\n\n{}", Config::usage());
         std::process::exit(2);

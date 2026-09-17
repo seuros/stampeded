@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/stampede-core", "crates/stampede-daemon"]
+members = ["crates/stampede-core", "crates/stampede-daemon", "crates/stampede-http"]
 
 [workspace.package]
 version = "0.1.0"

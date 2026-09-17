@@ -20,6 +20,8 @@ pub struct Config {
     pub worker: bool,
     pub maintenance: bool,
     pub migrate: bool,
+    /// `Some(addr)` enables the HTTP edge.
+    pub http: Option<String>,
 }
 
 impl Default for Config {
@@ -39,6 +41,7 @@ impl Default for Config {
             worker: true,
             maintenance: true,
             migrate: false,
+            http: None,
         }
     }
 }
@@ -60,6 +63,7 @@ impl Config {
             "  --no-worker            do not claim jobs (maintenance only)\n",
             "  --no-maintenance       do not reap or prune\n",
             "  --migrate              apply the schema on startup\n",
+            "  --http ADDR            serve the HTTP API on ADDR (e.g. 127.0.0.1:7878)\n",
             "  -h, --help             this message\n",
         )
     }
@@ -105,6 +109,7 @@ impl Config {
                 "--no-worker" => c.worker = false,
                 "--no-maintenance" => c.maintenance = false,
                 "--migrate" => c.migrate = true,
+                "--http" => c.http = Some(value("--http")?),
                 other => return Err(format!("unknown option {other:?}")),
             }
         }
