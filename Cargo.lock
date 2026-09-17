@@ -3639,6 +3639,7 @@ dependencies = [
  "breaker-machines",
  "chrono",
  "chrono-machines",
+ "jiff",
  "serde",
  "serde_json",
  "sqlx",

@@ -26,9 +26,15 @@ CREATE TABLE stampede_schedules (
     tenant_id       text,
     priority        smallint    NOT NULL DEFAULT 0,
 
-    -- Interval-based for now. A cron expression parser belongs in Rust, not in
-    -- PL/pgSQL; when it lands it sets next_run_at the same way.
-    interval_secs   bigint      NOT NULL CHECK (interval_secs > 0),
+    -- Exactly one of the two. A cron expression is parsed in Rust (jiff does
+    -- the timezone arithmetic -- see crates/stampede-core/src/cron.rs), which is
+    -- why the firing loop lives there rather than in PL/pgSQL; a fixed interval
+    -- needs no parser at all and is kept for the common "every N seconds" case.
+    interval_secs   bigint      CHECK (interval_secs > 0),
+    cron_expr       text,
+    CONSTRAINT stampede_schedules_one_rule CHECK (
+        (interval_secs IS NULL) <> (cron_expr IS NULL)
+    ),
 
     next_run_at     timestamptz NOT NULL DEFAULT now(),
     last_run_at     timestamptz,
@@ -40,11 +46,14 @@ CREATE TABLE stampede_schedules (
     -- occurrences and the job runs twice. Making this a column rather than an
     -- algorithm lets each schedule choose:
     --
-    --   'instant'    — key on the UTC instant. A 02:30 job runs twice on the
-    --                  fall-back day. Correct for "every N hours" work.
-    --   'wall_clock' — key on local date+time. A 02:30 job runs ONCE on the
-    --                  fall-back day and is skipped on spring-forward. Correct
-    --                  for "the daily report at 2:30am".
+    --   'instant'    — key on the UTC instant. A 01:30 job runs twice on the
+    --                  fall-back day, an hour of real time apart. Correct for
+    --                  "every N hours" work.
+    --   'wall_clock' — key on local date+time, which collapses the repeated
+    --                  hour into one token. A 01:30 job runs ONCE on the
+    --                  fall-back day; a 02:30 job on a spring-forward day runs
+    --                  at 03:30, the instant the gap closes, rather than being
+    --                  lost. Correct for "the daily report at 2:30am".
     dst_policy      text        NOT NULL DEFAULT 'instant'
                                 CHECK (dst_policy IN ('instant', 'wall_clock')),
     timezone        text        NOT NULL DEFAULT 'UTC',
@@ -99,18 +108,46 @@ CREATE INDEX stampede_cron_occurrences_enqueued_idx
     ON stampede_cron_occurrences (enqueued_at);
 
 -- ---------------------------------------------------------------------------
--- Fire due schedules.
+-- Firing, in two halves.
 --
--- One statement per due schedule, each in its own transaction, so a schedule
--- whose enqueue fails does not roll back the others.
+-- It used to be one PL/pgSQL loop. Cron expressions broke that: computing the
+-- next occurrence needs a parser and a timezone database, and PL/pgSQL has
+-- neither. Rather than write a cron parser in SQL, the LOOP moved to Rust and
+-- the transaction stayed put:
 --
--- Returns the schedules that fired.
+--     BEGIN
+--       stampede_claim_due_schedules(n)   -- takes the row locks
+--       ...Rust computes each next_run_at with jiff...
+--       stampede_fire_schedule(key, next) -- once per schedule
+--     COMMIT
+--
+-- The row lock is still the leader election, and it is held across the round
+-- trip because it is all one transaction. Nothing about the concurrency
+-- argument changed; only who does the arithmetic.
 -- ---------------------------------------------------------------------------
-CREATE FUNCTION stampede_run_due_schedules(p_limit integer DEFAULT 100)
--- OUT params are prefixed because an unprefixed `cron_key` shadows the COLUMN
--- of the same name inside ON CONFLICT, and PL/pgSQL reports it as an ambiguous
--- reference at RUNTIME, not at CREATE FUNCTION time.
-RETURNS TABLE (out_cron_key text, out_job_id uuid, out_token text)
+
+-- Take the locks. MUST be called inside a transaction: the locks are what stop
+-- two nodes firing the same occurrence, and they last exactly as long as it.
+CREATE FUNCTION stampede_claim_due_schedules(p_limit integer DEFAULT 100)
+RETURNS SETOF stampede_schedules
+LANGUAGE plpgsql AS $$
+BEGIN
+    RETURN QUERY
+        SELECT * FROM stampede_schedules
+         WHERE NOT paused AND next_run_at <= now()
+         ORDER BY next_run_at
+         LIMIT p_limit
+         FOR UPDATE SKIP LOCKED;
+END;
+$$;
+
+-- Fire one claimed schedule and advance it. `p_next_run_at` comes from Rust.
+--
+-- Returns the job id, or NULL if this occurrence was already enqueued by
+-- someone else — in which case the schedule is still advanced, or we would spin
+-- on it forever.
+CREATE FUNCTION stampede_fire_schedule(p_key text, p_next_run_at timestamptz)
+RETURNS uuid
 LANGUAGE plpgsql AS $$
 DECLARE
     s        stampede_schedules%ROWTYPE;
@@ -119,68 +156,44 @@ DECLARE
     -- Separate from v_job: the ledger's id is bigserial, the job's is uuid.
     -- Reusing one variable for both is a runtime cast error, not a compile one.
     v_occ    bigint;
-    v_next   timestamptz;
 BEGIN
-    FOR s IN
-        SELECT * FROM stampede_schedules
-         WHERE NOT paused AND next_run_at <= now()
-         ORDER BY next_run_at
-         LIMIT p_limit
-         -- The row lock IS the leader election. No peers table, no lease.
-         FOR UPDATE SKIP LOCKED
-    LOOP
-        v_token := CASE s.dst_policy
-            WHEN 'wall_clock' THEN
-                to_char(s.next_run_at AT TIME ZONE s.timezone, 'YYYY-MM-DD HH24:MI')
-            ELSE
-                extract(epoch FROM s.next_run_at)::bigint::text
-        END;
+    SELECT * INTO s FROM stampede_schedules WHERE key = p_key;
+    IF NOT FOUND THEN
+        RETURN NULL;
+    END IF;
 
-        -- Advance from the PREVIOUS TARGET, not from now(): computing from now
-        -- accumulates drift on every late run, which is how "every hour"
-        -- silently becomes "every hour and four seconds".
-        v_next := s.next_run_at + make_interval(secs => s.interval_secs);
+    v_token := CASE s.dst_policy
+        WHEN 'wall_clock' THEN
+            to_char(s.next_run_at AT TIME ZONE s.timezone, 'YYYY-MM-DD HH24:MI')
+        ELSE
+            extract(epoch FROM s.next_run_at)::bigint::text
+    END;
 
-        -- A schedule that fell far behind catches up to the present rather than
-        -- replaying every missed slot. 'once' is the whole policy: run the
-        -- overdue occurrence a single time, then resume normally.
-        IF s.missed_policy = 'skip' OR v_next <= now() THEN
-            WHILE v_next <= now() LOOP
-                v_next := v_next + make_interval(secs => s.interval_secs);
-            END LOOP;
-        END IF;
+    INSERT INTO stampede_cron_occurrences (cron_key, occurrence_token)
+    VALUES (s.key, v_token)
+    ON CONFLICT (cron_key, occurrence_token) DO NOTHING
+    RETURNING id INTO v_occ;
 
-        INSERT INTO stampede_cron_occurrences (cron_key, occurrence_token)
-        VALUES (s.key, v_token)
-        ON CONFLICT (cron_key, occurrence_token) DO NOTHING
-        RETURNING id INTO v_occ;
-
-        IF v_occ IS NULL THEN
-            -- Someone already enqueued this occurrence. Still advance, or we
-            -- spin on it forever.
-            UPDATE stampede_schedules
-               SET next_run_at = v_next, updated_at = now()
-             WHERE key = s.key;
-            CONTINUE;
-        END IF;
-
-        INSERT INTO stampede_jobs (queue, task, args, tenant_id, priority)
-        VALUES (s.queue, s.task, s.args, s.tenant_id, s.priority)
-        RETURNING id INTO v_job;
-
-        UPDATE stampede_cron_occurrences
-           SET job_id = v_job
-         WHERE cron_key = s.key AND occurrence_token = v_token;
-
+    IF v_occ IS NULL THEN
         UPDATE stampede_schedules
-           SET next_run_at = v_next, last_run_at = now(), updated_at = now()
+           SET next_run_at = p_next_run_at, updated_at = now()
          WHERE key = s.key;
+        RETURN NULL;
+    END IF;
 
-        out_cron_key := s.key;
-        out_job_id   := v_job;
-        out_token    := v_token;
-        RETURN NEXT;
-    END LOOP;
+    INSERT INTO stampede_jobs (queue, task, args, tenant_id, priority)
+    VALUES (s.queue, s.task, s.args, s.tenant_id, s.priority)
+    RETURNING id INTO v_job;
+
+    UPDATE stampede_cron_occurrences
+       SET job_id = v_job
+     WHERE cron_key = s.key AND occurrence_token = v_token;
+
+    UPDATE stampede_schedules
+       SET next_run_at = p_next_run_at, last_run_at = now(), updated_at = now()
+     WHERE key = s.key;
+
+    RETURN v_job;
 END;
 $$;
 

@@ -7,14 +7,18 @@
 //!
 //! See `plans/` for why each decision was made, and what was measured.
 
+pub mod cron;
 pub mod error;
 pub mod fairness;
 pub mod job;
 pub mod maintenance;
 pub mod queue;
+pub mod schedule;
 pub mod worker;
 
+pub use cron::{Cron, DstPolicy};
 pub use error::{Error, Result};
+pub use schedule::Schedule;
 pub use fairness::{Admission, Fairness, TenantLimit};
 pub use maintenance::{Maintenance, MaintenanceConfig};
 pub use job::{FailureKind, Job, JobState, NewJob};

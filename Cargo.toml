@@ -17,6 +17,9 @@ uuid = { version = "1.26", features = ["v7", "serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
+# jiff for all timezone arithmetic; chrono stays at the sqlx boundary only,
+# because sqlx 0.9 has no jiff support. See crates/stampede-core/src/cron.rs.
+jiff = "0.2"
 thiserror = "2"
 tracing = "0.1"
 

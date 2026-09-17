@@ -8,7 +8,7 @@
 //!     cargo test --test integration
 
 use sqlx::{AssertSqlSafe, PgPool};
-use stampede_core::{FailureKind, NewJob, Queue};
+use stampede_core::{DstPolicy, FailureKind, NewJob, Queue};
 use uuid::Uuid;
 
 /// Each test gets its own Postgres schema.
@@ -319,6 +319,74 @@ async fn concurrent_schedulers_do_not_double_fire() {
 
     let (a, b) = tokio::join!(q.run_due_schedules(10), q.run_due_schedules(10));
     assert_eq!(a.unwrap() + b.unwrap(), 1, "the schedule fired more than once");
+}
+
+#[tokio::test]
+async fn cron_schedules_fire_and_advance_by_the_expression() {
+    let q = q!();
+    // Every minute, so the first occurrence is at most 60s out and we can make
+    // it due by hand rather than sleeping.
+    q.upsert_cron_schedule("ticker", "default", "tick", "* * * * *", "UTC", Some(DstPolicy::Instant))
+        .await
+        .unwrap();
+
+    // Seeded to the NEXT occurrence, not to now: a schedule must not fire the
+    // instant it is created.
+    assert_eq!(q.run_due_schedules(10).await.unwrap(), 0, "fired on creation");
+
+    sqlx::query("UPDATE stampede_schedules SET next_run_at = now() - interval '1 minute'")
+        .execute(q.pool())
+        .await
+        .unwrap();
+
+    assert_eq!(q.run_due_schedules(10).await.unwrap(), 1);
+    assert_eq!(q.run_due_schedules(10).await.unwrap(), 0, "fired twice for one occurrence");
+
+    let (expr, secs): (Option<String>, Option<i64>) =
+        sqlx::query_as("SELECT cron_expr, interval_secs FROM stampede_schedules WHERE key='ticker'")
+            .fetch_one(q.pool())
+            .await
+            .unwrap();
+    assert_eq!(expr.as_deref(), Some("* * * * *"));
+    assert!(secs.is_none(), "cron and interval are mutually exclusive");
+}
+
+#[tokio::test]
+async fn a_malformed_cron_expression_is_rejected_at_write_time() {
+    // Parsing on write means a typo is a failed API call, not a row that warns
+    // once a second forever.
+    let q = q!();
+    assert!(
+        q.upsert_cron_schedule("bad", "default", "t", "77 * * * *", "UTC", Some(DstPolicy::Instant))
+            .await
+            .is_err()
+    );
+    assert!(
+        q.upsert_cron_schedule("bad", "default", "t", "* * * * *", "Mars/Olympus", Some(DstPolicy::Instant))
+            .await
+            .is_err(),
+        "an unknown timezone should be rejected too"
+    );
+}
+
+#[tokio::test]
+async fn switching_a_schedule_between_cron_and_interval_clears_the_other_rule() {
+    // The CHECK constraint enforces exactly one rule, so an upsert that did not
+    // null out the previous one would fail the write.
+    let q = q!();
+    q.upsert_schedule("flip", "default", "t", std::time::Duration::from_secs(60)).await.unwrap();
+    q.upsert_cron_schedule("flip", "default", "t", "0 3 * * *", "UTC", Some(DstPolicy::WallClock))
+        .await
+        .unwrap();
+    q.upsert_schedule("flip", "default", "t", std::time::Duration::from_secs(60)).await.unwrap();
+
+    let (expr, secs): (Option<String>, Option<i64>) =
+        sqlx::query_as("SELECT cron_expr, interval_secs FROM stampede_schedules WHERE key='flip'")
+            .fetch_one(q.pool())
+            .await
+            .unwrap();
+    assert!(expr.is_none());
+    assert_eq!(secs, Some(60));
 }
 
 #[tokio::test]
