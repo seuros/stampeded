@@ -10,6 +10,7 @@
 //! stack (plans/14).
 
 pub mod api;
+pub mod dashboard;
 
 pub use api::{ApiState, router};
 
@@ -34,7 +35,12 @@ pub async fn serve(addr: &str, queue: Queue) -> Result<(), Box<dyn std::error::E
     use rama::rt::Executor;
     use rama::tcp::server::TcpListener;
 
-    let app = (ArcLayer::new(), ErrorHandlerLayer::new()).into_layer(router(ApiState::new(queue)));
+    let state = ApiState::new(queue);
+    let app = (ArcLayer::new(), ErrorHandlerLayer::new()).into_layer(
+        router(state.clone())
+            .with_get("/dashboard", dashboard::index)
+            .with_get("/dashboard/stream", dashboard::stream),
+    );
     let exec = Executor::default();
     let service = HttpServer::auto(exec.clone()).service(app);
 

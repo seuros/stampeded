@@ -140,7 +140,7 @@ impl Worker {
         let pid = std::process::id() as i32;
         let worker_id = self
             .queue
-            .register_worker(&hostname, pid, &[self.config.queue.clone()])
+            .register_worker(&hostname, pid, std::slice::from_ref(&self.config.queue))
             .await?;
 
         info!(%worker_id, queue = %self.config.queue, "worker registered");
@@ -200,7 +200,7 @@ impl Worker {
                 let queue = self.queue.clone();
                 let handler = self.handlers.get(&job.task).cloned();
                 let timeout = self.config.job_timeout;
-                let backoff = self.backoff.clone();
+                let backoff = self.backoff;
 
                 tokio::spawn(async move {
                     let _permit = permit;

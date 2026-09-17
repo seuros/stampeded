@@ -11,6 +11,7 @@ authors.workspace = true
 [dependencies]
 stampede-core = { path = "../stampede-core" }
 rama = { version = "0.4", default-features = false, features = ["http-full"] }
+futures = "0.3"
 tokio.workspace = true
 sqlx.workspace = true
 serde.workspace = true

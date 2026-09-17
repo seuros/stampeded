@@ -3666,6 +3666,7 @@ dependencies = [
 name = "stampede-http"
 version = "0.1.0"
 dependencies = [
+ "futures",
  "rama",
  "serde",
  "serde_json",

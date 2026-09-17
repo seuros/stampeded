@@ -9,6 +9,21 @@ use crate::{JobIdArgs, QueueArgs, SearchArgs, StampedeServer};
 use mcp_host::prelude::*;
 use mcp_host::registry::router::McpToolRouter;
 
+/// One job row as `job_inspect` reads it.
+///
+/// Named rather than inlined: the tuple is wide enough that a mis-ordered
+/// column in the SELECT would be a silent type-checks-but-wrong bug.
+type JobRow = (
+    String,              // task
+    String,              // state
+    i16,                 // attempt
+    i16,                 // max_attempts
+    Option<String>,      // failure_kind
+    Option<String>,      // last_error
+    Vec<String>,         // attempted_by
+    serde_json::Value,   // args
+);
+
 impl StampedeServer {
     /// Queue depth by state.
     #[mcp_tool(
@@ -47,8 +62,7 @@ impl StampedeServer {
         let id = uuid::Uuid::parse_str(&params.0.id)
             .map_err(|_| ToolError::InvalidArguments(format!("{:?} is not a UUID", params.0.id)))?;
 
-        let row: Option<(String, String, i16, i16, Option<String>, Option<String>, Vec<String>, serde_json::Value)> =
-            sqlx::query_as(
+        let row: Option<JobRow> = sqlx::query_as(
                 "SELECT task, state::text, attempt, max_attempts, failure_kind::text, \
                         last_error, attempted_by, args \
                    FROM stampede_jobs WHERE queue = $1 AND id = $2",
