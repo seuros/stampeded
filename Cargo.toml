@@ -1,0 +1,27 @@
+[workspace]
+resolver = "3"
+members = ["crates/stampede-core"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "BSD-3-Clause"
+repository = "https://github.com/seuros/stampede"
+authors = ["Abdelkader Boudih"]
+
+[workspace.dependencies]
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "time", "signal", "sync"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "uuid", "chrono", "json", "macros"] }
+uuid = { version = "1.26", features = ["v7", "serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+tracing = "0.1"
+
+# The machines family — see plans/02-crate-family.md
+state-machines = "0.21"
+chrono-machines = "0.8"
+breaker-machines = "0.17"
+throttle-machines = "0.2"
