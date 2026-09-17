@@ -6,14 +6,20 @@
 //! implementation of those over HTTP is exactly the drift the SQL-function
 //! design exists to prevent (plans/05).
 
+use rama::futures::stream;
 use rama::http::StatusCode;
+use rama::http::header;
+use rama::http::sse::Event;
+use rama::http::sse::server::KeepAlive;
 use rama::http::service::web::Router;
 use rama::http::service::web::extract::{Path, State};
 use rama::http::service::web::extract::body::Json as JsonBody;
-use rama::http::service::web::response::{IntoResponse, Json};
+use rama::http::service::web::response::{IntoResponse, Json, Sse};
 use serde::{Deserialize, Serialize};
 use stampede_core::{NewJob, Queue};
+use std::convert::Infallible;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::warn;
 
 #[derive(Clone)]
@@ -25,6 +31,18 @@ impl ApiState {
     pub fn new(queue: Queue) -> Self {
         Self { queue: Arc::new(queue) }
     }
+}
+
+/// Path parameters for the per-job routes.
+///
+/// A NAMED struct, not `Path<(String, String)>`: the tuple form binds by
+/// parameter name order rather than by position in the path, so `{queue}` and
+/// `{id}` arrive swapped and every lookup fails with "id is not a UUID". Found
+/// by calling the endpoint, not by reading it.
+#[derive(Debug, Deserialize)]
+pub struct JobPath {
+    pub queue: String,
+    pub id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -63,6 +81,8 @@ pub fn router(state: ApiState) -> Router<ApiState> {
         .with_get("/health", health)
         .with_post("/jobs", enqueue)
         .with_get("/queues/{queue}/depth", depth)
+        .with_get("/queues/{queue}/jobs/{id}", job_status)
+        .with_get("/queues/{queue}/jobs/{id}/events", job_events)
 }
 
 async fn health() -> impl IntoResponse {
@@ -120,6 +140,119 @@ async fn depth(
             internal("depth query failed")
         }
     }
+}
+
+/// One job's current state.
+///
+/// Pathed under its queue because jobs are partitioned by queue: without it
+/// Postgres would scan every partition to find one row.
+async fn job_status(
+    State(state): State<ApiState>,
+    Path(JobPath { queue, id }): Path<JobPath>,
+) -> impl IntoResponse {
+    let Ok(id) = uuid::Uuid::parse_str(&id) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse { error: "id is not a UUID".into() }),
+        )
+            .into_response();
+    };
+
+    match state.queue.fetch(&queue, id).await {
+        Ok(Some(job)) => Json(job_json(&job)).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse { error: format!("no job {id} in queue {queue:?}") }),
+        )
+            .into_response(),
+        Err(e) => {
+            warn!(error = %e, "job lookup failed");
+            internal("job lookup failed")
+        }
+    }
+}
+
+/// A job's state transitions, as server-sent events.
+///
+/// Polled rather than driven by LISTEN/NOTIFY, and only transitions are sent:
+/// a caller waiting on one job wants to know when it MOVED, not that it is
+/// still running. Putting per-job dashboards on the NOTIFY channel workers use
+/// for wakeups would be the same mistake as streaming every row change
+/// (plans/12).
+///
+/// The stream ends when the job reaches a terminal state, so a client can
+/// simply read to EOF rather than deciding for itself when to stop.
+async fn job_events(
+    State(state): State<ApiState>,
+    Path(JobPath { queue, id }): Path<JobPath>,
+) -> impl IntoResponse {
+    let Ok(id) = uuid::Uuid::parse_str(&id) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse { error: "id is not a UUID".into() }),
+        )
+            .into_response();
+    };
+
+    let stream = stream::unfold(
+        (state, queue, id, None::<String>, false),
+        move |(state, queue, id, last, done)| async move {
+            if done {
+                return None;
+            }
+
+            // Poll until the state differs from the last one emitted, so an
+            // idle job costs one query per tick and no events at all.
+            loop {
+                match state.queue.fetch(&queue, id).await {
+                    Ok(Some(job)) => {
+                        let now = job.state.to_string();
+                        if last.as_deref() != Some(now.as_str()) {
+                            let terminal = job.finished_at.is_some();
+                            let ev = Event::new()
+                                .try_with_event("state")
+                                .ok()?
+                                .with_data(job_json(&job).to_string());
+                            return Some((
+                                Ok::<_, Infallible>(ev),
+                                (state, queue, id, Some(now), terminal),
+                            ));
+                        }
+                    }
+                    // Gone (pruned, or never existed): end the stream rather
+                    // than polling a row that will never appear.
+                    Ok(None) => return None,
+                    Err(e) => {
+                        warn!(error = %e, "job event poll failed");
+                        return None;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        },
+    );
+
+    (
+        [(header::CACHE_CONTROL, "no-cache")],
+        Sse::new(stream).with_keep_alive(KeepAlive::new()),
+    )
+        .into_response()
+}
+
+fn job_json(job: &stampede_core::Job) -> serde_json::Value {
+    serde_json::json!({
+        "id": job.id,
+        "queue": job.queue,
+        "task": job.task,
+        "state": job.state.to_string(),
+        "attempt": job.attempt,
+        "max_attempts": job.max_attempts,
+        "args": job.args,
+        "failure_kind": job.failure_kind,
+        "last_error": job.last_error,
+        "scheduled_at": job.scheduled_at,
+        "finished_at": job.finished_at,
+    })
 }
 
 fn internal(msg: &str) -> rama::http::Response {

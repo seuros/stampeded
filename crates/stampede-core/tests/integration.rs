@@ -310,7 +310,7 @@ async fn a_schedule_far_behind_catches_up_without_backfilling() {
 #[tokio::test]
 async fn concurrent_schedulers_do_not_double_fire() {
     // No leader election: exclusion is the row lock inside
-    // stampede_run_due_schedules. Two nodes ticking at once must still produce
+    // stampede_claim_due_schedules. Two nodes ticking at once must still produce
     // exactly one job.
     let q = q!();
     q.upsert_schedule("shared", "default", "once", std::time::Duration::from_secs(3600))

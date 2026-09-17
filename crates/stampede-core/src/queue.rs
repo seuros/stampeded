@@ -357,6 +357,23 @@ impl Queue {
         Ok(())
     }
 
+    /// One job by id.
+    ///
+    /// Takes the queue as well as the id because jobs are LIST-partitioned by
+    /// queue: without it the planner cannot prune and reads every partition to
+    /// find one row. The partition key is part of the primary key for the same
+    /// reason.
+    pub async fn fetch(&self, queue: &str, id: Uuid) -> Result<Option<Job>> {
+        let job = sqlx::query_as::<_, Job>(
+            "SELECT * FROM stampede_jobs WHERE queue = $1 AND id = $2",
+        )
+        .bind(queue)
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(job)
+    }
+
     /// Queue depth by state — the dashboard and MCP `queue_status` tool.
     pub async fn depth(&self, queue: &str) -> Result<Vec<(String, i64)>> {
         let rows = sqlx::query_as::<_, (String, i64)>(

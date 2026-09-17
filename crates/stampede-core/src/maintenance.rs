@@ -17,9 +17,10 @@ use tracing::{debug, info, warn};
 /// with another subsystem would silently serialise unrelated work.
 const LOCK_REAPER: i64 = 0x5741_4D50_0000_0001; // "STAMP" + 1
 const LOCK_PRUNER: i64 = 0x5741_4D50_0000_0002;
-// NOTE: the scheduler needs NO advisory lock. Its exclusion is the row lock in
-// stampede_run_due_schedules (FOR UPDATE SKIP LOCKED) -- the schedule row IS
-// the election. Every node may run the tick safely and concurrently.
+// NOTE: the scheduler needs NO advisory lock. Its exclusion is the row lock
+// taken by stampede_claim_due_schedules (FOR UPDATE SKIP LOCKED) and held for
+// the whole tick transaction -- the schedule row IS the election. Every node
+// may run the tick safely and concurrently.
 
 #[derive(Debug, Clone)]
 pub struct MaintenanceConfig {
@@ -133,10 +134,10 @@ async fn prune_loop(queue: Queue, config: MaintenanceConfig, mut shutdown: watch
 
 /// Fire due recurring schedules.
 ///
-/// No advisory lock and no leader election: `stampede_run_due_schedules` claims
-/// each schedule row with FOR UPDATE SKIP LOCKED, so concurrent nodes simply
-/// take different rows. That is the whole reason the schedule row carries
-/// `next_run_at` instead of the schedule living in config (plans/11).
+/// No advisory lock and no leader election: `stampede_claim_due_schedules`
+/// takes each schedule row with FOR UPDATE SKIP LOCKED, so concurrent nodes
+/// simply take different rows. That is the whole reason the schedule row
+/// carries `next_run_at` instead of the schedule living in config (plans/11).
 async fn schedule_loop(queue: Queue, config: MaintenanceConfig, mut shutdown: watch::Receiver<bool>) {
     let mut ticker = tokio::time::interval(config.schedule_interval);
     loop {

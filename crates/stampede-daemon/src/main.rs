@@ -109,9 +109,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(addr) = config.http.clone() {
         let q = queue.clone();
+        let rx = shutdown_rx.clone();
         info!(%addr, "starting http api");
         tasks.push(tokio::spawn(async move {
-            if let Err(e) = stampede_http::serve(&addr, q).await {
+            if let Err(e) = stampede_http::serve(&addr, q, rx).await {
                 error!(error = %e, "http server stopped");
             }
             Ok(())

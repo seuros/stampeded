@@ -15,9 +15,10 @@ pub mod dashboard;
 pub use api::{ApiState, router};
 
 use stampede_core::Queue;
+use tokio::sync::watch;
 use tracing::info;
 
-/// Serve the API on `addr`.
+/// Serve the API on `addr` until `shutdown` flips to true.
 ///
 /// Separate from `router()` so the router can be mounted alongside the
 /// dashboard and MCP transport in one rama server — sharing a single HTTP stack
@@ -27,8 +28,19 @@ use tracing::info;
 /// infallible, so `ArcLayer` makes it shareable across connections and
 /// `ErrorHandlerLayer` turns its `RouterError` into a response. Without both,
 /// this does not compile.
-pub async fn serve(addr: &str, queue: Queue) -> Result<(), Box<dyn std::error::Error>> {
+///
+/// The shutdown wiring is not optional either. `TcpListener::serve` stops
+/// accepting when its `Executor` carries a graceful guard — and does NOT when
+/// the executor is `Executor::default()`, which has none. Built that way, this
+/// future never resolves, and a daemon awaiting its tasks hangs on SIGTERM
+/// forever instead of exiting. That was a real bug, found by sending the signal.
+pub async fn serve(
+    addr: &str,
+    queue: Queue,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<(), Box<dyn std::error::Error>> {
     use rama::Layer;
+    use rama::graceful::Shutdown;
     use rama::http::layer::error_handling::ErrorHandlerLayer;
     use rama::http::server::HttpServer;
     use rama::layer::ArcLayer;
@@ -41,7 +53,13 @@ pub async fn serve(addr: &str, queue: Queue) -> Result<(), Box<dyn std::error::E
             .with_get("/dashboard", dashboard::index)
             .with_get("/dashboard/stream", dashboard::stream),
     );
-    let exec = Executor::default();
+    // The guard is what makes `serve` return: it cancels when the signal
+    // future resolves, which here is our own shutdown channel rather than a
+    // SIGTERM handler, so the daemon keeps owning signal policy.
+    let graceful = Shutdown::new(async move {
+        let _ = shutdown.changed().await;
+    });
+    let exec = Executor::graceful(graceful.guard());
     let service = HttpServer::auto(exec.clone()).service(app);
 
     info!(%addr, "http api listening");
@@ -50,5 +68,13 @@ pub async fn serve(addr: &str, queue: Queue) -> Result<(), Box<dyn std::error::E
         .map_err(|e| format!("bind {addr}: {e}"))?
         .serve(service)
         .await;
+
+    // Accepting has stopped; let in-flight requests finish. An SSE stream can
+    // be open indefinitely, so this is bounded rather than unbounded — a job
+    // watcher must not keep the process alive.
+    let waited = graceful
+        .shutdown_with_limit(std::time::Duration::from_secs(10))
+        .await;
+    info!(?waited, "http api stopped");
     Ok(())
 }
