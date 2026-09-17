@@ -23,5 +23,5 @@ tracing = "0.1"
 # The machines family — see plans/02-crate-family.md
 state-machines = "0.21"
 chrono-machines = "0.8"
-breaker-machines = "0.17"
+breaker-machines = { version = "0.17", features = ["async"] }
 throttle-machines = "0.2"

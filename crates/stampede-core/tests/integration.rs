@@ -265,3 +265,72 @@ async fn create_queue_is_idempotent_and_applies_partition_settings() {
     assert!(opts.iter().any(|o| o.contains("autovacuum_vacuum_scale_factor")));
 }
 // temporary probe appended to the test file
+
+#[tokio::test]
+async fn schedules_fire_once_and_do_not_drift() {
+    let q = q!();
+    q.upsert_schedule("hourly", "default", "report", std::time::Duration::from_secs(3600))
+        .await
+        .unwrap();
+
+    // Due immediately (next_run_at defaults to now()).
+    assert_eq!(q.run_due_schedules(10).await.unwrap(), 1);
+    // Not due again for an hour.
+    assert_eq!(q.run_due_schedules(10).await.unwrap(), 0);
+
+    let jobs: i64 = sqlx::query_scalar("SELECT count(*) FROM stampede_jobs WHERE task='report'")
+        .fetch_one(q.pool())
+        .await
+        .unwrap();
+    assert_eq!(jobs, 1);
+}
+
+#[tokio::test]
+async fn a_schedule_far_behind_catches_up_without_backfilling() {
+    // Nobody wants 72 backfilled runs after a three-day outage.
+    let q = q!();
+    q.upsert_schedule("behind", "default", "catchup", std::time::Duration::from_secs(3600))
+        .await
+        .unwrap();
+    sqlx::query("UPDATE stampede_schedules SET next_run_at = now() - interval '3 days'")
+        .execute(q.pool())
+        .await
+        .unwrap();
+
+    assert_eq!(q.run_due_schedules(10).await.unwrap(), 1, "should fire exactly once");
+
+    let future: bool =
+        sqlx::query_scalar("SELECT next_run_at > now() FROM stampede_schedules WHERE key='behind'")
+            .fetch_one(q.pool())
+            .await
+            .unwrap();
+    assert!(future, "schedule should have caught up to the present");
+}
+
+#[tokio::test]
+async fn concurrent_schedulers_do_not_double_fire() {
+    // No leader election: exclusion is the row lock inside
+    // stampede_run_due_schedules. Two nodes ticking at once must still produce
+    // exactly one job.
+    let q = q!();
+    q.upsert_schedule("shared", "default", "once", std::time::Duration::from_secs(3600))
+        .await
+        .unwrap();
+
+    let (a, b) = tokio::join!(q.run_due_schedules(10), q.run_due_schedules(10));
+    assert_eq!(a.unwrap() + b.unwrap(), 1, "the schedule fired more than once");
+}
+
+#[tokio::test]
+async fn paused_schedules_never_fire() {
+    let q = q!();
+    q.upsert_schedule("paused", "default", "nope", std::time::Duration::from_secs(1))
+        .await
+        .unwrap();
+    sqlx::query("UPDATE stampede_schedules SET paused = true, next_run_at = now() - interval '1 hour'")
+        .execute(q.pool())
+        .await
+        .unwrap();
+
+    assert_eq!(q.run_due_schedules(10).await.unwrap(), 0);
+}

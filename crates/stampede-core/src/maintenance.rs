@@ -17,6 +17,9 @@ use tracing::{debug, info, warn};
 /// with another subsystem would silently serialise unrelated work.
 const LOCK_REAPER: i64 = 0x5741_4D50_0000_0001; // "STAMP" + 1
 const LOCK_PRUNER: i64 = 0x5741_4D50_0000_0002;
+// NOTE: the scheduler needs NO advisory lock. Its exclusion is the row lock in
+// stampede_run_due_schedules (FOR UPDATE SKIP LOCKED) -- the schedule row IS
+// the election. Every node may run the tick safely and concurrently.
 
 #[derive(Debug, Clone)]
 pub struct MaintenanceConfig {
@@ -32,6 +35,8 @@ pub struct MaintenanceConfig {
     /// Rows per prune batch. River's shape: bounded batches, looped, never one
     /// unbounded DELETE (plans/13).
     pub prune_batch: i32,
+    /// How often to fire due schedules. Safe on every node concurrently.
+    pub schedule_interval: Duration,
 }
 
 impl Default for MaintenanceConfig {
@@ -42,6 +47,7 @@ impl Default for MaintenanceConfig {
             prune_interval: Duration::from_secs(60 * 60),
             retain_for: Duration::from_secs(14 * 24 * 60 * 60),
             prune_batch: 10_000,
+            schedule_interval: Duration::from_secs(5),
         }
     }
 }
@@ -63,9 +69,14 @@ impl Maintenance {
             self.config.clone(),
             shutdown.clone(),
         ));
+        let scheduler = tokio::spawn(schedule_loop(
+            self.queue.clone(),
+            self.config.clone(),
+            shutdown.clone(),
+        ));
         let pruner = tokio::spawn(prune_loop(self.queue.clone(), self.config, shutdown));
 
-        let _ = tokio::try_join!(reaper, pruner);
+        let _ = tokio::try_join!(reaper, scheduler, pruner);
         Ok(())
     }
 }
@@ -116,6 +127,28 @@ async fn prune_loop(queue: Queue, config: MaintenanceConfig, mut shutdown: watch
             Ok(Some(n)) => info!(pruned = n, "pruner: deleted finished jobs"),
             Ok(None) => debug!("pruner: another node is pruning"),
             Err(e) => warn!(error = %e, "pruner failed"),
+        }
+    }
+}
+
+/// Fire due recurring schedules.
+///
+/// No advisory lock and no leader election: `stampede_run_due_schedules` claims
+/// each schedule row with FOR UPDATE SKIP LOCKED, so concurrent nodes simply
+/// take different rows. That is the whole reason the schedule row carries
+/// `next_run_at` instead of the schedule living in config (plans/11).
+async fn schedule_loop(queue: Queue, config: MaintenanceConfig, mut shutdown: watch::Receiver<bool>) {
+    let mut ticker = tokio::time::interval(config.schedule_interval);
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {}
+            _ = shutdown.changed() => break,
+        }
+
+        match queue.run_due_schedules(100).await {
+            Ok(0) => {}
+            Ok(n) => info!(fired = n, "scheduler: enqueued jobs from schedules"),
+            Err(e) => warn!(error = %e, "scheduler failed"),
         }
     }
 }

@@ -74,3 +74,37 @@ fn backoff_stops_at_max_attempts() {
         "exhausted budget must return None so the job is discarded"
     );
 }
+
+#[test]
+fn circuit_open_retries_rather_than_discarding() {
+    // A sick downstream is not a defect in the job. If CircuitOpen were
+    // classified unrecoverable, one dependency outage would permanently discard
+    // every job that touched it.
+    let e = crate::Error::CircuitOpen("task:charge is open".into());
+    assert!(!e.is_unrecoverable());
+}
+
+#[test]
+fn defaults_enable_fairness_and_breakers() {
+    // Both are on by default. Rate limiting is a paid feature in Sidekiq
+    // Enterprise and Oban Pro; shipping it off by default would waste that.
+    let c = WorkerConfig::default();
+    assert!(c.tenant_limit.is_some());
+    assert!(c.breaker_failure_threshold.is_some());
+}
+
+// connect_lazy still needs a reactor even though it never connects.
+#[tokio::test]
+async fn breakers_are_per_task_not_global() {
+    // A failing `charge_card` must not open the circuit for `send_email`.
+    let w = Worker::new(
+        Queue::new(sqlx::PgPool::connect_lazy("postgres://invalid/db").unwrap()),
+        WorkerConfig::default(),
+    );
+    let a = w.breaker_for("charge_card", 5);
+    let b = w.breaker_for("send_email", 5);
+    let a_again = w.breaker_for("charge_card", 5);
+
+    assert!(!std::sync::Arc::ptr_eq(&a, &b), "tasks share a breaker");
+    assert!(std::sync::Arc::ptr_eq(&a, &a_again), "same task got two breakers");
+}

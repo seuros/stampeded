@@ -21,6 +21,11 @@ pub enum Error {
 
     #[error("serialization: {0}")]
     Serde(#[from] serde_json::Error),
+
+    /// The task's circuit is open — the downstream is failing and we are not
+    /// adding to it. Not the job's fault, so it retries rather than discarding.
+    #[error("circuit open: {0}")]
+    CircuitOpen(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

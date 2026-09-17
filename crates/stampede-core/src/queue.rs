@@ -217,6 +217,45 @@ impl Queue {
         Ok(())
     }
 
+    /// Fire any due recurring schedules. Returns how many jobs were enqueued.
+    ///
+    /// Safe to call concurrently from every node: the function claims schedule
+    /// rows with FOR UPDATE SKIP LOCKED, so there is nothing to elect.
+    pub async fn run_due_schedules(&self, limit: i32) -> Result<u64> {
+        let rows: Vec<(String, Option<Uuid>, String)> = sqlx::query_as(
+            "SELECT out_cron_key, out_job_id, out_token FROM stampede_run_due_schedules($1)",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.len() as u64)
+    }
+
+    /// Register or update a recurring schedule.
+    pub async fn upsert_schedule(
+        &self,
+        key: &str,
+        queue: &str,
+        task: &str,
+        every: std::time::Duration,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO stampede_schedules (key, queue, task, interval_secs) \
+             VALUES ($1, $2, $3, $4) \
+             ON CONFLICT (key) DO UPDATE \
+                SET queue = EXCLUDED.queue, task = EXCLUDED.task, \
+                    interval_secs = EXCLUDED.interval_secs, updated_at = now()",
+        )
+        .bind(key)
+        .bind(queue)
+        .bind(task)
+        .bind(every.as_secs() as i64)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Queue depth by state — the dashboard and MCP `queue_status` tool.
     pub async fn depth(&self, queue: &str) -> Result<Vec<(String, i64)>> {
         let rows = sqlx::query_as::<_, (String, i64)>(

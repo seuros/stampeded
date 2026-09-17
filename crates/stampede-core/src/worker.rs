@@ -18,8 +18,10 @@
 //!    would fork it.
 
 use crate::error::{Error, Result};
+use crate::fairness::{Fairness, TenantLimit};
 use crate::job::{FailureKind, Job};
 use crate::queue::Queue;
+use breaker_machines::async_circuit::AsyncCircuitBreaker;
 use chrono_machines::{BackoffPolicy, BackoffStrategy, ExponentialBackoff};
 use std::collections::HashMap;
 use std::future::Future;
@@ -55,6 +57,11 @@ pub struct WorkerConfig {
     /// `dead_after` or healthy workers get reaped mid-job.
     pub heartbeat_interval: Duration,
     pub max_concurrency: usize,
+    /// Per-tenant admission rate. `None` disables fairness entirely.
+    pub tenant_limit: Option<TenantLimit>,
+    /// Trip a task's circuit after this many consecutive failures, so a failing
+    /// downstream is not hammered by every retrying job. `None` disables it.
+    pub breaker_failure_threshold: Option<usize>,
 }
 
 impl Default for WorkerConfig {
@@ -66,6 +73,8 @@ impl Default for WorkerConfig {
             job_timeout: Duration::from_secs(15 * 60),
             heartbeat_interval: Duration::from_secs(30),
             max_concurrency: 10,
+            tenant_limit: Some(TenantLimit::default()),
+            breaker_failure_threshold: Some(10),
         }
     }
 }
@@ -102,16 +111,42 @@ pub struct Worker {
     config: WorkerConfig,
     handlers: HashMap<String, Handler>,
     backoff: BackoffPolicy,
+    fairness: Option<Arc<Fairness>>,
+    /// One breaker per task name. A failing `charge_card` must not open the
+    /// circuit for `send_email`.
+    breakers: Arc<std::sync::Mutex<HashMap<String, Arc<AsyncCircuitBreaker>>>>,
 }
 
 impl Worker {
     pub fn new(queue: Queue, config: WorkerConfig) -> Self {
+        let fairness = config.tenant_limit.map(|l| Arc::new(Fairness::new(l)));
         Self {
             queue,
             config,
             handlers: HashMap::new(),
             backoff: default_backoff(),
+            fairness,
+            breakers: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Get or create the circuit breaker for a task.
+    fn breaker_for(&self, task: &str, threshold: usize) -> Arc<AsyncCircuitBreaker> {
+        let mut map = self.breakers.lock().expect("breaker map poisoned");
+        map.entry(task.to_string())
+            .or_insert_with(|| {
+                Arc::new(
+                    AsyncCircuitBreaker::builder(format!("task:{task}"))
+                        .failure_threshold(threshold)
+                        // Jittered recovery: without it, every worker probes the
+                        // recovering downstream at the same instant -- the same
+                        // herd problem the retry backoff exists to avoid.
+                        .jitter_factor(1.0)
+                        .half_open_timeout_secs(30.0)
+                        .build_async(),
+                )
+            })
+            .clone()
     }
 
     /// Override the retry policy. Defaults to exponential with full jitter.
@@ -196,15 +231,47 @@ impl Worker {
             };
 
             for job in jobs {
+                // Fairness is applied AFTER claiming, not before. Claiming is
+                // ordered by priority and age, so a tenant's flood is
+                // legitimately first in line — the only place to intervene is
+                // at execution. A throttled job is released back to the queue
+                // with a short delay rather than held, so another worker (or
+                // another tenant's turn) can take it.
+                if let Some(f) = &self.fairness
+                    && let crate::fairness::Admission::Throttled { retry_after_secs } =
+                        f.admit(job.tenant_id.as_deref())
+                    {
+                        let delay = Duration::from_secs_f64(retry_after_secs.clamp(0.05, 60.0));
+                        debug!(
+                            job_id = %job.id, tenant = ?job.tenant_id,
+                            ?delay, "tenant throttled; releasing job"
+                        );
+                        let _ = self
+                            .queue
+                            .fail(
+                                &job,
+                                worker_id,
+                                FailureKind::Interrupted,
+                                "throttled: tenant rate limit",
+                                Some(delay),
+                            )
+                            .await;
+                        continue;
+                    }
+
                 let permit = sem.clone().acquire_owned().await.expect("semaphore closed");
                 let queue = self.queue.clone();
                 let handler = self.handlers.get(&job.task).cloned();
                 let timeout = self.config.job_timeout;
                 let backoff = self.backoff;
+                let breaker = self
+                    .config
+                    .breaker_failure_threshold
+                    .map(|t| self.breaker_for(&job.task, t));
 
                 tokio::spawn(async move {
                     let _permit = permit;
-                    execute(queue, job, worker_id, handler, timeout, backoff).await;
+                    execute(queue, job, worker_id, handler, timeout, backoff, breaker).await;
                 });
             }
         }
@@ -228,6 +295,7 @@ async fn execute(
     handler: Option<Handler>,
     timeout: Duration,
     backoff: BackoffPolicy,
+    breaker: Option<Arc<AsyncCircuitBreaker>>,
 ) {
     let job_id = job.id;
     let task = job.task.clone();
@@ -235,12 +303,34 @@ async fn execute(
     let outcome: std::result::Result<(), Error> = match handler {
         None => Err(Error::UnknownTask(task.clone())),
         Some(h) => {
-            // tokio::select over a sleep, underway's model (plans/15). This
-            // CANCELS the future; it cannot kill a blocking thread. A handler
-            // doing sync work must use spawn_blocking itself.
-            tokio::select! {
-                res = h(job.clone()) => res.map_err(Error::Handler),
-                _ = tokio::time::sleep(timeout) => Err(Error::Timeout(timeout)),
+            let run = || async {
+                // tokio::select over a sleep, underway's model (plans/15). This
+                // CANCELS the future; it cannot kill a blocking thread. A
+                // handler doing sync work must use spawn_blocking itself.
+                tokio::select! {
+                    res = h(job.clone()) => res.map_err(Error::Handler),
+                    _ = tokio::time::sleep(timeout) => Err(Error::Timeout(timeout)),
+                }
+            };
+
+            match breaker {
+                None => run().await,
+                // Per-task circuit breaking: when a downstream is failing,
+                // retrying 1000 jobs against it makes the outage worse. An open
+                // circuit fails fast WITHOUT calling the handler, and the job
+                // goes back to retryable rather than being discarded — the
+                // downstream being sick is not the job's fault.
+                Some(b) => match b.call(run).await {
+                    Ok(()) => Ok(()),
+                    // The handler ran and failed: report the real error, so the
+                    // failure taxonomy and the retry budget stay accurate.
+                    Err(breaker_machines::CircuitError::Execution(e)) => Err(e),
+                    // The handler never ran. Distinguished deliberately -- this
+                    // is a downstream outage, not a defect in this job, and
+                    // conflating them would make a sick dependency look like a
+                    // thousand broken jobs in failure_summary.
+                    Err(other) => Err(Error::CircuitOpen(other.to_string())),
+                },
             }
         }
     };
@@ -275,6 +365,11 @@ async fn report_failure(
 ) -> Result<()> {
     let kind = match &err {
         Error::Timeout(_) => FailureKind::Timeout,
+        // The downstream is sick, not the job. Recorded as `interrupted` for
+        // the same reason a dead worker is: the job never got a fair run, so
+        // treating it as a defect would burn the budget on someone else's
+        // outage.
+        Error::CircuitOpen(_) => FailureKind::Interrupted,
         e if e.is_unrecoverable() => FailureKind::Unrecoverable,
         _ => FailureKind::Raised,
     };

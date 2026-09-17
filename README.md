@@ -90,13 +90,50 @@ role — so a read-only session never sees them in `tools/list` at all. Being
 invisible beats being refused: a model cannot be argued into calling a tool it
 was never shown.
 
+## Recurring schedules
+
+The schedule row *is* the due row. `next_run_at` lives on the row and is claimed
+with `FOR UPDATE SKIP LOCKED`, so **there is no leader election for cron** — the
+row lock is the election, and every node can tick concurrently.
+
+That model also gives, for free: a missed occurrence runs **late, once** (the
+overdue row is still there); **no drift**, because the next time is computed
+from the previous target rather than from `now()`; and schedules that are
+queryable and mutable at runtime, which Oban, River, good_job and procrastinate
+cannot offer because their schedules live in config.
+
+**DST is a per-schedule column, not an algorithm.** Every surveyed
+implementation keys occurrences on a UTC instant, so a 02:30 job runs *twice* on
+a fall-back day. Set `dst_policy = 'wall_clock'` and the duplicated hour
+collapses into one token, so it runs once.
+
+A separate occurrence ledger is the idempotency backstop. It is deliberately its
+own narrow table: good_job and solid_queue put the cron key on the jobs table
+and then had to guarantee those rows are never pruned, which couples cron
+correctness to your retention horizon.
+
+## Fairness and circuit breaking
+
+Both on by default.
+
+**Per-tenant GCRA admission** (`throttle-machines`) so one tenant enqueueing
+100k jobs cannot starve the rest. Applied *after* claiming, because claim order
+is by priority and age — the flood is legitimately first in line, so execution
+is the only honest place to intervene. Rate limiting is a paid feature in both
+Sidekiq Enterprise and Oban Pro.
+
+**Per-task circuit breakers** (`breaker-machines`) so a failing downstream is
+not hammered by every retrying job. An open circuit fails fast *without* calling
+the handler, and the job is recorded `interrupted` rather than `raised` — a sick
+dependency is not a defect in the job, and conflating them would make one outage
+look like a thousand broken jobs.
+
 ## Not done yet
 
-- Scheduled and recurring jobs (`plans/11` has the design; `pg_cron` was
-  evaluated and rejected)
-- Tenant fairness via `throttle-machines` (the `tenant_id` column exists)
-- Batched `UNWIND` graph writes — deliberately deferred, see `plans/14`
-- `breaker-machines` around handler calls to failing downstreams
+- Cron *expressions* — schedules are interval-based today (the parser belongs in
+  Rust; it will set `next_run_at` the same way)
+- MCP tools for managing schedules
+- Batched `UNWIND` writes — deliberately deferred, see `plans/14`
 
 ## Requirements
 

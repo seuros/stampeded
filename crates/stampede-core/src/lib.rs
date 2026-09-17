@@ -8,12 +8,14 @@
 //! See `plans/` for why each decision was made, and what was measured.
 
 pub mod error;
+pub mod fairness;
 pub mod job;
 pub mod maintenance;
 pub mod queue;
 pub mod worker;
 
 pub use error::{Error, Result};
+pub use fairness::{Admission, Fairness, TenantLimit};
 pub use maintenance::{Maintenance, MaintenanceConfig};
 pub use job::{FailureKind, Job, JobState, NewJob};
 pub use queue::{Queue, Transition};
@@ -24,11 +26,13 @@ pub use worker::{Worker, WorkerConfig};
 pub mod schema {
     pub const INITIAL: &str = include_str!("../../../schema/001_initial.sql");
     pub const OPERATIONS: &str = include_str!("../../../schema/002_operations.sql");
+    pub const SCHEDULES: &str = include_str!("../../../schema/003_schedules.sql");
 
     /// Apply both files in order.
     pub async fn migrate(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
         sqlx::raw_sql(INITIAL).execute(pool).await?;
         sqlx::raw_sql(OPERATIONS).execute(pool).await?;
+        sqlx::raw_sql(SCHEDULES).execute(pool).await?;
         Ok(())
     }
 }
