@@ -1,0 +1,20 @@
+[package]
+name = "stampede-daemon"
+description = "Stampede daemon: worker, reaper, pruner in one binary"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "stampede"
+path = "src/main.rs"
+
+[dependencies]
+stampede-core = { path = "../stampede-core" }
+tokio.workspace = true
+sqlx.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

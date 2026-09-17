@@ -24,3 +24,4 @@ throttle-machines.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

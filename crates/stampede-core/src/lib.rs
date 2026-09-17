@@ -9,10 +9,12 @@
 
 pub mod error;
 pub mod job;
+pub mod maintenance;
 pub mod queue;
 pub mod worker;
 
 pub use error::{Error, Result};
+pub use maintenance::{Maintenance, MaintenanceConfig};
 pub use job::{FailureKind, Job, JobState, NewJob};
 pub use queue::{Queue, Transition};
 pub use worker::{Worker, WorkerConfig};
