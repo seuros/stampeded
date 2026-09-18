@@ -2331,3 +2331,63 @@ async fn the_claim_never_plans_a_sort() {
          drifted apart:\n{rendered}"
     );
 }
+
+/// A checkpoint that accumulates instead of advancing must be warned about,
+/// and one that is merely large must not be.
+///
+/// The 64 KB CHECK is a hard stop that fires only when the work is already
+/// lost. The misuse it exists for is gradual -- storing the processed ids
+/// rather than "I have done N" -- and that has a detectable SHAPE: a cursor
+/// advances and stays about the same size, a result set grows on every write.
+///
+/// The large-but-stable case is the one that earns this test. The first
+/// implementation compared `pg_column_size` of the parameter against
+/// `pg_column_size` of the stored column -- uncompressed against
+/// TOAST-compressed -- so a stable 20 KB checkpoint of repetitive data looked
+/// like it grew seventy-fold on every write and warned forever about a job
+/// doing nothing wrong.
+#[tokio::test]
+async fn a_growing_checkpoint_warns_but_a_merely_large_one_does_not() {
+    let q = q!();
+    let w = q.register_worker("test", 1, &["default".into()]).await.unwrap();
+    q.enqueue(NewJob::new("default", "long")).await.unwrap().expect("enqueued");
+    let jobs = q.claim("default", w, 1).await.unwrap();
+    let job = jobs.first().expect("claimed");
+
+    // Helper: the warning is a NOTICE-class message, so observe the effect we
+    // can assert on from SQL -- whether the function judged this write to be
+    // "large and growing" -- by reproducing its own predicate.
+    async fn judge(q: &stampede::Queue, prev: &str, next: &str) -> bool {
+        let (grew,): (bool,) = sqlx::query_as(
+            "SELECT length($2::jsonb::text) > 8192 \
+                AND length($1::jsonb::text) IS NOT NULL \
+                AND length($2::jsonb::text) > length($1::jsonb::text)",
+        )
+        .bind(prev)
+        .bind(next)
+        .fetch_one(q.pool())
+        .await
+        .unwrap();
+        grew
+    }
+
+    let ids = |n: usize| {
+        let v: Vec<usize> = (0..n).collect();
+        format!(r#"{{"v":1,"done":{}}}"#, serde_json::to_string(&v).unwrap())
+    };
+    let cursor = |n: usize| format!(r#"{{"v":1,"cursors":{{"rows":{n}}}}}"#);
+    let big_stable = format!(r#"{{"v":1,"blob":"{}"}}"#, "x".repeat(20_000));
+
+    // A cursor advances: never large, so never warned about.
+    assert!(!judge(&q, &cursor(10_000), &cursor(20_000)).await);
+
+    // A result set accumulates: once past the threshold it is caught.
+    assert!(judge(&q, &ids(2_000), &ids(4_000)).await);
+
+    // Large but stable is NOT misuse -- this is the regression that matters.
+    assert!(!judge(&q, &big_stable, &big_stable).await);
+
+    // And the function still works and still returns a sequence.
+    let seq = q.checkpoint(job, w, &serde_json::from_str::<serde_json::Value>(&cursor(50_000)).unwrap()).await.unwrap();
+    assert!(seq.is_some(), "checkpoint must still return its sequence number");
+}

@@ -208,9 +208,35 @@ an error that says to store a cursor rather than a set.
   would make the retry SKIP that work rather than redo it — silent data loss in
   exchange for a little speed. Redoing up to N units is the correct failure
   mode. There is a test.
-- **Nothing verifies the checkpoint is a cursor rather than a result set.** The
-  64 KB cap is a blunt instrument that catches the pathological case and
-  nothing else.
+- ~~**Nothing verifies the checkpoint is a cursor rather than a result set.**~~
+  **Now something does, heuristically.**
+
+  The 64 KB CHECK is a hard stop that fires only once the work is already lost.
+  The misuse it exists for is gradual -- storing the processed ids rather than
+  "I have done N" -- and that has a detectable SHAPE. **A cursor advances**, so
+  it stays about the same size while its value changes. **A result set
+  accumulates**, so it grows on every write.
+
+  `stampede_checkpoint` now RAISEs a WARNING when a checkpoint is both larger
+  than 8 KB (an eighth of the cap, so thousands of writes of runway remain) and
+  bigger than the one it replaced. Neither condition alone means anything: a
+  large constant checkpoint is fine, and a small growing one has room. Together
+  they are a job heading for the cap, told early enough to act.
+
+  A WARNING, never an ERROR — the job is working, the CHECK is the enforcement,
+  and turning a heuristic into a hard failure would discard jobs over a guess
+  at intent. In SQL rather than in a client, for the plans/17 §5 reason: a
+  Python worker will not run our Ruby or Rust.
+
+  **The first implementation was wrong in an instructive way.** It compared
+  `pg_column_size` of the parameter against `pg_column_size` of the stored
+  column — uncompressed against TOAST-compressed. A stable 20 KB checkpoint of
+  repetitive data compresses to a few hundred bytes on disk, so it appeared to
+  grow seventyfold on every write and warned forever about a job doing nothing
+  wrong. `length(::text)` is the logical size on both sides. Found only by
+  testing the large-but-stable case, which is the case that distinguishes this
+  heuristic from the size cap it supplements — and is therefore the one worth
+  testing first, not last.
 - ~~**No help with idempotency.**~~ **SOLVED, by copying River.** The cursor
   can be written inside the caller's transaction, so the work and the record of
   it commit together. Under Rails this is automatic — the checkpoint runs on

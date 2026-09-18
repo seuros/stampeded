@@ -346,13 +346,49 @@ $$;
 -- is still discarded at max_attempts. Progress buys tolerance of
 -- INFRASTRUCTURE failure and buys nothing against a job that is simply broken.
 -- ---------------------------------------------------------------------------
+-- Warn when a checkpoint looks like a result set rather than a cursor.
+--
+-- The 64 KB CHECK is a hard stop that catches only the pathological case, and
+-- it catches it by failing the job -- at which point the work is already lost.
+-- The misuse it exists for is gradual: storing the 100,000 processed ids
+-- instead of "I have done 100,000". That has a SHAPE, and the shape is
+-- detectable. A cursor ADVANCES, so it stays about the same size while its
+-- value changes. A result set ACCUMULATES, so it grows on every write.
+--
+-- So: warn when the checkpoint is both large and still growing. Neither
+-- condition alone means anything -- a big constant checkpoint is fine, and a
+-- small growing one has room -- but together they are a job heading for the
+-- cap, and the warning arrives with thousands of writes left to act on.
+--
+-- A WARNING, never an ERROR. The job is working, and the 64 KB CHECK is
+-- already the enforcement; turning a heuristic into a hard failure would
+-- discard jobs over a guess about intent.
 CREATE FUNCTION stampede_checkpoint(
     p_queue     text,
     p_id        uuid,
     p_worker_id uuid,
     p_state     jsonb
 ) RETURNS integer
-LANGUAGE sql AS $$
+LANGUAGE plpgsql AS $$
+DECLARE
+    -- An eighth of the 64 KB cap: enough runway that a job growing steadily
+    -- has thousands of writes left when it is told.
+    c_warn_bytes constant int := 8192;
+    v_seq        integer;
+    v_old_size   integer;
+    -- length(::text), NOT pg_column_size.
+    --
+    -- pg_column_size reports the STORED size, which for a stored jsonb is
+    -- TOAST-compressed and for a parameter is not -- so comparing the two
+    -- compares compressed against uncompressed. A stable 20 KB checkpoint of
+    -- repetitive data compresses to a few hundred bytes on disk and then looks
+    -- like it grew 70x on every single write, warning forever about a job
+    -- doing nothing wrong. Found by testing the large-but-stable case, which
+    -- is the one that distinguishes this heuristic from the size cap.
+    --
+    -- The text length is the logical size on both sides.
+    v_new_size   integer := length(p_state::text);
+BEGIN
     UPDATE stampede_jobs
        SET checkpoint     = p_state,
            checkpoint_at  = now(),
@@ -363,7 +399,23 @@ LANGUAGE sql AS $$
        AND id    = p_id
        AND claimed_by = p_worker_id
        AND state = 'executing'
-    RETURNING checkpoint_seq;
+    RETURNING checkpoint_seq, length(OLD.checkpoint::text)
+         INTO v_seq, v_old_size;
+
+    IF v_seq IS NOT NULL
+       AND v_new_size > c_warn_bytes
+       AND v_old_size IS NOT NULL
+       AND v_new_size > v_old_size
+    THEN
+        RAISE WARNING
+            'checkpoint for job % is % bytes and growing (was %); the 64 KB cap '
+            'will discard this job if it continues. Store a cursor ("I have done '
+            'N") rather than the set of what was done.',
+            p_id, v_new_size, v_old_size;
+    END IF;
+
+    RETURN v_seq;
+END;
 $$;
 
 -- ---------------------------------------------------------------------------
