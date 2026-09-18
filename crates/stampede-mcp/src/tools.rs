@@ -23,6 +23,12 @@ type JobRow = (
     Option<String>,      // last_error
     Vec<String>,         // attempted_by
     serde_json::Value,   // args
+    i16,                 // interruptions
+    i16,                 // max_interruptions
+    Option<String>,      // destination
+    Option<String>,      // dead_letter_queue
+    Option<String>,      // source_queue
+    serde_json::Value,   // errors
 );
 
 impl StampedeServer {
@@ -65,7 +71,8 @@ impl StampedeServer {
 
         let row: Option<JobRow> = sqlx::query_as(
                 "SELECT task, state::text, attempt, max_attempts, failure_kind::text, \
-                        last_error, attempted_by, args \
+                        last_error, attempted_by, args, interruptions, max_interruptions, \
+                        destination, dead_letter_queue, source_queue, errors \
                    FROM stampede_jobs WHERE queue = $1 AND id = $2",
             )
             .bind(&params.0.queue)
@@ -74,7 +81,23 @@ impl StampedeServer {
             .await
             .map_err(|e| ToolError::Internal(format!("query failed: {e}")))?;
 
-        let Some((task, state, attempt, max_attempts, kind, error, workers, args)) = row else {
+        let Some((
+            task,
+            state,
+            attempt,
+            max_attempts,
+            kind,
+            error,
+            workers,
+            args,
+            interruptions,
+            max_interruptions,
+            destination,
+            dlq,
+            source_queue,
+            errors,
+        )) = row
+        else {
             return Ok(ToolOutput::text(format!(
                 "no job {id} in queue {:?}",
                 params.0.queue
@@ -85,11 +108,35 @@ impl StampedeServer {
             "job {id}\n  task        {task}\n  state       {state}\n  \
              attempt     {attempt} of {max_attempts}\n"
         );
+        // Two budgets, and the tighter one usually decides. Showing only
+        // attempts would make a job discarded after two claims look like a
+        // mystery.
+        if interruptions > 0 {
+            out.push_str(&format!(
+                "  interrupts  {interruptions} of {max_interruptions} (worker deaths)\n"
+            ));
+        }
+        if let Some(d) = destination {
+            out.push_str(&format!("  destination {d}\n"));
+        }
+        if let Some(src) = source_queue {
+            out.push_str(&format!("  dead letter from queue {src}\n"));
+        } else if let Some(q) = dlq {
+            out.push_str(&format!("  on failure  dead-letters to {q}\n"));
+        }
         if let Some(k) = kind {
-            // Spell out the distinction most implementations conflate.
+            // Spell out the distinctions most implementations conflate. This is
+            // the whole reason the taxonomy exists: "it failed" is not
+            // actionable, "our breaker refused to run it" is.
             let gloss = match k.as_str() {
-                "interrupted" => " (the worker died; not the job's fault)",
-                "timeout" => " (exceeded its execution timeout)",
+                "worker_exited" => " (the worker process died; not the job's fault)",
+                "worker_missing" => " (the worker vanished; not the job's fault)",
+                "heartbeat_lost" => " (stopped reporting progress; not the job's fault)",
+                "timed_out" => " (exceeded its time budget)",
+                "breaker_open" => " (WE declined to run it: downstream circuit open; \
+                                   no attempt was charged)",
+                "throttled" => " (WE declined to run it: tenant over its rate limit; \
+                                no attempt was charged)",
                 "unrecoverable" => " (will never succeed; retries skipped)",
                 _ => "",
             };
@@ -100,6 +147,27 @@ impl StampedeServer {
         }
         if !workers.is_empty() {
             out.push_str(&format!("  ran on      {}\n", workers.join(", ")));
+        }
+
+        // The structured history, which is what makes a flaky job
+        // distinguishable from a consistently broken one at a glance.
+        if let Some(history) = errors.as_array().filter(|h| h.len() > 1) {
+            out.push_str("  history\n");
+            for e in history {
+                out.push_str(&format!(
+                    "    attempt {} {}: {}{}\n",
+                    e["attempt"].as_i64().unwrap_or(0),
+                    e["kind"].as_str().unwrap_or("?"),
+                    e["message"].as_str().unwrap_or(""),
+                    match e["exit_status"].as_i64() {
+                        // The single highest-signal artefact in the survey, and
+                        // thrown away everywhere else.
+                        Some(137) => " [exit 137 = OOM]".to_string(),
+                        Some(c) => format!(" [exit {c}]"),
+                        None => String::new(),
+                    }
+                ));
+            }
         }
         out.push_str(&format!("  args        {args}\n"));
         Ok(ToolOutput::text(out))
@@ -155,13 +223,20 @@ impl StampedeServer {
         read_only = true
     )]
     async fn failure_summary(&self, _ctx: Ctx<'_>, params: Parameters<QueueArgs>) -> ToolResult {
-        // Group on a truncated prefix: full error text usually carries an id or
-        // a timestamp that would make every row its own "cluster".
-        let rows: Vec<(Option<String>, Option<String>, i64)> = sqlx::query_as(
-            "SELECT failure_kind::text, left(last_error, 80), count(*) \
+        // Groups on the ERROR FINGERPRINT, not on a text prefix. A prefix
+        // clusters "timed out after 30012ms" and "timed out after 29998ms"
+        // separately, which is the same incident reported as two -- and if the
+        // varying part comes first, as it does with a host or an id, a prefix
+        // gives every single row its own "cluster" and the tool is useless
+        // precisely when there is an incident. The fingerprint strips UUIDs,
+        // hex and numbers before hashing, and it is indexed, so this is an
+        // index scan rather than a seq scan over every error string.
+        let rows: Vec<(Option<String>, Option<String>, Option<String>, i64)> = sqlx::query_as(
+            "SELECT failure_kind::text, min(left(last_error, 80)), destination, count(*) \
                FROM stampede_jobs \
-              WHERE queue = $1 AND last_error IS NOT NULL \
-              GROUP BY 1, 2 ORDER BY 3 DESC LIMIT 20",
+              WHERE queue = $1 AND error_fingerprint IS NOT NULL \
+              GROUP BY failure_kind, error_fingerprint, destination \
+              ORDER BY 4 DESC LIMIT 20",
         )
         .bind(&params.0.queue)
         .fetch_all(self.queue().pool())
@@ -176,16 +251,22 @@ impl StampedeServer {
         }
 
         let mut out = String::from("failures by signature (most common first)\n");
-        for (kind, err, n) in rows {
+        for (kind, err, dest, n) in rows {
             out.push_str(&format!(
-                "  {n:>5}  {:<14} {}\n",
+                "  {n:>5}  {:<15} {}{}\n",
                 kind.unwrap_or_default(),
-                err.unwrap_or_default()
+                err.unwrap_or_default(),
+                dest.map(|d| format!("  -> {d}")).unwrap_or_default()
             ));
         }
         out.push_str(
-            "\nfailure_kind 'interrupted' means the worker died mid-job, not that \
-             the job raised — those are usually an infrastructure problem, not a bug.\n",
+            "\nThe kind is the diagnosis, so read it first:\n\
+             \x20 worker_exited / worker_missing / heartbeat_lost — the WORKER died, not the \
+             job. Usually infrastructure: OOM, a deploy, a node going away.\n\
+             \x20 breaker_open / throttled — WE declined to run these. A downstream is sick or \
+             a tenant is over its limit. No attempt was charged, so they will run once the \
+             cause clears; nothing needs retrying by hand.\n\
+             \x20 raised / timed_out — the job itself. These are the ones that are a bug.\n",
         );
         Ok(ToolOutput::text(out))
     }
@@ -289,6 +370,68 @@ impl StampedeServer {
                  not stop the work."
             )
         }))
+    }
+
+    /// Whether the queue's own machinery is healthy.
+    #[mcp_tool(
+        name = "system_health",
+        description = "Autovacuum standing, sparse indexes and queue backlog age — the slow degradations that never raise an error",
+        read_only = true
+    )]
+    async fn system_health(&self, _ctx: Ctx<'_>, _params: Parameters<EmptyArgs>) -> ToolResult {
+        let mut out = String::new();
+
+        // The death spiral, named. A queue table is the pathological
+        // autovacuum case, and when it falls behind nothing errors -- things
+        // just get slower, which presents as "the queue is mysteriously slow"
+        // and sends people looking at their job code.
+        match self.queue().vacuum_health().await {
+            Ok(rows) => {
+                let behind: Vec<_> = rows.iter().filter(|r| r.needs_vacuum).collect();
+                if behind.is_empty() {
+                    out.push_str("autovacuum: keeping up\n");
+                } else {
+                    out.push_str("autovacuum: BEHIND\n");
+                    for r in behind {
+                        out.push_str(&format!(
+                            "  {} — {} dead tuples vs a threshold of {:.0}; last ran {}\n",
+                            r.relname,
+                            r.dead_tuples,
+                            r.autovac_threshold,
+                            r.last_autovacuum
+                                .map(|t| t.to_string())
+                                .unwrap_or_else(|| "never".into())
+                        ));
+                    }
+                    out.push_str(
+                        "  Claim latency drifts up until this catches up. Usually means \
+                         autovacuum_vacuum_cost_limit is too low for the write rate.\n",
+                    );
+                }
+            }
+            Err(e) => out.push_str(&format!("autovacuum: unavailable ({e})\n")),
+        }
+
+        match self.queue().sparse_indexes().await {
+            Ok(idx) if idx.is_empty() => out.push_str("indexes: dense\n"),
+            Ok(idx) => out.push_str(&format!("indexes: sparse, worth rebuilding — {}\n", idx.join(", "))),
+            Err(e) => out.push_str(&format!("indexes: unavailable ({e})\n")),
+        }
+
+        // Backlog AGE, not depth. Depth says how much work there is; this says
+        // whether it is being done.
+        match self.queue().oldest_available_age().await {
+            Ok(ages) if ages.is_empty() => out.push_str("backlog: nothing waiting\n"),
+            Ok(ages) => {
+                out.push_str("backlog age (oldest waiting job per queue)\n");
+                for (q, secs) in ages {
+                    out.push_str(&format!("  {q:<20} {secs:.0}s\n"));
+                }
+            }
+            Err(e) => out.push_str(&format!("backlog: unavailable ({e})\n")),
+        }
+
+        Ok(ToolOutput::text(out))
     }
 
     /// Every schedule and when it next fires.
@@ -469,6 +612,11 @@ pub fn mount(
         .with_tool(
             StampedeServer::schedule_list_tool_info(),
             StampedeServer::schedule_list_handler,
+            None,
+        )
+        .with_tool(
+            StampedeServer::system_health_tool_info(),
+            StampedeServer::system_health_handler,
             None,
         )
         .with_tool(
