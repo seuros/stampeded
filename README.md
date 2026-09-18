@@ -539,6 +539,23 @@ every second.
 - No TLS on the HTTP edge and no auth on the enqueue API — put it behind
   something that has both. The *dashboard* is authenticated and off by default.
 
+## Retention
+
+Completed jobs are pruned after an hour, discarded ones after seven days.
+
+A completed job costs **~330 bytes** (heap plus every index), so an hour at a
+sustained 100 jobs/s is about 120 MB. What it does *not* cost is claim
+latency: the claim index is partial, so finished jobs are not in it at all.
+Keeping them longer makes the table bigger and gives autovacuum more to do —
+it does not make claiming slower, which is usually the fear behind shortening
+retention.
+
+| jobs/sec | 1 hour | 24 hours | 7 days |
+|---|---|---|---|
+| 10 | 12 MB | 285 MB | 2.0 GB |
+| 100 | 119 MB | 2.9 GB | 20 GB |
+| 1,000 | 1.2 GB | 29 GB | 200 GB |
+
 ## What this does not do
 
 **Every worker needs database credentials.** The tables are the protocol: a

@@ -698,11 +698,36 @@ original analysis did not anticipate.
   "tuple to be locked was already moved to another partition" race.
 - ~~**Is `fillfactor = 85` cargo?**~~ **MEASURED, and no — it is the single
   highest-leverage storage parameter we set.** See §12.
-- **Retention default.** 1 hour for completed and 7 days for discarded, both
-  triangulated from Oban's 60 s and River's 24 h rather than measured. The
-  console can now show what it can see, so the introspection window is at least
-  observable — but nobody has run it long enough to say whether an hour is
-  right.
+- ~~**Retention default.**~~ **The COST is now measured, which is the part that
+  was actually missing.** Nobody can tell you the right introspection window
+  for your system — that is a product question. What was missing was the price,
+  and without it "1 hour" was a number copied from Oban rather than a choice.
+
+  **330 bytes per completed job**, measured: heap plus every index, with
+  realistic args (`{"user_id":…,"template":"welcome","locale":"en"}`) over
+  200,000 rows.
+
+  | jobs/sec | 1 min | 1 hour | 24 hours | 7 days |
+  |---|---|---|---|---|
+  | 1 | 20 kB | 1.2 MB | 28 MB | 200 MB |
+  | 10 | 198 kB | 12 MB | 285 MB | 2.0 GB |
+  | 100 | 2 MB | 119 MB | 2.9 GB | 20 GB |
+  | 1,000 | 20 MB | 1.2 GB | 29 GB | 200 GB |
+
+  **The important finding is what retention does NOT cost.** The claim index is
+  partial — `WHERE state IN ('available','retryable')` — so a completed job is
+  entirely absent from it. At 200,000 completed rows the claim index does not
+  appear in the table's three largest indexes at all; the space is heap and
+  primary key. So a longer window buys introspection at the price of *storage
+  and vacuum*, and **not** at the price of claim latency, which is the thing
+  everyone actually fears when they shorten retention.
+
+  That makes the default defensible rather than borrowed: **one hour** costs
+  about 120 MB at a sustained 100 jobs/s, which is nothing, and it is long
+  enough to still be there when someone asks "did that run?" after lunch. Oban
+  ships 60 seconds because Oban keeps completed jobs in the same index it
+  claims from; that constraint is not ours, and copying its number without its
+  reason would have been the mistake.
 - ~~**`uuidv7` and btree deduplication.**~~ **MEASURED. The premise is wrong:
   `id` is not a free tiebreaker, and the UUID version is irrelevant.** See §13.
 - ~~**`pg_cron` for the sweep?**~~ **No, decided.** It would split the
