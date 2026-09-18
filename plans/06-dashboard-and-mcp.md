@@ -70,6 +70,18 @@ Oban cannot show without their paid tiers.
   The token rides on the query string because `EventSource` cannot set headers,
   which puts it in server logs and browser history; that cost is written into
   the module docs rather than glossed.
+- **Panels are shared between clients, except the ones carrying a token.**
+  Each connected client was re-running every query every second for
+  byte-identical output, so ten operators meant ten times the load — and a
+  dashboard gets opened by several people at once precisely during an incident.
+  The four expensive panels (destination health, failure clustering, schedules,
+  vacuum stats) are now rendered once per second and shared.
+  
+  `queues`, `jobs` and `job` are deliberately excluded: they embed filter links
+  carrying the requesting client's TOKEN, so sharing them would serve one
+  operator's credential to another. They are also the cheap ones, so this costs
+  nothing. A test asserts no token-bearing panel is in the shared set.
+
 - **Still open: write actions.** Retry, cancel, pause-schedule and re-drive are
   MCP-only. In a browser they need CSRF protection, confirmation and an audit
   trail of who did what — none of which the read-only console has.

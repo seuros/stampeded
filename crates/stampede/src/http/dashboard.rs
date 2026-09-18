@@ -34,6 +34,23 @@ use std::time::Duration;
 /// How far back the destination and failure panels look.
 const WINDOW: Duration = Duration::from_secs(3600);
 
+/// How long a shared panel render is reused.
+///
+/// Matches the tick, so a single client sees no staleness at all and ten
+/// clients cost what one does.
+const PANEL_TTL: Duration = Duration::from_secs(1);
+
+/// Panels that are byte-identical for every client, and so are rendered once
+/// and shared.
+///
+/// **`queues`, `jobs` and `job` are deliberately NOT here.** They embed filter
+/// links, and those links carry the requesting client's TOKEN — caching them
+/// would serve one operator's credential to another. They are also the cheap
+/// ones; the four below are the expensive queries (destination health, failure
+/// clustering, vacuum stats), so caching exactly these gets the benefit without
+/// the hazard.
+const SHARED: &[&str] = &["destinations", "failures", "schedules", "health"];
+
 /// Rows in the job list. Small on purpose — see `Queue::recent_jobs` for why
 /// this is not free on a large partition.
 const JOB_LIMIT: i64 = 40;
@@ -171,13 +188,17 @@ pub async fn stream(State(state): State<ApiState>, Query(p): Query<Params>) -> i
             }
 
             // Built in reverse so `pop` emits them top-down.
+            //
+            // The global panels go through the shared cache, so N connected
+            // clients cost what one does. The job list and detail depend on
+            // this client's filters and are rendered per client.
             let mut next: Vec<_> = [
-                render_health(&state).await,
-                render_schedules(&state).await,
+                cached(&state, "health", render_health(&state)).await,
+                cached(&state, "schedules", render_schedules(&state)).await,
                 render_job(&state, &p).await,
                 render_jobs(&state, &p).await,
-                render_failures(&state).await,
-                render_destinations(&state).await,
+                cached(&state, "failures", render_failures(&state)).await,
+                cached(&state, "destinations", render_destinations(&state)).await,
                 render_queues(&state, &p).await,
                 render_wakeups(&state),
             ]
@@ -195,6 +216,16 @@ pub async fn stream(State(state): State<ApiState>, Query(p): Query<Params>) -> i
         Sse::new(ticks).with_keep_alive(KeepAlive::new()),
     )
         .into_response()
+}
+
+/// Share one render of a global panel across every connected client.
+async fn cached<F>(state: &ApiState, key: &'static str, f: F) -> Option<Event<PatchElements>>
+where
+    F: std::future::Future<Output = Option<String>>,
+{
+    debug_assert!(SHARED.contains(&key), "{key} is not a shared panel");
+    let html = state.panels.get(key, PANEL_TTL, f).await?;
+    patch_raw(html)
 }
 
 fn render_wakeups(state: &ApiState) -> Option<Event<PatchElements>> {
@@ -263,10 +294,10 @@ async fn render_queues(state: &ApiState, p: &Params) -> Option<Event<PatchElemen
 /// actually needs. A run of `refused` means some worker's circuit IS open,
 /// because that is what `breaker_open` records; a run of `failed` against one
 /// host means one is about to be.
-async fn render_destinations(state: &ApiState) -> Option<Event<PatchElements>> {
+async fn render_destinations(state: &ApiState) -> Option<String> {
     let rows = state.queue.destination_health(WINDOW).await.ok()?;
     if rows.is_empty() {
-        return patch(r#"<div id="destinations"></div>"#.to_string());
+        return Some(r#"<div id="destinations"></div>"#.to_string());
     }
 
     let mut html = String::from(
@@ -290,13 +321,13 @@ async fn render_destinations(state: &ApiState) -> Option<Event<PatchElements>> {
         ));
     }
     html.push_str("</table></div>");
-    patch(html)
+    Some(html)
 }
 
-async fn render_failures(state: &ApiState) -> Option<Event<PatchElements>> {
+async fn render_failures(state: &ApiState) -> Option<String> {
     let rows = state.queue.failure_clusters(8).await.ok()?;
     if rows.is_empty() {
-        return patch(r#"<div id="failures"></div>"#.to_string());
+        return Some(r#"<div id="failures"></div>"#.to_string());
     }
 
     let mut html = String::from(
@@ -321,13 +352,13 @@ async fn render_failures(state: &ApiState) -> Option<Event<PatchElements>> {
         ));
     }
     html.push_str("</table></div>");
-    patch(html)
+    Some(html)
 }
 
-async fn render_schedules(state: &ApiState) -> Option<Event<PatchElements>> {
+async fn render_schedules(state: &ApiState) -> Option<String> {
     let rows = state.queue.schedules().await.ok()?;
     if rows.is_empty() {
-        return patch(r#"<div id="schedules"></div>"#.to_string());
+        return Some(r#"<div id="schedules"></div>"#.to_string());
     }
 
     let mut html = String::from(
@@ -353,7 +384,7 @@ async fn render_schedules(state: &ApiState) -> Option<Event<PatchElements>> {
         ));
     }
     html.push_str("</table></div>");
-    patch(html)
+    Some(html)
 }
 
 async fn render_jobs(state: &ApiState, p: &Params) -> Option<Event<PatchElements>> {
@@ -567,7 +598,7 @@ fn describe_progress(job: &crate::Job) -> String {
     esc(&raw[..raw.len().min(48)])
 }
 
-async fn render_health(state: &ApiState) -> Option<Event<PatchElements>> {
+async fn render_health(state: &ApiState) -> Option<String> {
     // Autovacuum falling behind never raises an error; it just makes everything
     // slower, which presents as "the queue is mysteriously slow" and sends
     // people reading their job code.
@@ -618,7 +649,7 @@ async fn render_health(state: &ApiState) -> Option<Event<PatchElements>> {
         ));
     }
     html.push_str("</table></div>");
-    patch(html)
+    Some(html)
 }
 
 /// Compact age: "3847s" is harder to read at a glance than "1h4m".
@@ -629,6 +660,11 @@ fn format_age(secs: f64) -> String {
         60..=3599 => format!("{}m{}s", s / 60, s % 60),
         _ => format!("{}h{}m", s / 3600, (s % 3600) / 60),
     }
+}
+
+/// Build a patch event from already-rendered HTML.
+fn patch_raw(html: String) -> Option<Event<PatchElements>> {
+    patch(html)
 }
 
 fn patch(html: String) -> Option<Event<PatchElements>> {

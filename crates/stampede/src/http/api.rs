@@ -22,9 +22,53 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::warn;
 
+/// Rendered panels, shared across every connected dashboard client.
+///
+/// The global panels — queues, destinations, failures, schedules, health — are
+/// byte-identical for everyone, and without this each client re-ran every query
+/// every second. Ten operators watching meant ten times the database load for
+/// the same pixels, and a dashboard gets opened by several people at once
+/// precisely during an incident, which is when adding load is least welcome.
+///
+/// A plain TTL map rather than a singleflight: two clients missing together
+/// cost one extra query, bounded by the TTL, which is not worth a channel and
+/// a wakeup to avoid.
+#[derive(Default)]
+pub struct PanelCache {
+    inner: std::sync::Mutex<std::collections::HashMap<&'static str, (std::time::Instant, String)>>,
+}
+
+impl PanelCache {
+    /// Render `f`, or reuse a recent render of the same panel.
+    pub async fn get<F>(&self, key: &'static str, ttl: std::time::Duration, f: F) -> Option<String>
+    where
+        F: std::future::Future<Output = Option<String>>,
+    {
+        {
+            // Scoped so the guard is dropped before the await: a std Mutex held
+            // across one would deadlock the moment two clients arrive.
+            let cache = self.inner.lock().ok()?;
+            if let Some((at, html)) = cache.get(key)
+                && at.elapsed() < ttl
+            {
+                return Some(html.clone());
+            }
+        }
+
+        let html = f.await?;
+
+        if let Ok(mut cache) = self.inner.lock() {
+            cache.insert(key, (std::time::Instant::now(), html.clone()));
+        }
+        Some(html)
+    }
+}
+
 #[derive(Clone)]
 pub struct ApiState {
     pub queue: Arc<Queue>,
+    /// Shared render cache. See [`PanelCache`].
+    pub panels: Arc<PanelCache>,
     /// Shared secret for the dashboard. `None` means the dashboard is NOT
     /// served at all.
     ///
@@ -42,6 +86,7 @@ impl ApiState {
     pub fn new(queue: Queue) -> Self {
         Self {
             queue: Arc::new(queue),
+            panels: Arc::new(PanelCache::default()),
             dashboard_token: None,
             notifications_live: false,
         }

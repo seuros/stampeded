@@ -189,3 +189,68 @@ fn collapsing_does_not_run_words_together() {
     let ev = patch("<div id=\"x\">one\ntwo</div>".to_string()).expect("should build");
     assert!(format!("{ev:?}").contains("one two"));
 }
+
+#[test]
+fn no_shared_panel_can_contain_a_token() {
+    // THE HAZARD THIS CONSTANT EXISTS FOR. Shared panels are rendered once and
+    // served to every connected client, so a panel that embeds the requesting
+    // client's token would hand one operator's credential to another.
+    //
+    // `queues`, `jobs` and `job` all build filter links carrying the token, so
+    // they must stay per-client. They are also the cheap ones -- the four that
+    // ARE shared are the expensive queries -- so this costs nothing.
+    for panel in SHARED {
+        assert!(
+            !matches!(*panel, "queues" | "jobs" | "job"),
+            "{panel} embeds the client's token in its links and must not be shared"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_shared_panel_is_rendered_once_for_many_clients() {
+    // Ten operators watching should cost what one does. Before the cache each
+    // client re-ran every query every second for byte-identical output -- and a
+    // dashboard gets opened by several people at once precisely during an
+    // incident.
+    use crate::http::api::PanelCache;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let cache = PanelCache::default();
+    let renders = AtomicUsize::new(0);
+
+    for _ in 0..10 {
+        let html = cache
+            .get("failures", Duration::from_secs(60), async {
+                renders.fetch_add(1, Ordering::SeqCst);
+                Some("<div id=\"failures\">x</div>".to_string())
+            })
+            .await;
+        assert!(html.is_some());
+    }
+
+    assert_eq!(renders.load(Ordering::SeqCst), 1, "ten clients, one render");
+}
+
+#[tokio::test]
+async fn a_stale_panel_is_re_rendered() {
+    // The cache must expire, or the dashboard stops being live -- which is the
+    // one thing it is for.
+    use crate::http::api::PanelCache;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let cache = PanelCache::default();
+    let renders = AtomicUsize::new(0);
+    let render = || async {
+        renders.fetch_add(1, Ordering::SeqCst);
+        Some("<div id=\"health\">x</div>".to_string())
+    };
+
+    cache.get("health", Duration::from_millis(30), render()).await;
+    cache.get("health", Duration::from_millis(30), render()).await;
+    assert_eq!(renders.load(Ordering::SeqCst), 1, "still fresh");
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    cache.get("health", Duration::from_millis(30), render()).await;
+    assert_eq!(renders.load(Ordering::SeqCst), 2, "expired, so re-rendered");
+}
