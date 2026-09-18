@@ -373,6 +373,44 @@ connection. In Rust, pass the transaction to `checkpoint_on`. Outside both, pass
 the connection explicitly — River's `ResumableSetStepCursorTx` exists for the
 same reason and got there first.
 
+## Timeouts
+
+Three layers, because the first cannot fire when the worker is dead and the
+second cannot tell a slow job from a dead one on its own.
+
+| layer | where | default | fires when |
+|---|---|---|---|
+| 1 | in the worker | `job_timeout`, 15 min | the handler runs too long |
+| 2 | in the database | `expire_seconds`, 1 h | nothing has been heard since `heartbeat_at` |
+| 3 | in the database | worker heartbeat + `dead_after`, 5 min | the whole worker process died |
+
+**Layer 1 must be shorter than layer 2.** This is River's
+`rescue_after > job_timeout` invariant, and getting it backwards is not a
+tuning mistake — it is how a queue double-executes. Layer 2 fires whether or
+not the worker is alive and returns the job to `retryable`, where another
+worker claims it; if layer 1 has not already stopped the first execution, both
+run at once.
+
+`expire_seconds` is per job and set by the enqueuer, so it cannot be validated
+against `job_timeout` by a constant. Both workers check it against the row they
+were handed and warn if the layers are inverted:
+
+```
+job_timeout (900s) is not shorter than Report's expire_seconds (60s): the
+database may expire this job and let another worker claim it while this one is
+still running it
+```
+
+Layer 1 is advisory on both sides, and for the same reason: Ruby cannot
+interrupt a blocking C call and tokio cannot preempt a blocking task. A handler
+doing synchronous work should use `spawn_blocking` (Rust) or expect the timeout
+to be approximate (Ruby). Layers 2 and 3 do not care what the handler is doing.
+
+A job that heartbeats — including via `checkpoint`, which counts as one —
+cannot be expired by layer 2 while it keeps doing so. That is deliberate: a job
+saving progress is demonstrably working. It means a job stuck in a loop *that
+checkpoints* is bounded only by layer 1.
+
 ## Operational visibility
 
 Three things degrade a Postgres queue without ever raising an error, and all
