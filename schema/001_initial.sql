@@ -111,6 +111,30 @@ CREATE TABLE stampede_jobs (
     deferrals           smallint NOT NULL DEFAULT 0,
     max_deferrals       smallint NOT NULL DEFAULT 100,
 
+    -- Resume state. plans/17.
+    --
+    -- Opaque to us: the job's own cursor, handed back verbatim on the next
+    -- attempt so a job that died at row 50,000 of 100,000 does not start again
+    -- at row 1. NOBODY in the Postgres cohort has this -- not Oban, River,
+    -- good_job, solid_queue, que, graphile, pg-boss, procrastinate, underway,
+    -- neoq or db-scheduler. BullMQ's updateProgress is the closest prior art
+    -- and it is a UI progress bar that happens never to be cleared.
+    --
+    -- Deliberately NOT durable execution (Temporal, DBOS, restate): replaying a
+    -- function requires intercepting every side effect, which requires a
+    -- per-language SDK, which is the client-library tax plans/05 exists to
+    -- avoid. A cursor is a column and works from any language.
+    --
+    -- BOUNDED IN SQL, for the same reason error text is: a Python worker will
+    -- not run our truncation logic. Someone will try to store the 100,000
+    -- processed ids here instead of a cursor, and the row will be megabytes on
+    -- the one table that already has the bloat problem.
+    checkpoint      jsonb CHECK (checkpoint IS NULL OR pg_column_size(checkpoint) <= 65536),
+    checkpoint_at   timestamptz,
+    -- Monotonic, so a caller can tell whether the state it is looking at is the
+    -- one it wrote.
+    checkpoint_seq  integer     NOT NULL DEFAULT 0,
+
     -- Backoff policy on the ROW (underway's shape), so the dashboard and MCP
     -- can render the remaining retry schedule without re-deriving it from a
     -- Rust constant they cannot see. Cap first, then jitter.

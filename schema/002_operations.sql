@@ -107,6 +107,10 @@ LANGUAGE sql AS $$
        SET state       = 'completed',
            finished_at = now(),
            dedup_scope = NULL,
+           -- Dead weight once the job is done, on the one table that already
+           -- has the bloat problem. Consistent with the fire-and-forget
+           -- decision: we do not keep results either.
+           checkpoint  = NULL,
            claimed_by  = NULL
      WHERE queue = p_queue
        AND id    = p_id
@@ -309,6 +313,53 @@ LANGUAGE sql AS $$
      WHERE queue = p_queue AND id = p_id
        AND claimed_by = p_worker_id AND state = 'executing'
     RETURNING true;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- CHECKPOINT — save resume state
+--
+-- plans/17. Returns the new sequence number, or NULL if this worker no longer
+-- owns the job.
+--
+-- THE OWNERSHIP CHECK IS NOT A FORMALITY HERE. The sequence that makes it
+-- matter: worker A checkpoints at 50k and its host wedges; the reaper decides A
+-- is dead and returns the job; worker B claims it, resumes from 50k and
+-- checkpoints at 60k; then A WAKES UP and writes 51k. Without the predicate,
+-- A's stale write moves the cursor BACKWARDS and B's next attempt redoes 9,000
+-- units of work -- or does them twice, if the job is not perfectly idempotent.
+--
+-- It also sets heartbeat_at: a job that just saved progress is demonstrably
+-- alive, and requiring a separate stampede_touch would be asking the caller to
+-- say the same thing twice. Forgetting that second call would let a job which
+-- is plainly working get expired out from under itself.
+--
+-- AND IT RESETS `interruptions`, which is the interesting decision (plans/17
+-- §4). The two counters mean different things: `interruptions` exists to stop a
+-- job that KILLS WORKERS from walking the fleet one process at a time, and a
+-- job that checkpointed at 50k and then died is demonstrably not that job -- it
+-- ran, it worked, something else killed it. `attempt` is untouched and still
+-- increments at claim, so a job that progresses one unit and then dies forever
+-- is still discarded at max_attempts. Progress buys tolerance of
+-- INFRASTRUCTURE failure and buys nothing against a job that is simply broken.
+-- ---------------------------------------------------------------------------
+CREATE FUNCTION stampede_checkpoint(
+    p_queue     text,
+    p_id        uuid,
+    p_worker_id uuid,
+    p_state     jsonb
+) RETURNS integer
+LANGUAGE sql AS $$
+    UPDATE stampede_jobs
+       SET checkpoint     = p_state,
+           checkpoint_at  = now(),
+           checkpoint_seq = checkpoint_seq + 1,
+           heartbeat_at   = now(),
+           interruptions  = 0
+     WHERE queue = p_queue
+       AND id    = p_id
+       AND claimed_by = p_worker_id
+       AND state = 'executing'
+    RETURNING checkpoint_seq;
 $$;
 
 -- ---------------------------------------------------------------------------

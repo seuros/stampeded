@@ -35,7 +35,9 @@ module Stampede
       # uses. It resolves the class, runs callbacks, and raises out of
       # `rescue_from`/`discard_on` handling -- so an exception reaching us is
       # genuinely unhandled and should be recorded as a failure.
-      ActiveJob::Base.execute(payload)
+      # Parked for the duration so the job can reach it via the helpers in
+      # ActiveJobExt. ActiveJob::Base.execute gives us no other seam.
+      Current.with(job) { ActiveJob::Base.execute(payload) }
     rescue NameError => e
       # A job class that no longer exists: a rename deployed to the enqueuer
       # but not to the workers. Unrecoverable rather than retryable, because

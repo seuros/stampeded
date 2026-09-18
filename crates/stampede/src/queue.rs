@@ -267,6 +267,36 @@ impl Queue {
         Ok(ok.flatten().unwrap_or(false))
     }
 
+    /// Save resume state.
+    ///
+    /// Returns the new sequence number, or `None` if this worker no longer owns
+    /// the job — which is how a worker whose host wedged finds out the reaper
+    /// reclaimed its work. That check is what stops a stale writer moving the
+    /// cursor BACKWARDS over a newer worker's progress.
+    ///
+    /// Also counts as a heartbeat and resets the interruption budget: a job
+    /// that just saved progress is demonstrably alive, and is demonstrably not
+    /// the kind of job that kills workers (plans/17 §4). `attempt` is
+    /// untouched, so a job that progresses one unit and then dies forever is
+    /// still bounded by `max_attempts`.
+    pub async fn checkpoint<T: serde::Serialize>(
+        &self,
+        job: &Job,
+        worker_id: Uuid,
+        state: &T,
+    ) -> Result<Option<i32>> {
+        let value = serde_json::to_value(state)?;
+        let seq: Option<Option<i32>> =
+            sqlx::query_scalar("SELECT stampede_checkpoint($1, $2, $3, $4)")
+                .bind(&job.queue)
+                .bind(job.id)
+                .bind(worker_id)
+                .bind(&value)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(seq.flatten())
+    }
+
     /// Fail jobs whose wall-clock budget ran out. Returns how many.
     ///
     /// Catches what neither other layer can: a worker that is alive and

@@ -176,6 +176,10 @@ pub struct Job {
     pub heartbeat_at: Option<DateTime<Utc>>,
     pub backoff_base_ms: i16,
     pub backoff_max_ms: i32,
+    /// Resume state from a previous attempt. `None` on the first.
+    pub checkpoint: Option<serde_json::Value>,
+    pub checkpoint_at: Option<DateTime<Utc>>,
+    pub checkpoint_seq: i32,
     pub failure_kind: Option<FailureKind>,
     pub last_error: Option<String>,
     /// Structured history, newest last, capped at 10 by the fail path.
@@ -196,6 +200,14 @@ impl Job {
     /// executing has already spent the attempt it is using.
     pub fn attempts_remaining(&self) -> i16 {
         (self.max_attempts - self.attempt).max(0)
+    }
+
+    /// Resume state saved by a previous attempt, if any.
+    ///
+    /// `None` means this is the first run — or that the job has never
+    /// checkpointed, which for most jobs is the same thing.
+    pub fn resume_from<T: serde::de::DeserializeOwned>(&self) -> Option<T> {
+        serde_json::from_value(self.checkpoint.clone()?).ok()
     }
 
     pub fn is_last_attempt(&self) -> bool {

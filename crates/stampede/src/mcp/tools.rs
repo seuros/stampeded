@@ -13,10 +13,6 @@ use crate::DstPolicy;
 use mcp_host::prelude::*;
 use mcp_host::registry::router::McpToolRouter;
 
-/// One job row as `job_inspect` reads it.
-///
-/// Named rather than inlined: the tuple is wide enough that a mis-ordered
-/// column in the SELECT would be a silent type-checks-but-wrong bug.
 /// One clustered failure signature as `failure_summary` reads it.
 type FailureCluster = (
     Option<String>, // failure_kind
@@ -25,23 +21,34 @@ type FailureCluster = (
     i64,            // how many
 );
 
-type JobRow = (
-    String,              // task
-    String,              // state
-    i16,                 // attempt
-    i16,                 // max_attempts
-    Option<String>,      // failure_kind
-    Option<String>,      // last_error
-    Vec<String>,         // attempted_by
-    serde_json::Value,   // args
-    i16,                 // interruptions
-    i16,                 // max_interruptions
-    Option<String>,      // destination
-    i16,                 // deferrals
-    Option<String>,      // dead_letter_queue
-    Option<String>,      // source_queue
-    serde_json::Value,   // errors
-);
+/// One job row as `job_inspect` reads it.
+///
+/// A NAMED STRUCT, not a tuple. It started as a tuple with a comment saying a
+/// mis-ordered column would be a silent type-checks-but-wrong bug; by the time
+/// resume state was added it had seventeen fields, which is past sqlx's tuple
+/// FromRow limit and well past the point a human can check the ordering by eye.
+/// Named fields bind by NAME, so the class of bug the comment warned about
+/// cannot happen at all.
+#[derive(sqlx::FromRow)]
+struct JobRow {
+    task: String,
+    state: String,
+    attempt: i16,
+    max_attempts: i16,
+    failure_kind: Option<String>,
+    last_error: Option<String>,
+    attempted_by: Vec<String>,
+    args: serde_json::Value,
+    interruptions: i16,
+    max_interruptions: i16,
+    destination: Option<String>,
+    deferrals: i16,
+    checkpoint: Option<serde_json::Value>,
+    checkpoint_seq: i32,
+    dead_letter_queue: Option<String>,
+    source_queue: Option<String>,
+    errors: serde_json::Value,
+}
 
 impl StampedeServer {
     /// Queue depth by state.
@@ -82,9 +89,10 @@ impl StampedeServer {
             .map_err(|_| ToolError::InvalidArguments(format!("{:?} is not a UUID", params.0.id)))?;
 
         let row: Option<JobRow> = sqlx::query_as(
-                "SELECT task, state::text, attempt, max_attempts, failure_kind::text, \
-                        last_error, attempted_by, args, interruptions, max_interruptions, \
-                        destination, deferrals, dead_letter_queue, source_queue, errors \
+                "SELECT task, state::text AS state, attempt, max_attempts, \
+                        failure_kind::text AS failure_kind, last_error, attempted_by, args, \
+                        interruptions, max_interruptions, destination, deferrals, \
+                        checkpoint, checkpoint_seq, dead_letter_queue, source_queue, errors \
                    FROM stampede_jobs WHERE queue = $1 AND id = $2",
             )
             .bind(&params.0.queue)
@@ -93,23 +101,25 @@ impl StampedeServer {
             .await
             .map_err(|e| ToolError::Internal(format!("query failed: {e}")))?;
 
-        let Some((
+        let Some(JobRow {
             task,
             state,
             attempt,
             max_attempts,
-            kind,
-            error,
-            workers,
+            failure_kind: kind,
+            last_error: error,
+            attempted_by: workers,
             args,
             interruptions,
             max_interruptions,
             destination,
             deferrals,
-            dlq,
+            checkpoint,
+            checkpoint_seq,
+            dead_letter_queue: dlq,
             source_queue,
             errors,
-        )) = row
+        }) = row
         else {
             return Ok(ToolOutput::text(format!(
                 "no job {id} in queue {:?}",
@@ -138,6 +148,17 @@ impl StampedeServer {
         if deferrals > 0 {
             out.push_str(&format!(
                 "  deferred    {deferrals}x (we declined to run it; no attempt charged)\n"
+            ));
+        }
+        // Resume state. Often the single most useful thing about a long job:
+        // "where did it get to" answers "should I wait or should I worry".
+        if let Some(cp) = checkpoint {
+            out.push_str(&format!(
+                "  resume from {cp} (checkpoint {checkpoint_seq})\n"
+            ));
+        } else if checkpoint_seq > 0 {
+            out.push_str(&format!(
+                "  checkpointed {checkpoint_seq}x (cleared on success)\n"
             ));
         }
         if let Some(src) = source_queue {

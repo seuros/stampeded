@@ -1516,3 +1516,152 @@ async fn a_wedged_job_does_not_block_shutdown_forever() {
         .unwrap();
     assert_eq!(workers, 0, "a bounded shutdown must still deregister");
 }
+
+// ---------------------------------------------------------------- plans/17
+
+#[tokio::test]
+async fn a_job_resumes_from_its_checkpoint_after_its_worker_dies() {
+    // The headline: a job that died at 50,000 of 100,000 does not start again
+    // at row 1. Nobody in the Postgres cohort has this -- not Oban, River,
+    // good_job, solid_queue, que, graphile, pg-boss, procrastinate, underway,
+    // neoq or db-scheduler.
+    let q = q!();
+    q.enqueue(NewJob::new("default", "import")).await.unwrap().unwrap();
+
+    let w1 = q.register_worker("host-a", 1, &["default".into()]).await.unwrap();
+    let first = q.claim("default", w1, 1).await.unwrap();
+    assert!(first[0].checkpoint.is_none(), "nothing to resume from on the first attempt");
+
+    q.checkpoint(&first[0], w1, &serde_json::json!({ "cursor": 50_000 }))
+        .await
+        .unwrap()
+        .expect("we own it");
+
+    // Host wedges; the reaper reclaims.
+    sqlx::query("UPDATE stampede_workers SET last_heartbeat = now() - interval '1 hour'")
+        .execute(q.pool())
+        .await
+        .unwrap();
+    assert_eq!(q.reap(Duration::from_secs(300)).await.unwrap(), 1);
+
+    let w2 = q.register_worker("host-b", 2, &["default".into()]).await.unwrap();
+    let second = q.claim("default", w2, 1).await.unwrap();
+
+    let state: serde_json::Value = second[0].resume_from().expect("resume state survived");
+    assert_eq!(state["cursor"], 50_000, "must resume where it stopped");
+    assert_eq!(second[0].attempt, 2);
+}
+
+#[tokio::test]
+async fn a_stale_worker_cannot_move_the_cursor_backwards() {
+    // The sequence that makes the ownership check matter: A checkpoints at 50k
+    // and wedges, the reaper reclaims, B resumes and reaches 60k, and THEN A
+    // wakes up and writes 51k. Without the check, B's next attempt redoes 9,000
+    // units -- or does them twice, if the job is not perfectly idempotent.
+    let q = q!();
+    let id = q.enqueue(NewJob::new("default", "import")).await.unwrap().unwrap();
+
+    let a = q.register_worker("a", 1, &["default".into()]).await.unwrap();
+    let job_a = q.claim("default", a, 1).await.unwrap().remove(0);
+    q.checkpoint(&job_a, a, &serde_json::json!({ "cursor": 50_000 })).await.unwrap();
+
+    sqlx::query("UPDATE stampede_workers SET last_heartbeat = now() - interval '1 hour' WHERE id = $1")
+        .bind(a)
+        .execute(q.pool())
+        .await
+        .unwrap();
+    q.reap(Duration::from_secs(300)).await.unwrap();
+
+    let b = q.register_worker("b", 2, &["default".into()]).await.unwrap();
+    let job_b = q.claim("default", b, 1).await.unwrap().remove(0);
+    q.checkpoint(&job_b, b, &serde_json::json!({ "cursor": 60_000 })).await.unwrap();
+
+    // A wakes up, still holding its stale handle.
+    let stale = q
+        .checkpoint(&job_a, a, &serde_json::json!({ "cursor": 51_000 }))
+        .await
+        .unwrap();
+    assert!(stale.is_none(), "a stale worker must be refused, and must learn it was");
+
+    let now = q.fetch("default", id).await.unwrap().unwrap();
+    assert_eq!(now.checkpoint.unwrap()["cursor"], 60_000, "the cursor must not go backwards");
+}
+
+#[tokio::test]
+async fn progress_forgives_infrastructure_but_not_a_broken_job() {
+    // The decision in plans/17 §4. `interruptions` exists to stop a job that
+    // KILLS WORKERS from walking the fleet; a job that checkpointed and then
+    // died is demonstrably not that job. So progress resets interruptions --
+    // otherwise a long job on a flaky afternoon is discarded having done 95% of
+    // the work and never actually failed.
+    let q = q!();
+    let id = q.enqueue(NewJob::new("default", "import")).await.unwrap().unwrap();
+    let w = q.register_worker("h", 1, &["default".into()]).await.unwrap();
+
+    let job = q.claim("default", w, 1).await.unwrap().remove(0);
+    q.fail_with_exit(&job, w, FailureKind::WorkerExited, "oom", Some(Duration::from_millis(1)), Some(137))
+        .await
+        .unwrap();
+    assert_eq!(q.fetch("default", id).await.unwrap().unwrap().interruptions, 1);
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let job = q.claim("default", w, 1).await.unwrap().remove(0);
+    q.checkpoint(&job, w, &serde_json::json!({ "cursor": 1 })).await.unwrap();
+
+    let after = q.fetch("default", id).await.unwrap().unwrap();
+    assert_eq!(after.interruptions, 0, "demonstrated progress is not a poison job");
+    // But the total-work ceiling is untouched, so a job that progresses one
+    // unit and then dies forever is still bounded.
+    assert_eq!(after.attempt, 2, "attempt must NOT be refunded");
+}
+
+#[tokio::test]
+async fn a_checkpoint_is_also_a_heartbeat() {
+    // A job that just saved progress is demonstrably alive. Requiring a
+    // separate touch would be asking the caller to say the same thing twice,
+    // and forgetting it would let a job that is plainly working get expired.
+    let q = q!();
+    q.enqueue(NewJob::new("default", "slow").expires_in(Duration::from_secs(1)))
+        .await
+        .unwrap();
+    let w = q.register_worker("h", 1, &["default".into()]).await.unwrap();
+    let job = q.claim("default", w, 1).await.unwrap().remove(0);
+
+    for i in 0..3 {
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        q.checkpoint(&job, w, &serde_json::json!({ "cursor": i })).await.unwrap();
+        assert_eq!(q.expire(10).await.unwrap(), 0, "a checkpointing job must not expire");
+    }
+}
+
+#[tokio::test]
+async fn the_checkpoint_is_cleared_on_success() {
+    // Dead weight otherwise, on the one table that already has the bloat
+    // problem -- and inconsistent with not storing results either.
+    let q = q!();
+    let id = q.enqueue(NewJob::new("default", "import")).await.unwrap().unwrap();
+    let w = q.register_worker("h", 1, &["default".into()]).await.unwrap();
+    let job = q.claim("default", w, 1).await.unwrap().remove(0);
+
+    q.checkpoint(&job, w, &serde_json::json!({ "cursor": 99 })).await.unwrap();
+    q.complete(&job, w).await.unwrap();
+
+    assert!(q.fetch("default", id).await.unwrap().unwrap().checkpoint.is_none());
+}
+
+#[tokio::test]
+async fn an_oversized_checkpoint_is_refused_by_the_database() {
+    // Bounded in SQL, not in the client: a Python worker will not run our
+    // truncation. Someone will try to store the processed ids rather than a
+    // cursor, and the row will be megabytes.
+    let q = q!();
+    let id = q.enqueue(NewJob::new("default", "import")).await.unwrap().unwrap();
+    let w = q.register_worker("h", 1, &["default".into()]).await.unwrap();
+    let job = q.claim("default", w, 1).await.unwrap().remove(0);
+
+    let huge = serde_json::json!({ "ids": "x".repeat(70_000) });
+    assert!(q.checkpoint(&job, w, &huge).await.is_err(), "64 KB cap must hold");
+
+    // And the job is untouched.
+    assert!(q.fetch("default", id).await.unwrap().unwrap().checkpoint.is_none());
+}

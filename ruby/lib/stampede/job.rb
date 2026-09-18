@@ -38,6 +38,21 @@ module Stampede
       @args ||= JSON.parse(row["args"] || "{}")
     end
 
+    # Resume state saved by a previous attempt, or nil on the first.
+    #
+    # A job that died at row 50,000 of 100,000 gets its cursor back rather than
+    # starting again at row 1. Nobody else in the Postgres cohort has this.
+    def checkpoint
+      return @checkpoint if defined?(@checkpoint)
+
+      raw = row["checkpoint"]
+      @checkpoint = raw.nil? ? nil : JSON.parse(raw)
+    end
+
+    def resumed? = !checkpoint.nil?
+
+    def checkpoint_seq = row["checkpoint_seq"].to_i
+
     # Attempts left before the job is discarded.
     #
     # `attempt` was already incremented at claim, so a job currently executing

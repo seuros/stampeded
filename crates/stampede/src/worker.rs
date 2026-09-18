@@ -46,7 +46,55 @@ pub type HandlerFuture = Pin<
 >;
 
 /// A task handler: receives the job, does the work.
-pub type Handler = Arc<dyn Fn(Job) -> HandlerFuture + Send + Sync>;
+pub type Handler = Arc<dyn Fn(JobContext) -> HandlerFuture + Send + Sync>;
+
+/// What a handler gets: the job, plus the ability to save resume state.
+///
+/// Derefs to [`Job`], so `ctx.args` and `ctx.id` read as before. The addition
+/// is [`checkpoint`](JobContext::checkpoint) — saving progress needs the queue
+/// handle and this worker's id, and a handler has no other way to get either.
+#[derive(Clone)]
+pub struct JobContext {
+    pub job: Job,
+    queue: Queue,
+    worker_id: Uuid,
+}
+
+impl std::ops::Deref for JobContext {
+    type Target = Job;
+
+    fn deref(&self) -> &Job {
+        &self.job
+    }
+}
+
+impl JobContext {
+    /// Save resume state. Returns `false` if this worker no longer owns the
+    /// job, which means the reaper reclaimed it and the work should stop.
+    ///
+    /// Checkpointing also counts as a heartbeat, so a job that saves progress
+    /// regularly cannot be expired by the wall-clock timeout while it is
+    /// plainly working.
+    ///
+    /// ORDER MATTERS AND WE CANNOT ENFORCE IT: commit the chunk, THEN
+    /// checkpoint. Checkpointing first means a crash between the two replays
+    /// that chunk on resume, which for a non-idempotent job is silent
+    /// duplication. This is the one way to use the feature and get wrong
+    /// answers (plans/17 §7).
+    pub async fn checkpoint<T: serde::Serialize>(&self, state: &T) -> Result<bool> {
+        Ok(self.queue.checkpoint(&self.job, self.worker_id, state).await?.is_some())
+    }
+
+    /// Resume state from a previous attempt, if any.
+    pub fn resume_from<T: serde::de::DeserializeOwned>(&self) -> Option<T> {
+        self.job.resume_from()
+    }
+
+    /// Tell the database this job is still progressing, without saving state.
+    pub async fn touch(&self) -> Result<bool> {
+        self.queue.touch(&self.job, self.worker_id).await
+    }
+}
 
 /// Worker configuration.
 #[derive(Debug, Clone)]
@@ -220,14 +268,14 @@ impl Worker {
     /// Register a handler for a task name.
     pub fn register<F, Fut>(mut self, task: impl Into<String>, f: F) -> Self
     where
-        F: Fn(Job) -> Fut + Send + Sync + 'static,
+        F: Fn(JobContext) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = std::result::Result<(), Box<dyn std::error::Error + Send + Sync>>>
             + Send
             + 'static,
     {
         let task = task.into();
         self.handlers
-            .insert(task, Arc::new(move |job| Box::pin(f(job)) as HandlerFuture));
+            .insert(task, Arc::new(move |ctx| Box::pin(f(ctx)) as HandlerFuture));
         self
     }
 
@@ -494,12 +542,18 @@ async fn execute(
             Err(Error::UnknownTask(task.clone()))
         }
         Some(h) => {
+            let ctx = JobContext {
+                job: job.clone(),
+                queue: queue.clone(),
+                worker_id,
+            };
+
             let run = || async {
                 // tokio::select over a sleep, underway's model (plans/15). This
                 // CANCELS the future; it cannot kill a blocking thread. A
                 // handler doing sync work must use spawn_blocking itself.
                 tokio::select! {
-                    res = h(job.clone()) => res.map_err(Error::Handler),
+                    res = h(ctx.clone()) => res.map_err(Error::Handler),
                     _ = tokio::time::sleep(timeout) => Err(Error::Timeout(timeout)),
                 }
             };

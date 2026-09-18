@@ -78,6 +78,10 @@ measured in one of them:
 - **Two budgets, not one.** `attempt` counts raises; `interruptions` counts
   worker deaths, defaulting to one free. A job that segfaults its worker stops
   after the second claim instead of walking twenty-five workers down.
+- **Jobs resume.** A job that dies at row 50,000 of 100,000 gets its cursor
+  back instead of starting again at row 1. **Nobody in the Postgres cohort has
+  this** — not Oban, River, good_job, solid_queue, que, graphile, pg-boss,
+  procrastinate, underway, neoq or db-scheduler. (`plans/17`)
 - **Failures cluster by fingerprint**, with numbers, UUIDs and hex stripped
   before hashing — so "timed out after 30012ms" and "timed out after 29998ms"
   are one incident rather than two. Nobody else does this, and it is the
@@ -246,6 +250,45 @@ not hammered by every retrying job. An open circuit fails fast *without* calling
 the handler, and the job is recorded `interrupted` rather than `raised` — a sick
 dependency is not a defect in the job, and conflating them would make one outage
 look like a thousand broken jobs.
+
+## Resumable jobs
+
+```ruby
+def perform(file)
+  cursor = stampede_checkpoint&.dig("cursor") || 0
+
+  rows[cursor..].each_slice(1_000) do |chunk|
+    import(chunk)                          # commit the work FIRST
+    cursor += chunk.size
+    stampede_checkpoint!(cursor: cursor)   # then record it
+  end
+end
+```
+
+A checkpoint is opaque to Stampede — your cursor, your meaning. It is handed
+back on the next attempt, and it rides on the row `stampede_claim` already
+returns, so resuming costs no extra round trip.
+
+Deliberately **not** durable execution (Temporal, DBOS, restate). Replaying a
+function means intercepting every side effect, which means a per-language SDK
+— the client-library tax this project exists to avoid. A cursor is a column and
+works from any language.
+
+Two things worth knowing:
+
+- **A checkpoint is also a heartbeat.** A job saving progress is demonstrably
+  alive, so it cannot be expired by the wall-clock timeout while it is plainly
+  working.
+- **Progress resets the *interruption* budget, not the attempt budget.** A job
+  that checkpointed and then died is not the kind of job that kills workers, so
+  it is not charged as one — but `attempt` still counts, so a job that
+  progresses one unit and then dies forever is still discarded. Progress buys
+  tolerance of infrastructure failure and buys nothing against a broken job.
+
+**Commit your chunk before you checkpoint.** The other order replays that chunk
+on resume, which for a job that is not idempotent is silent duplication. This
+is the one way to use the feature and get wrong answers, and nothing can
+enforce it from our side.
 
 ## Operational visibility
 

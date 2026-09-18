@@ -118,7 +118,7 @@ module Stampede
         handler = @handlers[job.task]
         raise UnknownTask, "no handler registered for task #{job.task.inspect}" if handler.nil?
 
-        handler.call(job)
+        handler.call(JobContext.new(job, worker_id))
         report(:complete, job, worker_id)
       rescue Exception => e # rubocop:disable Lint/RescueException
         # Exception, not StandardError: a job that raises SignalException or
