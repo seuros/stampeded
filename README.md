@@ -242,6 +242,37 @@ own narrow table: good_job and solid_queue put the cron key on the jobs table
 and then had to guarantee those rows are never pruned, which couples cron
 correctness to your retention horizon.
 
+## Unique jobs
+
+Set `dedup_scope` and the database refuses a second job with the same one:
+
+```sql
+INSERT INTO stampede_jobs (queue, task, dedup_scope)
+VALUES ('default', 'SyncAccount', 'acct:42');
+```
+
+It is a partial unique index, not a check in application code, so it holds
+against concurrent enqueuers in separate transactions — including ones that
+never run any of our code.
+
+**Uniqueness is per queue.** The index is `(queue, dedup_key)`, so the same
+`dedup_scope` in two different queues is two different jobs:
+
+```
+('default', 'acct:42')   -> inserted
+('default', 'acct:42')   -> rejected, duplicate key
+('mail',    'acct:42')   -> inserted
+```
+
+This follows from partitioning by queue — a unique index on a partitioned
+table must contain the partition key — and it is the same choice pg-boss
+makes. If you want an account synced once across the whole system, enqueue it
+to one queue; if you put the queue name in the scope you get the per-queue
+behaviour twice over, not global uniqueness.
+
+`dedup_period` ('hour', 'day', …) adds a time bucket to the key, so the same
+scope becomes enqueueable again once the bucket rolls over.
+
 ## Fairness and circuit breaking
 
 Both on by default.
@@ -395,9 +426,15 @@ createdb stampede_test
 STAMPEDE_TEST_DATABASE_URL=postgres://localhost/stampede_test cargo test
 ```
 
-With the env var set that is 141 tests: unit, integration against real
-Postgres, and wire-level tests that run a real server on an ephemeral port.
-Integration tests run in parallel, each in its own schema.
+With the env var set that is 183 Rust tests — unit, integration against real
+Postgres, and wire-level tests that run a real server on an ephemeral port —
+plus 78 Ruby tests (245 assertions) under `ruby/`. Integration tests run in
+parallel, each in its own schema.
+
+Without the env var the database tests skip, which is a courtesy to anyone
+without a Postgres to hand. Under `CI` they refuse to skip and fail instead:
+123 of those tests would otherwise return early and report success, and a
+green build that tested nothing is worse than a red one.
 
 The integration tests are worth reading as documentation of the awkward cases:
 a breaker trip refunding an attempt, a job that kills workers being discarded

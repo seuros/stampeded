@@ -613,10 +613,28 @@ per-job flag, and costs nothing for queues that do not opt in.
   atomically". A release is derivable from `state`, so by that rule it belongs
   in the daemon — but that means a language-native worker calling
   `stampede_claim()` directly must also release, and will forget.
-- **Uniqueness scope vs partitioning — blocking, and it blocks `03-` too.**
-  See §6, experiment 15. We cannot pick a partition key and a uniqueness scope
-  independently. pg-boss picked per-queue partitions *and* per-queue uniqueness
-  and is coherent for that reason. Decide both together or neither.
+- ~~**Uniqueness scope vs partitioning — blocking, and it blocks `03-` too.**~~
+  **RESOLVED, and it was resolved by the partitioning decision itself** — this
+  entry simply outlived it. `plans/README` §1 chose `PARTITION BY LIST (queue)`
+  precisely because uniqueness won the argument, and a unique index on a
+  partitioned table must contain the partition key. So the scope was decided
+  the moment the key was: `UNIQUE (queue, dedup_key) WHERE dedup_key IS NOT
+  NULL` (`001_initial.sql:335`). That is the coherent pg-boss shape this entry
+  asked for — both together, not neither.
+
+  Verified against a real database on 2026-09-18, because the consequence is
+  user-visible and worth stating rather than deriving:
+
+  ```
+  ('default', 'acct:42')   -> inserted
+  ('default', 'acct:42')   -> rejected, duplicate key
+  ('mail',    'acct:42')   -> inserted          <-- different queue, different job
+  ```
+
+  **Uniqueness is per queue, not global.** Someone deduplicating by account id
+  who routes two jobs to two queues gets both. Now documented in the README
+  under *Unique jobs* rather than left to be discovered. `dedup_period` was
+  verified in the same run: same hour rejected, next hour accepted.
 - Batch enqueue: does Stampede offer one, and does it dedupe? `DO UPDATE` cannot
   (§6, experiment 13), `DO NOTHING` can but returns nothing. Oban punts this to
   Oban Pro (`oban.ex:819-820`); River made it the reason for the whole migration
