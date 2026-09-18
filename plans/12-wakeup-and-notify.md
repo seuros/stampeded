@@ -1202,10 +1202,47 @@ worker-side code is identical. Record it so the option is not forgotten.
   the wakeup works with no daemon involvement at all. That is a genuine argument
   for the trigger over any client-side scheme, but it is unverified — `pg_cron`
   is available and not installed.
-- **Unicast vs broadcast is deferred, not resolved.** See "the alternative worth
-  taking seriously" above. Needs a herd measurement at realistic worker counts
-  before it can be closed either way, and that measurement does not exist because
-  nothing is built.
+- ~~**Unicast vs broadcast is deferred, not resolved.**~~ **The herd is now
+  measured.** The entry said the measurement "does not exist because nothing is
+  built" — it is built, so here it is.
+
+  A herd woken by one job is 1 winner and N-1 losers. Measured on PG18:
+
+  | | cost |
+  |---|---|
+  | claim that finds nothing (what each loser pays) | **37 µs** |
+  | claim that wins | 164 µs |
+  | wake-and-discard on the listener | ~37 µs |
+
+  The losing claim is cheap — the partial index makes "nothing available" a
+  quick probe rather than a scan — but it is paid N-1 times per job, so it
+  scales with the fleet. Database CPU burned on claims that find nothing:
+
+  | workers | 100 jobs/s | 1,000 jobs/s |
+  |---|---|---|
+  | 5 | 1.5% | 15% |
+  | 20 | 7% | 70% |
+  | 50 | 18% | **181%** |
+  | 200 | 74% | **736%** |
+
+  (of one database core)
+
+  **Two things already bound this, which is why it is not urgent.** The
+  `wakeup_cooldown` GCRA caps each worker at one claim per millisecond, so the
+  10,000 jobs/s column is unreachable — the table saturates at the 1,000
+  column. And a bulk enqueue collapses to one notification, so a system that
+  enqueues in batches produces one herd per statement, not per job.
+
+  **Decision: keep broadcast, and record the number at which it stops paying.**
+  Below ~20 workers the waste is under a tenth of a core and unicast is not
+  worth the coordination it needs — knowing *which* worker to wake means
+  tracking which are idle, which is the daemon-mediated claiming that
+  `05-polyglot-protocol.md` rejects for good reasons. Above ~50 workers on a
+  continuously busy queue, empty claims become the single largest thing the
+  database is doing, and that is the point to revisit.
+
+  That is a far more actionable close than "deferred": it names the threshold,
+  the mechanism, and the two features that already hold it back.
 - ~~**Direct-to-partition inserts are unenforceable.**~~ **Confirmed
   unenforceable-by-inheritance, and now DETECTED.** Verified on 18.6, which
   also settles the mechanism the entry left implicit:
@@ -1240,15 +1277,27 @@ worker-side code is identical. Record it so the option is not forgotten.
   queue costs one `LISTEN` per subscribed queue on the single listener connection
   and makes dynamic queue creation a runtime `LISTEN`. Probably right at high
   queue counts, probably not worth it at low ones. Unmeasured.
-- **Do we notify on anything other than insert?** Every project surveyed notifies
-  on state transitions too — que has a broadcast `que_state` channel
+- ~~**Do we notify on anything other than insert?**~~ **No — decided, and the
+  entry had already argued itself to the answer.** Every project surveyed
+  notifies on state transitions too: que has a broadcast `que_state` channel
   (`migrations/4/up.sql:257`), River a `river_control` channel for cancellation
   (`river_job.sql:51-54`), underway fires on `insert or update`
-  (`20241024174106_1.sql:19-22`). `06-dashboard-and-mcp.md` will want a live
-  transition feed, and `05-polyglot-protocol.md:51` already promises
-  `GET /jobs/:id/events` as SSE. That feed is a *different* problem from wakeup
-  — high fanout, low value per message, and it is the one place a payload
-  actually wants to be large. Do not let it share the wakeup channel.
+  (`20241024174106_1.sql:19-22`).
+
+  We do not, and the reason is the one this entry gives: a transition feed is a
+  *different problem* from wakeup — high fanout, low value per message, and the
+  one place a payload actually wants to be large. Wakeup is the opposite on all
+  three counts, which is why its payload collapses to one per statement.
+
+  Sharing the channel would put the feed's fanout on the path workers depend on
+  for latency, and the measurement above prices that exactly: every message on
+  the wakeup channel costs **~37 µs on every listening worker**, whether or not
+  it is for them. A transition feed is many messages per job; the wakeup
+  channel is one per enqueue statement. Merging them would multiply the wakeup
+  cost by the transition count per job, to deliver messages no worker wants.
+
+  `GET /jobs/:id/events` (promised in `05-polyglot-protocol.md:51`) should be
+  its own channel when it is built.
 
 ## The badge needed a third state
 
