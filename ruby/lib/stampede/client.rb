@@ -31,20 +31,23 @@ module Stampede
         unique, unique_period, destination, dead_letter_queue, expire_seconds
       ]
 
-      Connection.with do |c|
-        # nil rather than raising when a deduplicated job was already queued:
-        # the caller's intent ("ensure this job exists") was satisfied, and
-        # making it an error forces every caller to tell "already queued" apart
-        # from "failed".
-        c.exec_params(sql, params).then { |r| r.ntuples.zero? ? nil : r[0]["id"] }
+      # nil rather than raising when a deduplicated job was already queued: the
+      # caller's intent ("ensure this job exists") was satisfied, and making it
+      # an error forces every caller to tell "already queued" apart from
+      # "failed".
+      Connection.translating_errors do
+        Connection.with { |c| c.exec_params(sql, params) }
+                  .then { |r| r.ntuples.zero? ? nil : r[0]["id"] }
       end
     end
     # rubocop:enable Metrics/ParameterLists
 
     def fetch(queue, id)
-      Connection.with do |c|
-        r = c.exec_params("SELECT * FROM stampede_jobs WHERE queue = $1 AND id = $2", [queue, id])
-        r.ntuples.zero? ? nil : Job.new(r[0])
+      Connection.translating_errors do
+        Connection.with do |c|
+          r = c.exec_params("SELECT * FROM stampede_jobs WHERE queue = $1 AND id = $2", [queue, id])
+          r.ntuples.zero? ? nil : Job.new(r[0])
+        end
       end
     end
   end

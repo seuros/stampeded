@@ -55,3 +55,44 @@ class SchemaTest < Minitest::Test
     assert Stampede::Schema.installed?
   end
 end
+
+class SchemaMissingTest < Minitest::Test
+  include StampedeTest::Isolation
+
+  def test_enqueueing_without_a_schema_says_what_to_run
+    # The single most likely failure on a first run. The raw Postgres error --
+    # `relation "stampede_jobs" does not exist` -- is accurate and tells a
+    # first-time user nothing.
+    conn { |c| Stampede::Schema.drop!(c) }
+
+    error = assert_raises(Stampede::SchemaMissing) do
+      Stampede.enqueue(queue: "default", task: "x")
+    end
+
+    assert_match(/stampede:install/, error.message, "must name the Rails task")
+    assert_match(/Schema\.install!/, error.message, "and the non-Rails call")
+    assert_match(/Postgres 18/, error.message,
+                 "the other likely cause is an old server, where it cannot apply at all")
+  end
+
+  def test_a_worker_fails_at_startup_rather_than_on_the_first_claim
+    # A worker that cannot register will never do anything, so it should say so
+    # immediately instead of producing a backtrace per poll forever.
+    conn { |c| Stampede::Schema.drop!(c) }
+
+    assert_raises(Stampede::SchemaMissing) do
+      Stampede::Worker.new(queue: "default", poll_interval: 0.05).run
+    end
+  end
+
+  def test_unrelated_database_errors_are_not_swallowed
+    # Making one error friendlier must not hide the others. A missing table
+    # that is not ours is somebody else's problem and should surface as itself.
+    error = assert_raises(PG::UndefinedTable) do
+      Stampede::Connection.translating_errors do
+        Stampede::Connection.with { |c| c.exec("SELECT * FROM some_other_app_table") }
+      end
+    end
+    assert_match(/some_other_app_table/, error.message)
+  end
+end

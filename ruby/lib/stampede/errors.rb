@@ -36,6 +36,32 @@ module Stampede
   # The daemon binary is not installed for this platform.
   class DaemonNotFound < Error; end
 
+  # The tables are not there.
+  #
+  # The raw Postgres error -- `relation "stampede_jobs" does not exist` -- is
+  # accurate and tells a first-time user nothing about what to do. This is the
+  # single most likely failure on a first run, so it gets a real message.
+  class SchemaMissing < Error
+    def initialize(cause = nil)
+      super(<<~MSG)
+        The Stampede schema is not installed in this database.
+
+        In Rails:
+
+            bin/rails stampede:install
+
+        Elsewhere:
+
+            Stampede::Schema.install!
+
+        Postgres 18 or newer is required -- the schema uses uuidv7(),
+        RETURNING OLD./NEW. and generated columns, with no compatibility
+        shims, so an older server cannot apply it at all.
+        #{"\nUnderlying error: #{cause.message.lines.first&.strip}" if cause}
+      MSG
+    end
+  end
+
   # A job was claimed for a task with no registered handler.
   class UnknownTask < Error; end
 end

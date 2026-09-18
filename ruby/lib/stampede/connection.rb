@@ -87,6 +87,20 @@ module Stampede
       MSG
     end
 
+    # Run a block, turning "the tables are missing" into something actionable.
+    #
+    # Postgres raises PG::UndefinedTable with the table name; if that name is
+    # ours, the user has almost certainly not run the installer. Anything else
+    # is passed through untouched -- swallowing real errors to make one error
+    # nicer would be a bad trade.
+    def translating_errors
+      yield
+    rescue PG::UndefinedTable, PG::UndefinedFunction => e
+      raise SchemaMissing, e if e.message.include?("stampede_")
+
+      raise
+    end
+
     def active_record?
       defined?(ActiveRecord::Base) && ActiveRecord::Base.respond_to?(:connection_db_config)
     rescue StandardError

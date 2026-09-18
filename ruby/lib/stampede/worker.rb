@@ -53,7 +53,10 @@ module Stampede
       # lived there, and the app's own job sat `available` forever with nothing
       # reporting an error.
       conn = PG.connect(Connection.connection_params)
-      worker_id = register_worker(conn)
+      # Fail with an explanation at STARTUP rather than a backtrace on the
+      # first claim: a worker that cannot register will never do anything, and
+      # the missing schema is the overwhelmingly likely reason.
+      worker_id = Connection.translating_errors { register_worker(conn) }
       log "registered #{worker_id} on queue #{@queue}"
 
       heartbeat = start_heartbeat(worker_id)
