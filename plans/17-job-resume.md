@@ -186,9 +186,28 @@ an error that says to store a cursor rather than a set.
   make "the workers are peers" false in the one place it is most visible. The
   Rust fixture for that test was captured from the real Ruby writer rather than
   guessed at.
-- **In-memory cursor buffering, also per River.** Each `checkpoint` here is a
-  round trip. A tight loop wants River's batching, at the cost of losing the
-  last few updates on a hard kill.
+- ~~**In-memory cursor buffering, also per River.**~~ **MEASURED, then shipped
+  as opt-in.**
+
+  The round trip is expensive enough to matter: **~1670 µs measured from Ruby
+  against a local database, so about 600 checkpoints/second** (79 µs of that is
+  server-side; the rest is the round trip). A job checkpointing every row at
+  10k rows/s would spend sixteen times longer recording progress than making
+  it. So the concern was real and worth closing.
+
+  Shipped as `advance!(value, every: 1000)` rather than automatic buffering,
+  which is where this departs from River deliberately. Buffering means a hard
+  kill loses up to N units of progress, and surviving a hard kill is the ENTIRE
+  PURPOSE of a checkpoint. A framework that quietly weakened that guarantee to
+  benchmark better would be trading away the thing being asked for. Written at
+  the call site, `every: 1000` states its own price.
+
+  One subtlety worth recording, because the tempting version is wrong: a
+  buffered cursor is **not** flushed when the block raises. The pending value
+  describes work that may not have committed, so writing it during unwinding
+  would make the retry SKIP that work rather than redo it — silent data loss in
+  exchange for a little speed. Redoing up to N units is the correct failure
+  mode. There is a test.
 - **Nothing verifies the checkpoint is a cursor rather than a result set.** The
   64 KB cap is a blunt instrument that catches the pathological case and
   nothing else.

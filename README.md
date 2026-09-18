@@ -392,6 +392,30 @@ poll interval instead of within milliseconds. If you want wakeups, give the
 daemon a **direct** connection (or a `session`-mode pool) — it is the only
 connection that needs one. Workers can stay pooled.
 
+## Checkpoint cost
+
+A checkpoint is a round trip — measured at **~1.7 ms against a local database,
+about 600/second**. Checkpointing every row of a large job therefore costs more
+than the work it records. Batch it:
+
+```ruby
+steps.step("rows", cursor: 0) do |c|
+  rows.each_with_index do |row, i|
+    process(row)
+    c.advance!(i, every: 1000)   # one write per 1000 rows
+  end
+end
+```
+
+`every:` is opt-in because it has a price: a hard kill loses up to N units of
+progress, and surviving a hard kill is what checkpoints are *for*. The default
+writes every time. Stating `every: 1000` at the call site is how the trade
+stays visible.
+
+A buffered cursor is deliberately not written when the block raises — the
+pending value may describe work that never committed, and persisting it would
+make the retry skip that work rather than redo it.
+
 ## Custom retry delays
 
 The row carries `backoff_base_ms` and `backoff_max_ms`, which give exponential

@@ -133,16 +133,55 @@ module Stampede
         @value = value
         @steps = steps
         @name = name
+        @since_write = 0
       end
 
       # Record progress within this step.
       #
       # COMMIT YOUR WORK FIRST, or pass the connection so both land together --
       # see JobContext#checkpoint!.
-      def advance!(value)
+      #
+      # `every:` writes once per N calls instead of every call. A checkpoint
+      # costs a round trip -- measured at ~1.7ms against a local database,
+      # so ~600/second -- which makes per-row checkpointing in a tight loop
+      # cost more than the work. River buffers for this reason.
+      #
+      # It is OPT-IN, and deliberately so. Buffering means a hard kill loses up
+      # to N units of progress, and surviving a hard kill is the entire purpose
+      # of a checkpoint; a framework that quietly weakened that guarantee to
+      # look faster would be trading away the thing being asked for. Written at
+      # the call site, `every: 1000` says what it costs.
+      #
+      # Call `flush!` when the loop ends: the last partial batch is otherwise
+      # still in memory. A step that COMPLETES does not need it -- the cursor
+      # is dropped when the step is recorded done.
+      #
+      # A buffered cursor is deliberately NOT flushed when the block raises.
+      # The pending value describes work that may not have committed, and
+      # writing it would make the retry SKIP that work rather than redo it --
+      # silent data loss in exchange for a little speed. Redoing up to N units
+      # is the correct failure mode, and it is the one the `every:` call site
+      # asked for.
+      def advance!(value, every: 1)
         @value = value
+        @since_write += 1
+        return value if every > 1 && @since_write < every
+
+        @since_write = 0
         @steps.send(:advance, @name, value)
         value
+      end
+
+      # Write a buffered cursor that has not reached its batch size.
+      #
+      # No-op when there is nothing outstanding, so it is safe to call
+      # unconditionally.
+      def flush!
+        return @value if @since_write.zero?
+
+        @since_write = 0
+        @steps.send(:advance, @name, @value)
+        @value
       end
 
       def to_s = @value.to_s
