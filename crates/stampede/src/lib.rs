@@ -19,6 +19,17 @@ pub mod schedule;
 pub mod wakeup;
 pub mod worker;
 
+/// HTTP edge: the enqueue API, per-job status and SSE, and the dashboard.
+///
+/// Behind a feature because it pulls rama. A process that only claims and runs
+/// jobs -- which is most of them -- has no reason to carry an HTTP stack.
+#[cfg(feature = "http")]
+pub mod http;
+
+/// MCP control plane.
+#[cfg(feature = "mcp")]
+pub mod mcp;
+
 pub use cron::{Cron, DstPolicy};
 pub use error::{Error, Result};
 pub use fairness::{Admission, Fairness, TenantLimit};
@@ -46,3 +57,21 @@ pub mod schema {
         Ok(())
     }
 }
+
+// Feature invariant, enforced at COMPILE time.
+//
+// A runtime `assert!(cfg!(feature = "http"))` would be tautological: it can
+// only observe the build it is part of, so it passes trivially whichever way
+// that build went. `compile_error!` is the only thing that stops a bad
+// combination being produced at all.
+//
+// UNREACHABLE TODAY, deliberately: `dashboard = ["http"]` in Cargo.toml
+// already implies it, so this cannot fire as things stand. It is here for the
+// edit that removes that implication -- at which point the dashboard would
+// fail deep inside the module with a confusing error about missing rama items,
+// instead of here, saying why.
+#[cfg(all(feature = "dashboard", not(feature = "http")))]
+compile_error!(
+    "the `dashboard` feature requires `http`: the dashboard is served by the \
+     same rama stack as the enqueue API. Enable `http`, or drop `dashboard`."
+);

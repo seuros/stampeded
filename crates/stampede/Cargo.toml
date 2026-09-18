@@ -1,0 +1,70 @@
+[package]
+name = "stampede"
+description = "A polyglot job processor on Postgres 18+: claim, execute, schedule, observe"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords = ["jobs", "queue", "postgres", "background", "scheduler"]
+categories = ["asynchronous", "database"]
+
+[features]
+# Everything, because `cargo install stampede` should give a working daemon.
+# A library embedding the queue takes --no-default-features and pays for none
+# of the HTTP or MCP dependency tree.
+default = ["cli", "http", "dashboard", "mcp"]
+
+# Log formatting for the binaries. A library embedding the queue emits through
+# `tracing` and chooses its own subscriber, so it should not inherit ours.
+cli = ["dep:tracing-subscriber"]
+
+# Enqueue API and the SSE job-event stream, on rama.
+http = ["dep:rama", "dep:futures"]
+# The live dashboard. Served by the same rama stack, so it implies http.
+dashboard = ["http"]
+# MCP control plane, on mcp-host.
+mcp = ["dep:mcp-host", "dep:schemars"]
+
+[dependencies]
+sqlx.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+jiff.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+state-machines.workspace = true
+chrono-machines.workspace = true
+breaker-machines.workspace = true
+throttle-machines.workspace = true
+
+rama = { workspace = true, optional = true }
+futures = { version = "0.3", optional = true }
+mcp-host = { workspace = true, optional = true }
+schemars = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+
+# The daemon. Needs the HTTP edge for --http; without that feature there is no
+# API and no dashboard to serve, so the binary would be a scheduler with no
+# way to look at it.
+[[bin]]
+name = "stampede"
+path = "src/bin/stampede/main.rs"
+required-features = ["cli", "http"]
+
+[[bin]]
+name = "stampede-mcp"
+path = "src/bin/stampede-mcp.rs"
+required-features = ["cli", "mcp"]
+
+[[example]]
+name = "worker"
+path = "examples/worker.rs"

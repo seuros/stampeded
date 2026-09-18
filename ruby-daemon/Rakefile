@@ -22,7 +22,7 @@ task :build, [:platform] do |_t, args|
   platform = args[:platform] or abort "usage: rake build[arm64-darwin]"
   target = PLATFORMS.fetch(platform) { abort "unknown platform #{platform}" }
 
-  sh "cargo build --release --target #{target} --manifest-path #{WORKSPACE}/Cargo.toml"
+  sh "cargo build --release --bin stampede --target #{target} --manifest-path #{WORKSPACE}/Cargo.toml"
 
   dest = File.join(__dir__, "exe", platform)
   mkdir_p dest

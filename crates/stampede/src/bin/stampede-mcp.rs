@@ -8,8 +8,8 @@
 
 use mcp_host::SESSION_ROLES_KEY;
 use mcp_host::transport::StdioTransport;
-use stampede_core::Queue;
-use stampede_mcp::{StampedeServer, router, server};
+use stampede::Queue;
+use stampede::mcp::{StampedeServer, router, server};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

@@ -17,7 +17,7 @@ use mcp_host::prelude::*;
 use mcp_host::registry::router::McpToolRouter;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use stampede_core::Queue;
+use crate::Queue;
 use std::sync::Arc;
 
 mod tools;

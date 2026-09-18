@@ -9,7 +9,7 @@
 
 use chrono::Utc;
 use sqlx::{AssertSqlSafe, PgPool};
-use stampede_core::{
+use stampede::{
     DstPolicy, FailureKind, JobState, NewJob, Period, Queue, Wakeup, Worker, WorkerConfig,
 };
 use std::sync::Arc;
@@ -50,7 +50,7 @@ async fn setup() -> Option<Queue> {
         .await
         .expect("pool");
 
-    stampede_core::schema::migrate(&pool)
+    stampede::schema::migrate(&pool)
         .await
         .expect("migrate");
     Some(Queue::new(pool))

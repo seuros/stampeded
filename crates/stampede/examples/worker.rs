@@ -9,7 +9,7 @@
 //!   INSERT INTO stampede_jobs (queue, task, args)
 //!   VALUES ('default', 'greet', '{"name":"world"}'::jsonb);
 
-use stampede_core::{NewJob, Queue, Worker, WorkerConfig};
+use stampede::{NewJob, Queue, Worker, WorkerConfig};
 use std::time::Duration;
 use tokio::sync::watch;
 
@@ -21,7 +21,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let url = std::env::var("STAMPEDE_DATABASE_URL").map_err(|_| "set STAMPEDE_DATABASE_URL")?;
     let pool = sqlx::PgPool::connect(&url).await?;
-    stampede_core::schema::migrate(&pool).await?;
+    stampede::schema::migrate(&pool).await?;
 
     let queue = Queue::new(pool);
     queue.create_queue("default").await?;

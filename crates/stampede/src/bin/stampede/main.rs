@@ -11,7 +11,7 @@
 mod config;
 
 use config::Config;
-use stampede_core::{
+use stampede::{
     Maintenance, MaintenanceConfig, Metrics, Queue, TracingRecorder, Wakeup, Worker, WorkerConfig,
 };
 use std::time::Duration;
@@ -48,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if config.migrate {
         info!("applying schema");
-        stampede_core::schema::migrate(&pool).await?;
+        stampede::schema::migrate(&pool).await?;
     }
 
     let queue = Queue::new(pool.clone());
@@ -60,7 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // TracingRecorder by default: it emits at debug, so it costs nothing until
-    // someone sets RUST_LOG=stampede_core::metrics=debug -- at which point they
+    // someone sets RUST_LOG=stampede::metrics=debug -- at which point they
     // have a working metrics feed with no backend to run. Anyone wanting real
     // telemetry implements Recorder in their own crate, on their own upgrade
     // schedule, which is the point of not depending on a vendor here.
@@ -142,7 +142,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if let Some(addr) = config.http.clone() {
-        let mut api = stampede_http::ApiState::new(queue.clone())
+        let mut api = stampede::http::ApiState::new(queue.clone())
             .with_notifications_live(wakeup.as_ref().is_some_and(|w| w.is_healthy()));
 
         match &config.dashboard_token {
@@ -160,7 +160,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let rx = shutdown_rx.clone();
         info!(%addr, "starting http api");
         tasks.push(tokio::spawn(async move {
-            if let Err(e) = stampede_http::serve(&addr, api, rx).await {
+            if let Err(e) = stampede::http::serve(&addr, api, rx).await {
                 error!(error = %e, "http server stopped");
             }
             Ok(())

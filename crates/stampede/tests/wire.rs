@@ -9,7 +9,7 @@
 //! below the transport could have caught that.
 
 use sqlx::{AssertSqlSafe, PgPool};
-use stampede_core::{NewJob, Queue};
+use stampede::{NewJob, Queue};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -45,7 +45,7 @@ async fn serve() -> Option<(String, Queue, watch::Sender<bool>)> {
         .await
         .expect("pool");
 
-    stampede_core::schema::migrate(&pool).await.expect("migrate");
+    stampede::schema::migrate(&pool).await.expect("migrate");
     let queue = Queue::new(pool);
     queue.create_queue("default").await.expect("create queue");
     queue.create_queue("dead").await.expect("create dlq");
@@ -60,8 +60,8 @@ async fn serve() -> Option<(String, Queue, watch::Sender<bool>)> {
     let q = queue.clone();
     let a = addr.clone();
     tokio::spawn(async move {
-        let state = stampede_http::ApiState::new(q).with_dashboard_token("s3cret");
-        let _ = stampede_http::serve(&a, state, rx).await;
+        let state = stampede::http::ApiState::new(q).with_dashboard_token("s3cret");
+        let _ = stampede::http::serve(&a, state, rx).await;
     });
 
     // Wait for the listener rather than sleeping a fixed amount.

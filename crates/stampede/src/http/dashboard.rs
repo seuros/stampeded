@@ -9,7 +9,7 @@
 //! Datastar patches elements by selector, so the server sends the rendered
 //! fragment and the browser swaps it in. All rendering stays in Rust.
 
-use crate::ApiState;
+use super::ApiState;
 use rama::futures::stream;
 use rama::http::header;
 use rama::http::sse::datastar::{ElementPatchMode, PatchElements};

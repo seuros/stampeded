@@ -5,8 +5,11 @@
 //! signature rather than listing instances, because "47 jobs failed" is noise
 //! and "47 jobs failed with the same connection timeout" is a diagnosis.
 
-use crate::{EmptyArgs, JobIdArgs, QueueArgs, ScheduleKeyArgs, ScheduleUpsertArgs, SearchArgs, StampedeServer};
-use stampede_core::DstPolicy;
+use super::{
+    EmptyArgs, JobIdArgs, QueueArgs, ScheduleKeyArgs, ScheduleUpsertArgs, SearchArgs,
+    StampedeServer,
+};
+use crate::DstPolicy;
 use mcp_host::prelude::*;
 use mcp_host::registry::router::McpToolRouter;
 

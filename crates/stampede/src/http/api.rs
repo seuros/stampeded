@@ -16,7 +16,7 @@ use rama::http::service::web::extract::{Path, State};
 use rama::http::service::web::extract::body::Json as JsonBody;
 use rama::http::service::web::response::{IntoResponse, Json, Sse};
 use serde::{Deserialize, Serialize};
-use stampede_core::{NewJob, Period, Queue};
+use crate::{NewJob, Period, Queue};
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
@@ -317,7 +317,7 @@ async fn job_events(
         .into_response()
 }
 
-fn job_json(job: &stampede_core::Job) -> serde_json::Value {
+fn job_json(job: &crate::Job) -> serde_json::Value {
     serde_json::json!({
         "id": job.id,
         "queue": job.queue,

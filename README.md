@@ -142,13 +142,24 @@ at claim, which would make every attempt column read 1. Use
 ```
 plans/     design notes — what was measured, and why each decision was made
 schema/    001_initial, 002_operations, 003_schedules  (PG18+ only)
-crates/
-  stampede-core     worker, queue, lifecycle, cron, wakeup, maintenance, metrics
-  stampede-daemon   the `stampede` binary
-  stampede-http     enqueue API + Datastar dashboard, on rama
-  stampede-mcp      MCP control plane, on mcp-host
+crates/stampede/  one crate, features gate the weight
+  src/            queue, worker, lifecycle, cron, wakeup, maintenance, metrics
+  src/http/       enqueue API + Datastar dashboard, on rama   [feature: http]
+  src/mcp/        MCP control plane, on mcp-host              [feature: mcp]
+  src/bin/        `stampede` (daemon) and `stampede-mcp`
 ruby/             the `stampede` gem: ActiveJob adapter, worker, schedules
 ruby-daemon/      the `stampede-daemon` gem: one binary per platform
+```
+
+One crate rather than a workspace of four, because the four bought nothing:
+nobody had asked to depend on the pieces separately, and it cost four
+publishes and four version numbers. Features carry the weight instead, and
+they carry a lot of it — the queue core alone locks **374** crates, everything
+locks **958**. An application embedding the queue should not compile rama:
+
+```bash
+cargo install stampede                       # the daemon, batteries included
+cargo add stampede --no-default-features     # just the queue
 ```
 
 All four `*-machines` crates are load-bearing: `state-machines` holds the
