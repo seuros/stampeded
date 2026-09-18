@@ -285,10 +285,18 @@ keeps claiming more that it will also appear to abandon.
 - **`retry_on(wait:)`**, per §4.2. The row carries
   `backoff_base_ms`/`backoff_max_ms`, which covers exponential-with-cap but not
   an arbitrary schedule. Grow the row, or accept the gap?
-- **Cross-compilation is not wired into CI.** `rake build[…]` works for the
-  host platform (verified on arm64-darwin); the five others need either a CI
-  matrix or `cross`, and neither exists yet.
-- **No Rails generator.** `stampede:install` applies the schema, but there is
-  no `rails g stampede:install` to write an initializer.
+- ~~**Cross-compilation is not wired into CI.**~~ **WIRED**, though not yet
+  proven: `.github/workflows/release.yml` builds all six platform gems, using
+  `cross` for the three that need it. It has never run — GitHub Actions cannot
+  be executed locally, so this stays unverified until the first release tag.
+  The matrix was cross-checked by hand against `ruby-daemon/Rakefile`.
+- ~~**No Rails generator.**~~ **CLOSED** — `rails g stampede:install` exists
+  and was verified against a fresh Rails 8 API app on 2026-09-18: it writes
+  `config/initializers/stampede.rb`, installs the schema into ActiveRecord's
+  own database, and is idempotent on a second run ("identical" / "schema
+  already installed, skipping", exit 0, existing rows untouched). The full
+  round trip works in that app — `perform_later` → row in the app database →
+  `bin/rails stampede:work` executes it → `completed`, attempt 1, with
+  `provider_job_id` equal to the row id.
 - ~~**Nothing tests the gem against a real Rails app.**~~ **CLOSED.** Doing it
   found three bugs, all in §6.
