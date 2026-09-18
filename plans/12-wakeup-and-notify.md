@@ -1192,13 +1192,9 @@ worker-side code is identical. Record it so the option is not forgotten.
   measured claim cost so it does not bind in steady state while still bounding
   a notification burst. One machine, one workload shape; a test pins the
   relationship rather than the number.
-- **Does the sonar channel justify itself?** It is a second channel, a second
-  timer and a status field, to detect a condition the operator usually already
-  knows about. Oban ships it; River ships a flag instead. Cheaper alternative:
-  probe `pg_listening_channels()` on the listener connection (pg-boss,
-  `src/db.ts:190-196`) — that catches subscription loss but *not* a pooler that
-  accepts `LISTEN` and silently drops deliveries. Unresolved which failure we
-  actually care about.
+- ~~**Does the sonar channel justify itself?**~~ **YES — settled against a real
+  pooler, and the cheaper alternative provably cannot do the job.** See §
+  "The sonar, tested against pgbouncer" below.
 - ~~**Interaction with `pg_cron`.**~~ Recurring jobs are not `pg_cron`'s; the
   schedule row is the due row and its row lock is the election. Superseded, and
   the original note follows for context. If recurring jobs are
@@ -1252,3 +1248,53 @@ the boolean it was given. The defect was that the boolean could not express the
 system's most common configuration, and that is only visible from outside —
 in this case from reading the badge on a daemon started the way the README
 tells people to start it.
+
+
+## The sonar, tested against pgbouncer
+
+The open item above asked whether the sonar earns its keep, and named the
+cheaper alternative: probe `pg_listening_channels()` on the listener connection,
+as pg-boss does (`src/db.ts:190-196`). It noted that this "catches subscription
+loss but *not* a pooler that accepts `LISTEN` and silently drops deliveries",
+and left it unresolved which failure we actually care about.
+
+**Resolved by installing pgbouncer and trying it.** Transaction pooling mode,
+one listener and one notifier through the pooler:
+
+```
+LISTEN through pgbouncer (transaction mode): accepted, no error raised
+pg_listening_channels() reports 1 channel(s)
+NOTIFY sent through the same pooler
+notification delivered: false
+```
+
+Every cheap signal says healthy. `LISTEN` is accepted without error. The
+connection reports itself subscribed to exactly one channel. **The notification
+never arrives.** `pg_listening_channels()` would report a problem: *no*. The
+sonar would: *yes*.
+
+Confirmed end to end against the real daemon — same binary, same database, only
+the URL differs:
+
+| connection | badge |
+|---|---|
+| `…@127.0.0.1:6432` (pgbouncer, transaction mode) | `polling only` |
+| `…@localhost:5432` (direct) | `wakeups live` |
+
+### Why this is the failure that matters
+
+Transaction-mode pooling is not an exotic deployment — it is the *recommended*
+PgBouncer mode and the common one in front of Rails. So the population most
+likely to hit this is the population the Ruby gem exists to serve, and the
+symptom is invisible: the queue is still correct, jobs still run, they are just
+polled rather than woken. Latency quietly becomes `poll_interval` instead of
+milliseconds, and nothing anywhere says so.
+
+That is precisely the condition the open item assumed "the operator usually
+already knows about". They do not, because there is nothing to know it by. A
+second channel and a timer is a small price for the only signal that can tell
+the difference.
+
+**The cheaper alternative is not merely weaker, it is actively misleading here**
+— it returns a confident healthy answer in the exact case we care about. Ship
+the sonar.

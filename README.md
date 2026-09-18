@@ -373,6 +373,25 @@ connection. In Rust, pass the transaction to `checkpoint_on`. Outside both, pass
 the connection explicitly — River's `ResumableSetStepCursorTx` exists for the
 same reason and got there first.
 
+## Connection pooling
+
+If you run behind PgBouncer in **transaction** mode — the recommended mode, and
+the common one in front of Rails — `LISTEN`/`NOTIFY` does not survive it. The
+pooler accepts the `LISTEN` without error and the connection will even tell you
+it is subscribed; the notifications simply never arrive.
+
+Stampede detects this rather than letting you find out from latency graphs. The
+dashboard says:
+
+```
+polling only
+```
+
+Nothing is broken when it does: jobs are still claimed correctly, just on the
+poll interval instead of within milliseconds. If you want wakeups, give the
+daemon a **direct** connection (or a `session`-mode pool) — it is the only
+connection that needs one. Workers can stay pooled.
+
 ## Timeouts
 
 Three layers, because the first cannot fire when the worker is dead and the
