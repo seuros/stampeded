@@ -108,5 +108,21 @@ It is **"there is no protocol"** — you already know how to talk to it.
 ## Still open
 
 - **Daemon-mediated claiming** — option (2) above, handing work out over
-  HTTP/SSE for workers across a trust boundary. The SQL-function path covers
-  in-cluster workers, which is the common case, so this stayed unbuilt.
+  HTTP/SSE for workers across a trust boundary. **Scoped out, not pending.**
+  The SQL-function path covers in-cluster workers, which is the common case,
+  and building a second claim path would mean a second implementation of the
+  semantics this file exists to keep singular.
+
+  The limitation it leaves is real and should be said plainly rather than left
+  implicit: **every worker needs database credentials.** A worker you do not
+  trust with the jobs table cannot be a Stampede worker. That rules out
+  browser-side or customer-hosted workers, and it is a design consequence of
+  "the tables ARE the protocol", not an oversight.
+
+  One argument for it that this file did not have when it was written: the herd
+  measurement in `12-wakeup-and-notify.md` prices broadcast wakeup at N-1 empty
+  claims per job — 1.8 database cores at 50 workers and 1,000 jobs/s. A daemon
+  handing work out knows which workers are idle, so it is also the answer to
+  unicast-vs-broadcast, which makes it worth more than "for untrusted workers"
+  suggests. Still not enough to justify a second claim path today, but the
+  reason to revisit is now a number rather than a preference.

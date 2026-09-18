@@ -539,6 +539,22 @@ every second.
 - No TLS on the HTTP edge and no auth on the enqueue API — put it behind
   something that has both. The *dashboard* is authenticated and off by default.
 
+## What this does not do
+
+**Every worker needs database credentials.** The tables are the protocol: a
+worker claims by calling a SQL function, so a worker you would not trust with
+the jobs table cannot be a Stampede worker. There is no broker handing work out
+over HTTP, which rules out browser-side or customer-hosted workers. That is a
+consequence of the design rather than a missing feature — see
+`plans/05-polyglot-protocol.md`, which weighs the alternative and declines it.
+
+**Strict FIFO is not offered.** See *Claim order*.
+
+**`retry_on` is refused, not supported.** ActiveJob's retry mechanism
+re-enqueues as a new row, which would give two independent retry budgets and
+make every counter on the dashboard wrong. Use `max_attempts`,
+`backoff_base_ms`/`backoff_max_ms`, or `RetryIn` — see *Custom retry delays*.
+
 ## Requirements
 
 Postgres **18 or newer**, deliberately. Stampede uses `uuidv7()`,
