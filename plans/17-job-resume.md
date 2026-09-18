@@ -180,9 +180,12 @@ an error that says to store a cursor rather than a set.
   last-completed-step, which behaves identically for a fixed sequence and does
   the right thing when a step is conditional.
 
-  **NOT done in Rust.** The Rust worker has the lower-level `checkpoint` /
-  `checkpoint_on` API but no step registry. That asymmetry is real: a polyglot
-  queue whose two first-party workers have different resume ergonomics.
+  **DONE in Rust too**, deliberately sharing the on-disk format —
+  `{"v":1,"completed":[…],"values":{…},"cursors":{…}}` — so a job checkpointed
+  by one worker resumes in the other. Two incompatible resume formats would
+  make "the workers are peers" false in the one place it is most visible. The
+  Rust fixture for that test was captured from the real Ruby writer rather than
+  guessed at.
 - **In-memory cursor buffering, also per River.** Each `checkpoint` here is a
   round trip. A tight loop wants River's batching, at the cost of losing the
   last few updates on a hard kill.

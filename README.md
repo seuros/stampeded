@@ -293,8 +293,16 @@ A checkpoint is otherwise opaque to Stampede — your cursor, your meaning. It
 rides on the row `stampede_claim` already returns, so resuming costs no extra
 round trip.
 
-Named steps are **Ruby-only today**; the Rust worker has the lower-level
-checkpoint API.
+Steps work the same from Rust:
+
+```rust
+ctx.step("charge", async { charge(&order).await }).await?;
+let path: String = ctx.step("render", async { render(&order).await }).await?;
+```
+
+Both workers write the **same** record, so a job checkpointed by the Ruby
+worker resumes in the Rust one and the reverse — which is what "the workers are
+peers" has to mean if it means anything.
 
 Deliberately **not** durable execution (Temporal, DBOS, restate). Replaying a
 function means intercepting every side effect, which means a per-language SDK

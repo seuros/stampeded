@@ -1704,3 +1704,122 @@ async fn a_checkpoint_in_a_transaction_rolls_back_with_its_work() {
     let after = q.fetch("default", id).await.unwrap().unwrap();
     assert_eq!(after.checkpoint.unwrap()["cursor"], 500);
 }
+
+#[tokio::test]
+async fn steps_run_once_and_skip_on_resume() {
+    // The Rust half of what the Ruby worker does, so the two first-party
+    // workers have the same resume ergonomics rather than one having a step
+    // model and the other a bare cursor.
+    let q = q!();
+    let id = q.enqueue(NewJob::new("default", "checkout")).await.unwrap().unwrap();
+    let w = q.register_worker("h", 1, &["default".into()]).await.unwrap();
+
+    let charges = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let renders = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    // Attempt one: charge and render succeed, then something kills us.
+    {
+        let job = q.claim("default", w, 1).await.unwrap().remove(0);
+        let ctx = q.context_for(&job, w);
+
+        let c = charges.clone();
+        ctx.step("charge", async move {
+            c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let r = renders.clone();
+        let path: String = ctx
+            .step("render", async move {
+                r.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok("/tmp/receipt.pdf".to_string())
+            })
+            .await
+            .unwrap();
+        assert_eq!(path, "/tmp/receipt.pdf");
+
+        q.fail_with_exit(&job, w, FailureKind::WorkerExited, "killed", Some(Duration::from_millis(1)), Some(137))
+            .await
+            .unwrap();
+    }
+
+    // Attempt two: both steps are skipped, and the render still yields its value.
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    {
+        let job = q.claim("default", w, 1).await.unwrap().remove(0);
+        let ctx = q.context_for(&job, w);
+
+        let c = charges.clone();
+        ctx.step("charge", async move {
+            c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let r = renders.clone();
+        let path: String = ctx
+            .step("render", async move {
+                r.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok("SHOULD NOT RUN".to_string())
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(path, "/tmp/receipt.pdf", "a skipped step must return what it produced");
+        q.complete(&job, w).await.unwrap();
+    }
+
+    assert_eq!(charges.load(std::sync::atomic::Ordering::SeqCst), 1, "the card must be charged once");
+    assert_eq!(renders.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(q.fetch("default", id).await.unwrap().unwrap().checkpoint.is_none());
+}
+
+#[tokio::test]
+async fn a_job_checkpointed_by_ruby_resumes_in_rust() {
+    // THE POLYGLOT CLAIM, at its most literal. plans/16 says the Ruby worker is
+    // "not a client of the Rust daemon, it is a peer" -- and peers have to be
+    // able to pick up each other's work.
+    //
+    // This fixture is not invented: it was captured from Stampede::Steps by
+    // running the Ruby worker against a live database on 2026-09-18, which
+    // emitted
+    //
+    //   {"v": 1, "values": {"render": "/tmp/receipt.pdf"},
+    //    "cursors": {"email": 2}, "completed": ["charge", "render"]}
+    //
+    // The Ruby side has the mirror of this test in steps_test.rb.
+    let q = q!();
+    let id = q.enqueue(NewJob::new("default", "checkout")).await.unwrap().unwrap();
+    let w = q.register_worker("ruby-worker", 1, &["default".into()]).await.unwrap();
+    let job = q.claim("default", w, 1).await.unwrap().remove(0);
+
+    let written_by_ruby = serde_json::json!({
+        "v": 1,
+        "completed": ["charge", "render"],
+        "values": { "render": "/tmp/receipt.pdf" },
+        "cursors": { "email": 2 }
+    });
+    q.checkpoint(&job, w, &written_by_ruby).await.unwrap().unwrap();
+
+    // A Rust worker picks it up.
+    let resumed = q.fetch("default", id).await.unwrap().unwrap();
+    let ctx = q.context_for(&resumed, w);
+    let steps = ctx.steps();
+
+    assert!(steps.completed("charge"), "Rust must see Ruby's completed steps");
+    assert_eq!(steps.value::<String>("render").unwrap(), "/tmp/receipt.pdf");
+    assert_eq!(steps.cursor::<i64>("email").unwrap(), 2, "and the in-progress cursor");
+
+    // And running the same steps skips them rather than charging twice.
+    let mut ran = false;
+    ctx.step("charge", async {
+        ran = true;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert!(!ran, "a step Ruby completed must not run again in Rust");
+}

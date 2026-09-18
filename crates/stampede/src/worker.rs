@@ -23,6 +23,8 @@ use crate::job::{FailureKind, Job};
 use crate::metrics::{Metrics, label, names};
 use crate::queue::Queue;
 use crate::wakeup::{NextPoll, Wakeup};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use breaker_machines::async_circuit::AsyncCircuitBreaker;
 use chrono::Utc;
 use chrono_machines::{BackoffPolicy, BackoffStrategy, ExponentialBackoff};
@@ -58,6 +60,15 @@ pub struct JobContext {
     pub job: Job,
     queue: Queue,
     worker_id: Uuid,
+    /// Step record for THIS attempt, held across calls.
+    ///
+    /// Not re-read from `job.checkpoint` each time: that field is the snapshot
+    /// taken at claim and is never updated, so two steps in one attempt would
+    /// each write a record containing only themselves and the first would be
+    /// lost. The symptom is a step running twice -- the card charged twice --
+    /// which is the exact failure steps exist to prevent. Found by a test that
+    /// counted the charges.
+    steps: Arc<std::sync::Mutex<crate::steps::StepState>>,
 }
 
 impl std::ops::Deref for JobContext {
@@ -69,6 +80,16 @@ impl std::ops::Deref for JobContext {
 }
 
 impl JobContext {
+    pub(crate) fn new(job: Job, queue: Queue, worker_id: Uuid) -> Self {
+        let steps = crate::steps::StepState::from_checkpoint(job.checkpoint.as_ref());
+        Self {
+            job,
+            queue,
+            worker_id,
+            steps: Arc::new(std::sync::Mutex::new(steps)),
+        }
+    }
+
     /// Save resume state. Returns `false` if this worker no longer owns the
     /// job, which means the reaper reclaimed it and the work should stop.
     ///
@@ -101,6 +122,66 @@ impl JobContext {
     /// The queue this job came from, for work that needs its own transaction.
     pub fn queue(&self) -> &Queue {
         &self.queue
+    }
+
+    /// The step record: what previous attempts completed, plus anything this
+    /// attempt has done so far.
+    pub fn steps(&self) -> crate::steps::StepState {
+        self.steps.lock().expect("step state poisoned").clone()
+    }
+
+    /// Run a step once, ever.
+    ///
+    /// On resume, a step an earlier attempt completed is SKIPPED and its stored
+    /// value returned instead — so a charge that succeeded is not charged again
+    /// because a later step crashed.
+    ///
+    /// ```ignore
+    /// ctx.step("charge", async { charge(&order).await }).await?;
+    /// let path: String = ctx.step("render", async { render(&order).await }).await?;
+    /// ```
+    ///
+    /// The future is not polled when the step is skipped — `async { … }` is
+    /// lazy, so constructing it costs nothing.
+    pub async fn step<T, F>(&self, name: &str, f: F) -> Result<T>
+    where
+        T: Serialize + DeserializeOwned + Default,
+        F: Future<Output = Result<T>>,
+    {
+        if let Some(done) = {
+            let state = self.steps.lock().expect("step state poisoned");
+            // A step with no stored value returns the type's default, which for
+            // the common `()` case is exactly right.
+            state.completed(name).then(|| state.value(name).unwrap_or_default())
+        } {
+            return Ok(done);
+        }
+
+        let value = f.await?;
+
+        // Mutate and snapshot under the lock, then write outside it -- the
+        // guard is not Send and must not be held across the await.
+        let state = {
+            let mut state = self.steps.lock().expect("step state poisoned");
+            state.complete(name, Some(&value))?;
+            state.clone()
+        };
+        self.checkpoint(&state).await?;
+        Ok(value)
+    }
+
+    /// Record progress WITHIN a step, for work too big for one pass.
+    ///
+    /// The cursor is handed back by [`steps`](JobContext::steps) on the next
+    /// attempt. Commit the work before advancing, or pass a transaction to
+    /// [`checkpoint_on`](JobContext::checkpoint_on) so both land together.
+    pub async fn advance<T: Serialize>(&self, name: &str, cursor: &T) -> Result<bool> {
+        let state = {
+            let mut state = self.steps.lock().expect("step state poisoned");
+            state.set_cursor(name, cursor)?;
+            state.clone()
+        };
+        self.checkpoint(&state).await
     }
 
     /// Resume state from a previous attempt, if any.
@@ -560,11 +641,7 @@ async fn execute(
             Err(Error::UnknownTask(task.clone()))
         }
         Some(h) => {
-            let ctx = JobContext {
-                job: job.clone(),
-                queue: queue.clone(),
-                worker_id,
-            };
+            let ctx = JobContext::new(job.clone(), queue.clone(), worker_id);
 
             let run = || async {
                 // tokio::select over a sleep, underway's model (plans/15). This

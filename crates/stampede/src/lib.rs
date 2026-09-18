@@ -16,6 +16,7 @@ pub mod maintenance;
 pub mod metrics;
 pub mod queue;
 pub mod schedule;
+pub mod steps;
 pub mod wakeup;
 pub mod worker;
 
@@ -39,6 +40,7 @@ pub use maintenance::{Maintenance, MaintenanceConfig};
 pub use metrics::{Metrics, Recorder, TracingRecorder};
 pub use queue::{Queue, Transition};
 pub use schedule::Schedule;
+pub use steps::StepState;
 pub use wakeup::{NextPoll, Wakeup};
 pub use worker::{Worker, WorkerConfig};
 

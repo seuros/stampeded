@@ -303,6 +303,15 @@ impl Queue {
         Ok(ok.flatten().unwrap_or(false))
     }
 
+    /// A handler context for this job, outside the worker loop.
+    ///
+    /// The worker builds one per job internally; this is for callers driving
+    /// the queue directly — tests, and anyone embedding the claim loop rather
+    /// than using `Worker`.
+    pub fn context_for(&self, job: &Job, worker_id: Uuid) -> crate::worker::JobContext {
+        crate::worker::JobContext::new(job.clone(), self.clone(), worker_id)
+    }
+
     /// Save resume state.
     ///
     /// Returns the new sequence number, or `None` if this worker no longer owns
