@@ -192,23 +192,56 @@ The gem is a second expression of queue semantics (§1). Two rules hold it down:
    them, so there is one definition. A gem-maintained Rails migration would be
    a second schema that drifts on its own release cycle.
 
-## 6. Still open
+## 6. Found while building it
 
-- **Worker concurrency model.** Threads (Sidekiq), processes (solid_queue's
-  forks), or one job at a time? Ruby's GVL makes threads fine for IO-bound jobs
-  and useless for CPU-bound ones. solid_queue forks and pays for a supervisor;
-  Sidekiq threads and documents the caveat. Not decided.
-- **Does `stampede work` boot Rails?** It must, to execute a job class. That
-  makes it a Rails command (`bin/rails stampede:work`) rather than a bare
-  binary, which is a different shape from the Rust worker and worth being
-  deliberate about.
-- **Graceful shutdown and the interruption budget.** `15-` says a graceful
-  shutdown must not consume the budget. The Ruby worker needs the same drain
-  semantics the Rust one has, and nothing currently tests that property in
-  either.
-- **`retry_on(wait:)`**, per §4.2.
-- **Which platforms to ship.** The owner's existing gems do three; tailwindcss
-  does nine. musl matters for Alpine containers, which is most of them.
-- **Whether `stampede-daemon` should be a hard or optional dependency.** Optional
-  matches `tailwindcss-rails`, but optional means a `gem install stampede` that
-  appears to work and then cannot start a scheduler.
+Two bugs that no unit test would have caught, both from running the thing
+end to end. Recorded because both are the same shape: a value that is
+structurally valid and semantically meaningless, so nothing errors.
+
+- **A recurring ActiveJob job was discarded on every firing.** The daemon
+  copies a schedule's `args` verbatim onto each occurrence and has no idea what
+  ActiveJob is, so the stored args must ALREADY be a valid ActiveJob payload.
+  `Stampede::Schedule` now builds one — deliberately without a `job_id`, since
+  a stored id would make every occurrence of a nightly job share one; the
+  worker fills it from the row, which also makes the ActiveJob id and the
+  Stampede id the same value.
+- **Recurring jobs landed in a queue called `#<Proc:0x...queue_name.rb:55>`.**
+  ActiveJob's `queue_name` CLASS attribute holds a lambda — it is the INSTANCE
+  that resolves it. Reading it off the class and stringifying produced a
+  perfectly valid queue name that no worker will ever poll, so the schedule
+  would have fired forever into nothing.
+
+## 7. Decided while building
+
+- **Threads, not forks.** Rails jobs are IO-bound and the GVL is released for
+  database, HTTP and file IO. Documented that CPU-bound work does not scale on
+  the pool and wants more processes instead, which is Sidekiq's advice.
+  solid_queue forks and pays for a supervisor.
+- **Six platforms**: `{arm64,x86_64}-darwin` and
+  `{aarch64,x86_64}-linux-{gnu,musl}`. musl is not optional — most container
+  images are Alpine, where a gnu binary fails at `exec` with a linker error.
+- **`stampede-daemon` is optional**, matching `tailwindcss-rails`. The
+  `DaemonNotFound` message names the platform, gives the gem line, gives the
+  cargo command, and says the queue works without it — because "not found" on
+  its own sends people reading source.
+- **Graceful shutdown drains.** In-flight jobs report their own outcome, so a
+  deploy never charges an interruption; stragglers past `shutdown_timeout` are
+  reclaimed and charged, which is correct. This closes the plans/15 open item
+  for the Ruby side, and there is a test.
+
+## 8. Still open
+
+- **`retry_on(wait:)`**, per §4.2. The row carries
+  `backoff_base_ms`/`backoff_max_ms`, which covers exponential-with-cap but not
+  an arbitrary schedule. Grow the row, or accept the gap?
+- **The RUST worker's graceful shutdown is still untested.** §7 closed this for
+  Ruby. The Rust daemon drains too, but nothing asserts that draining does not
+  charge an interruption.
+- **Cross-compilation is not wired into CI.** `rake build[…]` works for the
+  host platform (verified on arm64-darwin); the five others need either a CI
+  matrix or `cross`, and neither exists yet.
+- **No Rails generator.** `stampede:install` applies the schema, but there is
+  no `rails g stampede:install` to write an initializer.
+- **Nothing tests the gem against a REAL Rails app.** The suite uses bare
+  ActiveJob. The railtie, the rake tasks and the `database_configuration`
+  lookup are therefore unexercised.

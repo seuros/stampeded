@@ -116,6 +116,27 @@ Rust handlers are registered in-process
 (`crates/stampede-core/examples/worker.rs`); workers in other languages use
 `stampede_claim` as shown above. Neither needs a client library.
 
+## Rails
+
+```ruby
+gem "stampede"
+gem "stampede-daemon"   # optional: the precompiled binary
+```
+
+```ruby
+config.active_job.queue_adapter = :stampede
+```
+
+Two processes: `bin/rails stampede:work` runs your jobs, `bin/rails
+stampede:daemon` runs the scheduler, reaper, pruner and dashboard. They are
+split because the Rust daemon cannot execute an ActiveJob job — an ActiveJob
+job is a Ruby class — while every other role operates on *rows* and so does not
+care what language wrote them. See `ruby/README.md` and `plans/16`.
+
+`retry_on` raises: it re-enqueues as a new row while Stampede counts attempts
+at claim, which would make every attempt column read 1. Use
+`stampede max_attempts: 5` instead.
+
 ## Layout
 
 ```
@@ -126,6 +147,8 @@ crates/
   stampede-daemon   the `stampede` binary
   stampede-http     enqueue API + Datastar dashboard, on rama
   stampede-mcp      MCP control plane, on mcp-host
+ruby/             the `stampede` gem: ActiveJob adapter, worker, schedules
+ruby-daemon/      the `stampede-daemon` gem: one binary per platform
 ```
 
 All four `*-machines` crates are load-bearing: `state-machines` holds the
