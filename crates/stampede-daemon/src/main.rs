@@ -11,10 +11,10 @@
 mod config;
 
 use config::Config;
-use stampede_core::{Maintenance, MaintenanceConfig, Queue, Worker, WorkerConfig};
+use stampede_core::{Maintenance, MaintenanceConfig, Queue, Wakeup, Worker, WorkerConfig};
 use std::time::Duration;
 use tokio::sync::watch;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -49,7 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         stampede_core::schema::migrate(&pool).await?;
     }
 
-    let queue = Queue::new(pool);
+    let queue = Queue::new(pool.clone());
 
     // Provision the partition up front so the first enqueue does not land in
     // the DEFAULT partition, which has no dedicated autovacuum settings.
@@ -58,6 +58,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+    // ONE listener connection for the whole daemon, fanned out in process to
+    // every worker. Never one per worker: with max_connections = 100 that is
+    // not affordable, and River's MaxConns 1 hijack is the shape to copy.
+    //
+    // Failure here is not fatal. A daemon that cannot LISTEN polls instead,
+    // which is correct and merely less prompt -- the whole point of keeping the
+    // poll floor on unconditionally.
+    let wakeup = if config.worker {
+        match Wakeup::start(&pool, &config.database_url, shutdown_rx.clone()).await {
+            Ok(w) => Some(w),
+            Err(e) => {
+                warn!(error = %e, "could not start listener; polling only");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     // SIGINT/SIGTERM trigger a graceful drain: stop claiming, let in-flight
     // jobs finish, deregister. Jobs abandoned instead would sit until the
@@ -89,6 +108,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             concurrency = config.concurrency,
             "starting worker"
         );
+        let worker = match wakeup.clone() {
+            Some(w) => worker.with_wakeup(w),
+            None => worker,
+        };
         let rx = shutdown_rx.clone();
         tasks.push(tokio::spawn(async move { worker.run(rx).await }));
     }

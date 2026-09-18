@@ -9,7 +9,8 @@
 
 use sqlx::{AssertSqlSafe, PgPool};
 use std::time::Duration;
-use stampede_core::{DstPolicy, FailureKind, JobState, NewJob, Queue};
+use chrono::Utc;
+use stampede_core::{DstPolicy, FailureKind, JobState, NewJob, Queue, Wakeup};
 use uuid::Uuid;
 
 /// Each test gets its own Postgres schema.
@@ -48,6 +49,20 @@ async fn setup() -> Option<Queue> {
 
     stampede_core::schema::migrate(&pool).await.expect("migrate");
     Some(Queue::new(pool))
+}
+
+/// `setup`, plus the URL a listener needs.
+///
+/// PgListener opens its OWN connection rather than borrowing from the pool, and
+/// that connection does not inherit the pool's search_path. It does not need to:
+/// the channel name is fully qualified (`t_abc.stampede_insert`) and the trigger
+/// builds the same string from its own `current_schema()`. So these tests still
+/// get a private schema and can run in parallel with everything else.
+async fn setup_with_url() -> Option<(Queue, String)> {
+    let url = std::env::var("STAMPEDE_TEST_DATABASE_URL").ok()?;
+    let q = setup().await?;
+    q.create_queue("default").await.expect("create queue");
+    Some((q, url))
 }
 
 macro_rules! q {
@@ -629,4 +644,87 @@ async fn depth_of(q: &Queue, state: &str) -> i64 {
         .find(|(s, _)| s == state)
         .map(|(_, n)| n)
         .unwrap_or(0)
+}
+
+// ---------------------------------------------------------------- plans/12
+
+#[tokio::test]
+async fn the_trigger_notifies_and_the_listener_hears_it() {
+    // The trigger has to reach a listener that is not the enqueuer. This is
+    // the whole polyglot wakeup argument: a Ruby script running a plain INSERT
+    // runs none of our code, so if the DATABASE did not notify, nothing would.
+    let Some((q, url)) = setup_with_url().await else {
+        eprintln!("skipping: STAMPEDE_TEST_DATABASE_URL not set");
+        return;
+    };
+    let (_tx, rx) = tokio::sync::watch::channel(false);
+
+    let wakeup = Wakeup::start(q.pool(), &url, rx).await.unwrap();
+    assert!(wakeup.is_healthy(), "sonar should confirm the path on a direct connection");
+
+    let mut woke = wakeup.subscribe("default");
+
+    // Enqueued with raw SQL, exactly as a non-Rust client would.
+    sqlx::query("INSERT INTO stampede_jobs (queue, task) VALUES ('default', 'x')")
+        .execute(q.pool())
+        .await
+        .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(5), woke.recv())
+        .await
+        .expect("a plain INSERT must wake a listener");
+}
+
+#[tokio::test]
+async fn a_bulk_insert_collapses_into_one_notification_per_queue() {
+    // Why the trigger is statement-level with a bare queue name as the payload.
+    // Postgres collapses identical (channel, payload) pairs within a
+    // transaction, so 500 rows is one notification -- self-throttling for free.
+    // River tore its trigger out citing notification storms, which is a
+    // problem specific to the per-row form it shipped.
+    let Some((q, url)) = setup_with_url().await else { return };
+    let (_tx, rx) = tokio::sync::watch::channel(false);
+    let wakeup = Wakeup::start(q.pool(), &url, rx).await.unwrap();
+    let mut woke = wakeup.subscribe("default");
+
+    sqlx::query(
+        "INSERT INTO stampede_jobs (queue, task) \
+         SELECT 'default', 'bulk' FROM generate_series(1, 500)",
+    )
+    .execute(q.pool())
+    .await
+    .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(5), woke.recv())
+        .await
+        .expect("should wake");
+
+    // Drain: if the payload carried a nonce (Graphile's {"r":random()}) there
+    // would be 500 of these, which is exactly the storm River complained about.
+    let mut extra = 0;
+    while tokio::time::timeout(Duration::from_millis(300), woke.recv()).await.is_ok() {
+        extra += 1;
+        if extra > 5 {
+            break;
+        }
+    }
+    assert_eq!(extra, 0, "500 rows in one transaction must be ONE notification");
+}
+
+#[tokio::test]
+async fn a_future_dated_job_does_not_wake_anybody() {
+    // pg-boss's gate. There is nothing to wake up FOR: the scheduler will
+    // promote it when it is due, and waking every worker now would just produce
+    // an empty claim.
+    let Some((q, url)) = setup_with_url().await else { return };
+    let (_tx, rx) = tokio::sync::watch::channel(false);
+    let wakeup = Wakeup::start(q.pool(), &url, rx).await.unwrap();
+    let mut woke = wakeup.subscribe("default");
+
+    q.enqueue(NewJob::new("default", "later").scheduled_at(Utc::now() + chrono::Duration::hours(1)))
+        .await
+        .unwrap();
+
+    let fired = tokio::time::timeout(Duration::from_millis(500), woke.recv()).await;
+    assert!(fired.is_err(), "a job scheduled an hour out must not wake a worker now");
 }

@@ -21,6 +21,7 @@ use crate::error::{Error, Result};
 use crate::fairness::{Fairness, TenantLimit};
 use crate::job::{FailureKind, Job};
 use crate::queue::Queue;
+use crate::wakeup::{NextPoll, Wakeup};
 use breaker_machines::async_circuit::AsyncCircuitBreaker;
 use chrono_machines::{BackoffPolicy, BackoffStrategy, ExponentialBackoff};
 use std::collections::HashMap;
@@ -28,6 +29,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
+use throttle_machines::gate::Gate;
+use throttle_machines::gcra::{Gcra, GcraParams};
 use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -62,6 +65,18 @@ pub struct WorkerConfig {
     /// Trip a task's circuit after this many consecutive failures, so a failing
     /// downstream is not hammered by every retrying job. `None` disables it.
     pub breaker_failure_threshold: Option<usize>,
+    /// Minimum gap between claim round trips, however many wakeups arrive.
+    ///
+    /// GCRA on the RECEIVER side. The sender is a trigger with no memory across
+    /// transactions, so it cannot pace itself — and the transaction-level
+    /// payload collapsing already does the sender's job for the case that
+    /// matters. River puts a limiter on its client because River's client is
+    /// what sends the notification; ours is the database.
+    ///
+    /// 5 ms is Oban's `dispatch_cooldown`, giving a ceiling of (1000/5) x batch
+    /// jobs/s. River's 100 ms is 20x more conservative, but our claim is one
+    /// statement rather than a CTE round trip.
+    pub wakeup_cooldown: Duration,
 }
 
 impl Default for WorkerConfig {
@@ -75,8 +90,17 @@ impl Default for WorkerConfig {
             max_concurrency: 10,
             tenant_limit: Some(TenantLimit::default()),
             breaker_failure_threshold: Some(10),
+            wakeup_cooldown: Duration::from_millis(5),
         }
     }
+}
+
+/// Monotonic-ish seconds for the GCRA gate. Same clock the fairness gate uses.
+fn now_secs() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
 }
 
 /// Used when a backoff policy declines to produce a delay. See `default_backoff`.
@@ -109,6 +133,9 @@ pub fn default_backoff() -> BackoffPolicy {
 pub struct Worker {
     queue: Queue,
     config: WorkerConfig,
+    /// `None` means poll-only, which is always correct and never wrong —
+    /// just slower to start a job.
+    wakeup: Option<Wakeup>,
     handlers: HashMap<String, Handler>,
     backoff: BackoffPolicy,
     fairness: Option<Arc<Fairness>>,
@@ -123,11 +150,21 @@ impl Worker {
         Self {
             queue,
             config,
+            wakeup: None,
             handlers: HashMap::new(),
             backoff: default_backoff(),
             fairness,
             breakers: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Wake this worker on NOTIFY as well as on the poll interval.
+    ///
+    /// Strictly an accelerant. Without it the worker is correct and starts jobs
+    /// within one poll interval; with it, within milliseconds.
+    pub fn with_wakeup(mut self, wakeup: Wakeup) -> Self {
+        self.wakeup = Some(wakeup);
+        self
     }
 
     /// Get or create the circuit breaker for a task.
@@ -202,11 +239,31 @@ impl Worker {
         });
 
         let sem = Arc::new(tokio::sync::Semaphore::new(self.config.max_concurrency));
-        let mut ticker = tokio::time::interval(self.config.poll_interval);
+        let mut wakeups = self.wakeup.as_ref().map(|w| w.subscribe(&self.config.queue));
+
+        // GCRA state for the wakeup gate. One tenant of one: this paces THIS
+        // worker's claims, nothing else.
+        let cooldown = self.config.wakeup_cooldown.as_secs_f64();
+        let mut tat = 0.0f64;
+        let mut next = NextPoll::Idle;
 
         loop {
+            let delay = next.delay(self.config.poll_interval);
+
+            // The poll floor is never disabled, notifications or not. A
+            // redundant wakeup costs one empty query; a missed one costs a
+            // stuck job, and nine of nine notifying implementations surveyed
+            // still poll unconditionally.
             tokio::select! {
-                _ = ticker.tick() => {}
+                _ = tokio::time::sleep(delay) => {}
+                // Only selected when notifications are wired up; otherwise this
+                // branch is disabled and the sleep above is the only wakeup.
+                _ = async {
+                    match wakeups.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {}
                 _ = shutdown.changed() => {
                     info!(%worker_id, "shutdown requested");
                     break;
@@ -218,17 +275,43 @@ impl Worker {
             // tell them from genuinely running work.
             let available = sem.available_permits();
             if available == 0 {
+                next = NextPoll::Saturated;
                 continue;
             }
+
+            // A burst of notifications must not become a burst of claims. The
+            // payload collapsing already bounds one transaction; this bounds a
+            // thousand small ones, which is the shape a busy enqueuer has.
+            let decision = Gcra::check(
+                tat,
+                now_secs(),
+                GcraParams { emission_interval: cooldown, delay_tolerance: cooldown * 4.0 },
+            );
+            tat = decision.state;
+            if !decision.allowed {
+                tokio::time::sleep(Duration::from_secs_f64(
+                    decision.retry_after.clamp(0.0, 1.0),
+                ))
+                .await;
+            }
+
             let want = (available as i32).min(self.config.batch_size);
 
             let jobs = match self.queue.claim(&self.config.queue, worker_id, want).await {
                 Ok(j) => j,
                 Err(e) => {
                     error!(error = %e, "claim failed");
+                    next = NextPoll::Idle;
                     continue;
                 }
             };
+
+            // Decided BEFORE the jobs are consumed below. A full batch means
+            // there is probably more waiting, so the next claim happens
+            // immediately instead of a poll interval later — the difference
+            // between draining a backlog at full speed and at one batch per
+            // second.
+            next = NextPoll::after_claim(jobs.len(), want as usize, sem.available_permits());
 
             for job in jobs {
                 // Fairness is applied AFTER claiming, not before. Claiming is

@@ -14,6 +14,7 @@ pub mod job;
 pub mod maintenance;
 pub mod queue;
 pub mod schedule;
+pub mod wakeup;
 pub mod worker;
 
 pub use cron::{Cron, DstPolicy};
@@ -23,6 +24,7 @@ pub use fairness::{Admission, Fairness, TenantLimit};
 pub use maintenance::{Maintenance, MaintenanceConfig};
 pub use job::{FailureKind, Job, JobState, NewJob};
 pub use queue::{Queue, Transition};
+pub use wakeup::{NextPoll, Wakeup};
 pub use worker::{Worker, WorkerConfig};
 
 /// The embedded schema, so a host application can migrate without shipping
