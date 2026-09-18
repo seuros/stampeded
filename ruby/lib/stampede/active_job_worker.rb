@@ -35,14 +35,27 @@ module Stampede
       # uses. It resolves the class, runs callbacks, and raises out of
       # `rescue_from`/`discard_on` handling -- so an exception reaching us is
       # genuinely unhandled and should be recorded as a failure.
+      # Resolve the class FIRST, so that "this job class is gone" is
+      # distinguishable from "this job raised a NameError".
+      #
+      # This used to rescue NameError around the whole execution -- and
+      # NoMethodError IS A NameError, so any `nil.foo` typo inside any job was
+      # misclassified as an unknown task, marked unrecoverable and DISCARDED
+      # without a single retry. A transient nil during a deploy would silently
+      # destroy jobs. Found when a typo in a test job produced
+      # "undefined method 'cursor'" reported as a missing task.
+      klass = payload["job_class"]
+      begin
+        Object.const_get(klass)
+      rescue NameError
+        # A rename deployed to the enqueuer but not to the workers. No amount
+        # of waiting brings the constant back, so this one really is terminal.
+        raise UnknownTask, "#{klass} is not defined in this worker"
+      end
+
       # Parked for the duration so the job can reach it via the helpers in
       # ActiveJobExt. ActiveJob::Base.execute gives us no other seam.
       Current.with(job) { ActiveJob::Base.execute(payload) }
-    rescue NameError => e
-      # A job class that no longer exists: a rename deployed to the enqueuer
-      # but not to the workers. Unrecoverable rather than retryable, because
-      # no amount of waiting will bring the constant back.
-      raise UnknownTask, "#{job.task}: #{e.message}"
     end
   end
 end

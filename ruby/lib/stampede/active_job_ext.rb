@@ -36,6 +36,26 @@ module Stampede
       ctx.checkpoint!(state || rest, conn: conn)
     end
 
+    # Run a step once, ever -- skipped if an earlier attempt completed it.
+    #
+    #   def perform(order)
+    #     stampede_step("charge") { Stripe.charge(order.total) }   # never twice
+    #     path = stampede_step("render") { render_pdf(order) }     # value kept
+    #
+    #     stampede_step("email", cursor: 0) do |step|
+    #       recipients[step.cursor..].each do |to|
+    #         Mailer.receipt(to).deliver_now
+    #         step.advance!(step.cursor + 1)
+    #       end
+    #     end
+    #   end
+    def stampede_step(name, cursor: nil, &)
+      ctx = Stampede::Current.context
+      raise Stampede::Error, "no Stampede job context: is this running under a Stampede worker?" if ctx.nil?
+
+      ctx.step(name, cursor: cursor, &)
+    end
+
     # True when this attempt picked up where a previous one left off.
     def stampede_resumed?
       !Stampede::Current.context&.checkpoint.nil?

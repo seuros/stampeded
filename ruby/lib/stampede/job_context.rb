@@ -76,6 +76,14 @@ module Stampede
       !seq.nil?
     end
 
+    # Named steps for this job, fast-forwarded on resume.
+    def steps
+      @steps ||= Steps.new(self)
+    end
+
+    # Run a step once, ever. See Stampede::Steps.
+    def step(name, cursor: nil, &) = steps.step(name, cursor: cursor, &)
+
     # Tell the database the job is progressing, without saving state.
     def touch!
       ok = Connection.own do |c|

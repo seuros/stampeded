@@ -170,11 +170,19 @@ an error that says to store a cursor rather than a set.
 
 ## 8. Still open
 
-- **Named steps, per River.** The single opaque blob works, but it makes every
-  job author write the same "where was I" reconstruction. River's step model is
-  the better design and adopting it is a real API change, not a tweak: it needs
-  a step registry, duplicate-name detection, and the fast-forward pass. Worth
-  doing; not done.
+- ~~**Named steps, per River.**~~ **DONE in Ruby** (`Stampede::Steps`), with one
+  deliberate departure: a step's return value is PERSISTED when small and handed
+  back when the step is skipped. River returns nothing, so the obvious usage —
+  `data = step("download") { fetch(url) }` — is silently nil on resume. A result
+  over 8 KB raises rather than being dropped, because a job that works until the
+  first crash and then behaves differently is worse than one that fails loudly.
+  Completed steps are tracked as a SET rather than River's single
+  last-completed-step, which behaves identically for a fixed sequence and does
+  the right thing when a step is conditional.
+
+  **NOT done in Rust.** The Rust worker has the lower-level `checkpoint` /
+  `checkpoint_on` API but no step registry. That asymmetry is real: a polyglot
+  queue whose two first-party workers have different resume ergonomics.
 - **In-memory cursor buffering, also per River.** Each `checkpoint` here is a
   round trip. A tight loop wants River's batching, at the cost of losing the
   last few updates on a hard kill.

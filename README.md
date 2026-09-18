@@ -265,9 +265,36 @@ def perform(file)
 end
 ```
 
-A checkpoint is opaque to Stampede — your cursor, your meaning. It is handed
-back on the next attempt, and it rides on the row `stampede_claim` already
-returns, so resuming costs no extra round trip.
+Or by **named step**, which is what you want when a job has phases that must
+not be repeated:
+
+```ruby
+def perform(order)
+  stampede_step("charge") { Stripe.charge(order.total) }    # never charged twice
+  path = stampede_step("render") { render_pdf(order) }      # value kept on resume
+
+  stampede_step("email", cursor: 0) do |step|
+    recipients[step.cursor..].each do |to|
+      Mailer.receipt(to, path).deliver_now
+      step.advance!(step.cursor + 1)
+    end
+  end
+end
+```
+
+On resume, completed steps are skipped and the one that was running picks up
+from its cursor. This is River's model, which is the prior art and better than a
+single blob — with one departure: a step's return value is kept and handed back
+when the step is skipped, so `path = step { ... }` is not silently nil the
+second time round. Results over 8 KB raise; store the big thing yourself and
+return a reference.
+
+A checkpoint is otherwise opaque to Stampede — your cursor, your meaning. It
+rides on the row `stampede_claim` already returns, so resuming costs no extra
+round trip.
+
+Named steps are **Ruby-only today**; the Rust worker has the lower-level
+checkpoint API.
 
 Deliberately **not** durable execution (Temporal, DBOS, restate). Replaying a
 function means intercepting every side effect, which means a per-language SDK

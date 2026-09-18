@@ -90,3 +90,63 @@ class ActiveJobWorkerTest < Minitest::Test
     assert_equal "unrecoverable", row["failure_kind"]
   end
 end
+
+class NoMethodJob < ActiveJob::Base
+  def perform = nil.this_method_does_not_exist
+end
+
+class MisclassificationTest < Minitest::Test
+  include StampedeTest::Isolation
+
+  def setup
+    super
+    ActiveJob::Base.queue_adapter = ActiveJob::QueueAdapters::StampedeAdapter.new
+  end
+
+  def test_a_nomethoderror_inside_a_job_is_retried_not_discarded
+    # NoMethodError IS A NameError. Rescuing NameError around the whole
+    # execution -- to detect a deleted job class -- misclassified every `nil.foo`
+    # typo as an unknown task and DISCARDED the job without a single retry.
+    # A transient nil during a deploy would have silently destroyed work.
+    job = NoMethodJob.perform_later(*[])
+    id = job.provider_job_id
+
+    worker = Stampede::ActiveJobWorker.new(queue: "default", poll_interval: 0.05)
+    t = Thread.new { worker.run }
+    deadline = Time.now + 10
+    sleep 0.05 until job_row(id)["state"] != "available" || Time.now > deadline
+    worker.stop
+    t.join(5)
+
+    row = job_row(id)
+    assert_equal "retryable", row["state"], "a bug in a job is retryable, not terminal"
+    assert_equal "raised", row["failure_kind"], "and it is a raise, not an unknown task"
+    assert_match(/this_method_does_not_exist/, row["last_error"])
+  ensure
+    t&.kill
+  end
+
+  def test_a_genuinely_missing_job_class_is_still_unrecoverable
+    # The case the rescue was there for must keep working.
+    id = Stampede.enqueue(
+      queue: "default", task: "VanishedJob",
+      args: { "job_class" => "VanishedJob", "job_id" => SecureRandom.uuid,
+              "queue_name" => "default", "arguments" => [], "executions" => 0,
+              "priority" => nil, "locale" => "en" }
+    )
+
+    worker = Stampede::ActiveJobWorker.new(queue: "default", poll_interval: 0.05)
+    t = Thread.new { worker.run }
+    deadline = Time.now + 10
+    sleep 0.05 until job_row(id)["state"] == "discarded" || Time.now > deadline
+    worker.stop
+    t.join(5)
+
+    row = job_row(id)
+    assert_equal "discarded", row["state"]
+    assert_equal "unrecoverable", row["failure_kind"]
+    assert_match(/VanishedJob is not defined/, row["last_error"])
+  ensure
+    t&.kill
+  end
+end
