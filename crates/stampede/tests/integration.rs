@@ -1924,3 +1924,90 @@ async fn the_job_listing_is_bounded_by_a_statement_timeout() {
         "a dashboard query ceiling longer than a few seconds defeats the point"
     );
 }
+
+#[tokio::test]
+async fn the_counters_stay_accurate_under_concurrent_transitions() {
+    // The counters are load-bearing: depth, the dashboard and every metric read
+    // them instead of aggregating, precisely so nothing runs a count(*) over
+    // the jobs table. If the trigger drifts under concurrency, every one of
+    // those lies -- and lies quietly, which is worse than being slow.
+    let q = q!();
+
+    // Enqueue from several connections at once.
+    let mut writers = Vec::new();
+    for _ in 0..8 {
+        let q = q.clone();
+        writers.push(tokio::spawn(async move {
+            for _ in 0..25 {
+                q.enqueue(NewJob::new("default", "churn")).await.unwrap();
+            }
+        }));
+    }
+    for w in writers {
+        w.await.unwrap();
+    }
+
+    let available = depth_of(&q, "available").await;
+    assert_eq!(available, 200, "200 concurrent inserts must count as 200");
+
+    // Now move them through the lifecycle from several workers at once.
+    let mut workers = Vec::new();
+    for i in 0..4 {
+        let q = q.clone();
+        workers.push(tokio::spawn(async move {
+            let w = q
+                .register_worker(&format!("h{i}"), i, &["default".into()])
+                .await
+                .unwrap();
+            let mut done = 0;
+            loop {
+                let jobs = q.claim("default", w, 5).await.unwrap();
+                if jobs.is_empty() {
+                    break;
+                }
+                for job in jobs {
+                    q.complete(&job, w).await.unwrap();
+                    done += 1;
+                }
+            }
+            done
+        }));
+    }
+    let mut completed = 0;
+    for w in workers {
+        completed += w.await.unwrap();
+    }
+    assert_eq!(completed, 200, "every job should have been claimed exactly once");
+
+    // And the counters agree, without anyone aggregating.
+    assert_eq!(depth_of(&q, "available").await, 0);
+    assert_eq!(depth_of(&q, "executing").await, 0);
+    assert_eq!(depth_of(&q, "completed").await, 200);
+
+    // Cross-check against the truth, which is the ONE place an aggregate is
+    // allowed: if these disagree, the trigger has drifted.
+    let actual: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM stampede_jobs WHERE state = 'completed'")
+            .fetch_one(q.pool())
+            .await
+            .unwrap();
+    assert_eq!(actual, 200, "the counter and the table must agree");
+}
+
+#[tokio::test]
+async fn counters_survive_a_rolled_back_enqueue() {
+    // The trigger fires inside the transaction, so a rollback must take the
+    // count with it. Otherwise every rolled-back enqueue inflates depth
+    // forever and the dashboard slowly drifts away from reality.
+    let q = q!();
+    q.enqueue(NewJob::new("default", "kept")).await.unwrap();
+
+    let mut tx = q.pool().begin().await.unwrap();
+    sqlx::query("INSERT INTO stampede_jobs (queue, task) VALUES ('default', 'rolled-back')")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.rollback().await.unwrap();
+
+    assert_eq!(depth_of(&q, "available").await, 1, "the rollback must uncount");
+}

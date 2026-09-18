@@ -667,6 +667,27 @@ per-queue partitioning at v1.**
 
 ---
 
+## Found by building it
+
+**The counter trigger deadlocked under concurrency**, and it is worth recording
+because the fix is a one-line `ORDER BY` that looks like noise.
+
+A transition statement touches several `(queue, state)` counter rows at once —
+one decrement, one increment. Without an ordering, concurrent transactions lock
+them in whatever order the CTE happened to emit: worker A takes
+`(default, executing)` then `(default, completed)` while worker B does the
+reverse, and Postgres resolves it by killing one with SQLSTATE 40P01.
+
+Reproduced reliably: four workers completing 200 jobs concurrently deadlocked
+inside `stampede_complete` on every run. In production that is a worker failing
+to report a *finished* job, which then sits in `executing` until the reaper
+notices — a silent stall under exactly the load this design exists for, and one
+that would have looked like a reaper bug rather than a counter bug.
+
+`ORDER BY queue, state` on all three upserts fixes it, because a consistent
+lock order cannot deadlock. This is the cost of item 6's counter table that the
+original analysis did not anticipate.
+
 ## Still open
 
 - ~~**Measure the row-move cost.**~~ **MOOT.** This assumed

@@ -476,11 +476,15 @@ BEGIN
     IF TG_OP = 'INSERT' THEN
         INSERT INTO stampede_queue_counts (queue, state, n)
         SELECT queue, state, count(*) FROM added GROUP BY queue, state
+        -- Deterministic lock order, same reason as the UPDATE branch below.
+        ORDER BY queue, state
         ON CONFLICT (queue, state) DO UPDATE SET n = stampede_queue_counts.n + excluded.n;
 
     ELSIF TG_OP = 'DELETE' THEN
         INSERT INTO stampede_queue_counts (queue, state, n)
         SELECT queue, state, -count(*) FROM removed GROUP BY queue, state
+        -- Deterministic lock order, same reason as the UPDATE branch below.
+        ORDER BY queue, state
         ON CONFLICT (queue, state) DO UPDATE SET n = stampede_queue_counts.n + excluded.n;
 
     ELSE
@@ -499,6 +503,20 @@ BEGIN
         )
         INSERT INTO stampede_queue_counts (queue, state, n)
         SELECT queue, state, d FROM net
+        -- ORDER BY IS LOAD-BEARING: it prevents a deadlock.
+        --
+        -- A transition statement touches several (queue, state) rows at once --
+        -- one decrement, one increment -- and without an order, concurrent
+        -- transactions lock them in whatever order the CTE happened to emit.
+        -- Worker A locks (default, executing) then (default, completed) while
+        -- worker B does the reverse, and Postgres kills one of them with
+        -- 40P01.
+        --
+        -- Reproduced: four workers completing 200 jobs concurrently deadlocked
+        -- inside stampede_complete every run. In production that is a worker
+        -- failing to report a finished job, which then sits until the reaper
+        -- notices -- a silent stall under exactly the load this design is for.
+        ORDER BY queue, state
         ON CONFLICT (queue, state) DO UPDATE SET n = stampede_queue_counts.n + excluded.n;
     END IF;
 
