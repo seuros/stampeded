@@ -43,7 +43,22 @@ CREATE TABLE g(a int, b int GENERATED ALWAYS AS (a*2) VIRTUAL);  -->  21 | 42
 ```
 
 Graphile Worker uses a **stored** generated column for `is_available`, costing
-disk on every row. Virtual gives the same expressiveness at zero storage.
+disk on every row. Virtual gives the same expressiveness at zero storage —
+**but it cannot replace Graphile's `is_available`, and the sentence above is
+only true if you never index the result.** Re-verified on 18.6:
+
+```
+CREATE TABLE vgen (a int, b int GENERATED ALWAYS AS (a + 1) VIRTUAL);
+CREATE INDEX ON vgen (b);
+ERROR:  indexes on virtual generated columns are not supported
+```
+
+Graphile's column exists precisely to be indexed — an unindexable
+`is_available` is a sequential scan on the hottest table in the system, which
+is worse than the disk it saves. Virtual is for columns you compute and read,
+not columns you search by. (Ours is moot on a second count: the predicates
+would need `now()`, and generation expressions must be IMMUTABLE — see the
+correction below.)
 
 **CORRECTION (verified 18.6).** An earlier draft of this file claimed virtual
 generated columns could express `is_ready` / `is_stuck` / `is_retryable`. **They

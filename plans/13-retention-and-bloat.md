@@ -709,14 +709,17 @@ original analysis did not anticipate.
   retention policy between the daemon and the database, and the daemon already
   survives every worker being down — the pruner is a maintenance role, not a
   worker role, and `--no-worker` runs it.
-- **`pgstattuple` cost.** It does a full relation scan. That is precisely the
-  horizon-pinning pattern §7.6 forbids. Either restrict it to `pgstatindex` on
-  small indexes, gate it behind the same naptime backoff, or keep it as an
-  operator-invoked diagnostic rather than a background pass.
-- **Correction needed in `03-postgres18.md`.** The `GENERATED … VIRTUAL`
-  section (`:39-49`) implies virtual can replace Graphile's stored
-  `is_available`. It cannot — virtual generated columns are not indexable on
-  18.6 (verified). Fix that note before someone builds on it.
+- ~~**`pgstattuple` cost.**~~ **MOOT — it was never shipped.** The concern was
+  about a background pass doing full relation scans; `stampede_vacuum_health`
+  and `stampede_index_density` read `pg_stat_user_tables` and `pg_class`
+  instead, which are catalog lookups with no relation scan at all. Nothing in
+  `schema/` or `crates/` references `pgstattuple` or `pgstatindex`. If one is
+  ever added it should be operator-invoked, per the reasoning here.
+- ~~**Correction needed in `03-postgres18.md`.**~~ **FIXED.** That section now
+  carries the error verbatim (`ERROR: indexes on virtual generated columns are
+  not supported`, re-verified on 18.6) and says why it matters: Graphile's
+  column exists to be indexed, so an unindexable one is a sequential scan on
+  the hottest table — worse than the disk it saves.
 
 
 ## 12. `fillfactor = 85`, measured
