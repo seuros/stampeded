@@ -64,6 +64,24 @@ impl PanelCache {
     }
 }
 
+/// What the dashboard should say about wakeups.
+///
+/// Three states, not two. A `--no-worker` daemon starts no listener because it
+/// has nothing to wake — and that is the RECOMMENDED shape for a Rails
+/// deployment, where the workers are Ruby. Reporting it as "polling only"
+/// implies a fault that is not there, and amber on a healthy system is how
+/// people learn to ignore amber.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WakeupStatus {
+    /// Notifications confirmed round-tripping.
+    Live,
+    /// A listener is running but nothing came back — usually a pooler in
+    /// transaction mode eating LISTEN. Correct, just slower.
+    PollingOnly,
+    /// No workers in this process, so no listener and nothing to wake.
+    NotApplicable,
+}
+
 #[derive(Clone)]
 pub struct ApiState {
     pub queue: Arc<Queue>,
@@ -78,8 +96,8 @@ pub struct ApiState {
     /// nobody opted in. Opt-in auth is how that happens, so this is opt-OUT:
     /// no token, no dashboard.
     pub dashboard_token: Option<Arc<String>>,
-    /// Whether the NOTIFY path is confirmed working, for the health panel.
-    pub notifications_live: bool,
+    /// State of the NOTIFY path, for the health panel.
+    pub wakeups: WakeupStatus,
 }
 
 impl ApiState {
@@ -88,7 +106,7 @@ impl ApiState {
             queue: Arc::new(queue),
             panels: Arc::new(PanelCache::default()),
             dashboard_token: None,
-            notifications_live: false,
+            wakeups: WakeupStatus::NotApplicable,
         }
     }
 
@@ -98,8 +116,8 @@ impl ApiState {
         self
     }
 
-    pub fn with_notifications_live(mut self, live: bool) -> Self {
-        self.notifications_live = live;
+    pub fn with_wakeups(mut self, status: WakeupStatus) -> Self {
+        self.wakeups = status;
         self
     }
 

@@ -19,6 +19,7 @@
 //! dangerous place in the system to run a `count(*)`.
 
 use super::ApiState;
+use crate::http::api::WakeupStatus;
 use rama::futures::stream;
 use rama::http::StatusCode;
 use rama::http::header;
@@ -228,14 +229,27 @@ where
     patch_raw(html)
 }
 
+/// How a wakeup status reads on the dashboard.
+///
+/// Split out from the render so it can be tested without a database: it is a
+/// pure decision about what the operator is told, and that is the part that
+/// can be wrong.
+///
+/// None of the three is an error -- the queue is correct while polling -- but
+/// the distinction matters. A --no-worker daemon has no listener BECAUSE IT
+/// HAS NO WORKERS, which is the recommended shape for a Rails deployment;
+/// flagging that amber implies a fault that is not there, and amber on a
+/// healthy system is how people learn to ignore amber.
+pub(crate) fn wakeup_badge(status: WakeupStatus) -> (&'static str, &'static str) {
+    match status {
+        WakeupStatus::Live => ("ok", "wakeups live"),
+        WakeupStatus::PollingOnly => ("warn", "polling only"),
+        WakeupStatus::NotApplicable => ("dim", "no workers in this process"),
+    }
+}
+
 fn render_wakeups(state: &ApiState) -> Option<Event<PatchElements>> {
-    // Not an error either way -- the queue is correct when polling -- but worth
-    // seeing before someone spends an afternoon wondering about latency.
-    let (class, text) = if state.notifications_live {
-        ("ok", "wakeups live")
-    } else {
-        ("warn", "polling only")
-    };
+    let (class, text) = wakeup_badge(state.wakeups);
     patch(format!(r#"<span id="wakeups" class="{class}">{text}</span>"#))
 }
 

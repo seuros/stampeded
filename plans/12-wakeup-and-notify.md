@@ -1231,3 +1231,24 @@ worker-side code is identical. Record it so the option is not forgotten.
   `GET /jobs/:id/events` as SSE. That feed is a *different* problem from wakeup
   — high fanout, low value per message, and it is the one place a payload
   actually wants to be large. Do not let it share the wakeup channel.
+
+## The badge needed a third state
+
+The dashboard reported wakeups from a boolean: live, or amber "polling only".
+An end-to-end run of the **recommended Rails shape** — `--no-worker`, where the
+workers are Ruby — showed amber forever.
+
+Nothing was wrong. That daemon starts no listener *because it has no workers to
+wake*; there is no degradation to report. But the operator sees a permanent
+warning on a healthy system, and a warning that is always on is one people
+learn to scroll past — which costs them the real one later.
+
+So three states, not two: `Live`, `PollingOnly` (a listener is running and
+nothing came back — usually a pooler in transaction mode eating `LISTEN`), and
+`NotApplicable` (no workers here). Only the middle one is amber.
+
+Worth noting how this surfaced: every unit test passed, because each asserted
+the boolean it was given. The defect was that the boolean could not express the
+system's most common configuration, and that is only visible from outside —
+in this case from reading the badge on a daemon started the way the README
+tells people to start it.

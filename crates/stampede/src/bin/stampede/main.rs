@@ -169,8 +169,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if let Some(addr) = config.http.clone() {
-        let mut api = stampede::http::ApiState::new(queue.clone())
-            .with_notifications_live(wakeup.as_ref().is_some_and(|w| w.is_healthy()));
+        use stampede::http::api::WakeupStatus;
+        let mut api = stampede::http::ApiState::new(queue.clone()).with_wakeups(match &wakeup {
+            Some(w) if w.is_healthy() => WakeupStatus::Live,
+            Some(_) => WakeupStatus::PollingOnly,
+            // No worker role, so no listener was started and there is nothing
+            // here to wake.
+            None => WakeupStatus::NotApplicable,
+        });
 
         match &config.dashboard_token {
             Some(t) => {

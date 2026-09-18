@@ -254,3 +254,32 @@ async fn a_stale_panel_is_re_rendered() {
     cache.get("health", Duration::from_millis(30), render()).await;
     assert_eq!(renders.load(Ordering::SeqCst), 2, "expired, so re-rendered");
 }
+
+/// A healthy `--no-worker` daemon must not be reported as degraded.
+///
+/// This was a two-state flag, and a daemon with no worker role -- the
+/// RECOMMENDED shape for Rails, where the workers are Ruby -- fell into the
+/// `false` arm and showed amber "polling only" forever. Nothing was wrong: it
+/// starts no listener because it has nothing to wake. A permanent amber badge
+/// on a healthy system is how operators learn to ignore amber, so the
+/// distinction is load-bearing rather than cosmetic.
+#[test]
+fn no_worker_daemon_is_not_reported_as_degraded() {
+    let (class, text) = wakeup_badge(WakeupStatus::NotApplicable);
+    assert_eq!(class, "dim", "a daemon with no workers is not a warning: {text}");
+    assert_ne!(class, "warn");
+
+    // The genuinely degraded case must still be amber, or this fix would have
+    // traded one silent state for another.
+    assert_eq!(wakeup_badge(WakeupStatus::PollingOnly).0, "warn");
+    assert_eq!(wakeup_badge(WakeupStatus::Live).0, "ok");
+
+    // All three must read differently, so the badge distinguishes them.
+    let texts = [
+        wakeup_badge(WakeupStatus::Live).1,
+        wakeup_badge(WakeupStatus::PollingOnly).1,
+        wakeup_badge(WakeupStatus::NotApplicable).1,
+    ];
+    let unique: std::collections::BTreeSet<_> = texts.iter().collect();
+    assert_eq!(unique.len(), 3, "wakeup states must be distinguishable: {texts:?}");
+}
