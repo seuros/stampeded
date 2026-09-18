@@ -59,7 +59,8 @@ async fn serve() -> Option<(String, Queue, watch::Sender<bool>)> {
     let q = queue.clone();
     let a = addr.clone();
     tokio::spawn(async move {
-        let _ = stampede_http::serve(&a, q, rx).await;
+        let state = stampede_http::ApiState::new(q).with_dashboard_token("s3cret");
+        let _ = stampede_http::serve(&a, state, rx).await;
     });
 
     // Wait for the listener rather than sleeping a fixed amount.
@@ -214,5 +215,60 @@ async fn depth_reports_by_state() {
     assert_eq!(status, 200, "{body}");
     let v: serde_json::Value = serde_json::from_str(&body).expect("json");
     assert_eq!(v["depth"]["available"], 3);
+    let _ = tx.send(true);
+}
+
+#[tokio::test]
+async fn the_dashboard_is_not_served_without_a_token() {
+    // plans/06 asks for secure-by-default and names the precedent: an opt-in
+    // auth setting meant a job dashboard sat open on staging and production
+    // because nobody opted in. A job dashboard exposes customer data in job
+    // args AND offers a retry button.
+    let (addr, _q, tx) = server!();
+
+    let (status, _) = request(&addr, "GET", "/dashboard", None).await;
+    assert_eq!(status, 404, "no token presented");
+
+    let (status, _) = request(&addr, "GET", "/dashboard?token=wrong", None).await;
+    assert_eq!(status, 404, "wrong token");
+
+    // 404 rather than 401: an unauthenticated caller should not learn that a
+    // dashboard exists here at all.
+    let (status, body) = request(&addr, "GET", "/dashboard?token=s3cret", None).await;
+    assert_eq!(status, 200);
+    assert!(body.contains("Stampede"), "the real dashboard should render");
+
+    let _ = tx.send(true);
+}
+
+#[tokio::test]
+async fn the_dashboard_stream_is_gated_too() {
+    // Gating the page but not the stream would be worse than gating neither,
+    // because it would look protected.
+    let (addr, _q, tx) = server!();
+
+    let (status, _) = request(&addr, "GET", "/dashboard/stream", None).await;
+    assert_eq!(status, 404, "the SSE stream must be gated as well as the page");
+
+    let _ = tx.send(true);
+}
+
+#[tokio::test]
+async fn the_token_is_not_reflected_unescaped_into_the_page() {
+    // The token is echoed into the stream URL so the browser can authenticate
+    // its EventSource. Anything echoed into a page is an XSS sink if it is not
+    // escaped -- and this one is attacker-controlled by construction, since
+    // they choose what to put in the query string.
+    let (addr, _q, tx) = server!();
+
+    let (_status, body) = request(
+        &addr,
+        "GET",
+        "/dashboard?token=%27%3E%3Cscript%3Ealert(1)%3C/script%3E",
+        None,
+    )
+    .await;
+    assert!(!body.contains("<script>alert(1)"), "reflected XSS: {body}");
+
     let _ = tx.send(true);
 }

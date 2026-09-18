@@ -25,11 +25,53 @@ use tracing::warn;
 #[derive(Clone)]
 pub struct ApiState {
     pub queue: Arc<Queue>,
+    /// Shared secret for the dashboard. `None` means the dashboard is NOT
+    /// served at all.
+    ///
+    /// plans/06 asks for secure-by-default here and names the precedent: in
+    /// this codebase's own history, GoodJob's dashboard sat unauthenticated on
+    /// staging and production for a long time because auth was opt-in and
+    /// nobody opted in. Opt-in auth is how that happens, so this is opt-OUT:
+    /// no token, no dashboard.
+    pub dashboard_token: Option<Arc<String>>,
+    /// Whether the NOTIFY path is confirmed working, for the health panel.
+    pub notifications_live: bool,
 }
 
 impl ApiState {
     pub fn new(queue: Queue) -> Self {
-        Self { queue: Arc::new(queue) }
+        Self {
+            queue: Arc::new(queue),
+            dashboard_token: None,
+            notifications_live: false,
+        }
+    }
+
+    /// Serve the dashboard, gated on this token.
+    pub fn with_dashboard_token(mut self, token: impl Into<String>) -> Self {
+        self.dashboard_token = Some(Arc::new(token.into()));
+        self
+    }
+
+    pub fn with_notifications_live(mut self, live: bool) -> Self {
+        self.notifications_live = live;
+        self
+    }
+
+    /// Constant-time token comparison.
+    ///
+    /// Not paranoia theatre: a byte-at-a-time `==` on a secret compared against
+    /// attacker-supplied input is the textbook timing oracle, and the fix is
+    /// four lines.
+    pub fn dashboard_authorised(&self, presented: Option<&str>) -> bool {
+        let (Some(expected), Some(given)) = (&self.dashboard_token, presented) else {
+            return false;
+        };
+        let (a, b) = (expected.as_bytes(), given.as_bytes());
+        if a.len() != b.len() {
+            return false;
+        }
+        a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
     }
 }
 

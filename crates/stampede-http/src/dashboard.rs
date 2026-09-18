@@ -15,7 +15,9 @@ use rama::http::header;
 use rama::http::sse::datastar::{ElementPatchMode, PatchElements};
 use rama::http::sse::Event;
 use rama::http::sse::server::KeepAlive;
-use rama::http::service::web::extract::State;
+use rama::http::StatusCode;
+use rama::http::service::web::extract::{Query, State};
+use serde::Deserialize;
 use rama::http::service::web::response::{Html, IntoResponse, Sse};
 use std::convert::Infallible;
 use std::time::Duration;
@@ -40,16 +42,48 @@ const INDEX: &str = r##"<!doctype html>
   footer { opacity: .5; font-size: .85em; margin-top: 2rem }
 </style>
 </head>
-<body data-on-load="@get('/dashboard/stream')">
+<body data-on-load="@get('/dashboard/stream?token=__TOKEN__')">
   <h1>Stampede</h1>
+  <div id="health"></div>
   <div id="queues">connecting…</div>
   <div id="workers"></div>
   <footer>live via server-sent events</footer>
 </body>
 </html>"##;
 
-pub async fn index() -> impl IntoResponse {
-    Html(INDEX)
+/// The dashboard shell.
+///
+/// Token comes in on the query string because the page has to hand it to the
+/// SSE stream, and EventSource cannot set headers. That puts the secret in
+/// server logs and in browser history, which is the honest cost of a
+/// dependency-free auth model — deployments that care should put this behind
+/// their own proxy and not set a token at all.
+pub async fn index(
+    State(state): State<ApiState>,
+    Query(auth): Query<Auth>,
+) -> impl IntoResponse {
+    if !state.dashboard_authorised(auth.token.as_deref()) {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
+    // Templated into the stream URL so the browser can authenticate the SSE
+    // connection too.
+    Html(INDEX.replace("__TOKEN__", &encode_attr(auth.token.as_deref().unwrap_or(""))))
+        .into_response()
+}
+
+/// Dashboard credentials.
+#[derive(Debug, Deserialize)]
+pub struct Auth {
+    #[serde(default)]
+    pub token: Option<String>,
+}
+
+/// Escape for an HTML attribute inside single quotes.
+fn encode_attr(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('\'', "&#39;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
 }
 
 /// The live stream.
@@ -58,7 +92,13 @@ pub async fn index() -> impl IntoResponse {
 /// than LISTEN/NOTIFY here is deliberate: a dashboard is allowed to be a second
 /// stale, and a NOTIFY-per-job-transition would put dashboard load on the same
 /// channel the workers depend on for wakeups (plans/12).
-pub async fn stream(State(state): State<ApiState>) -> impl IntoResponse {
+pub async fn stream(
+    State(state): State<ApiState>,
+    Query(auth): Query<Auth>,
+) -> impl IntoResponse {
+    if !state.dashboard_authorised(auth.token.as_deref()) {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
     // One tick emits at most two events (queues, workers), so the state carries
     // a small pending buffer rather than nesting a stream per tick — nested
     // streams need StreamExt::flatten and buy nothing here.
@@ -71,10 +111,14 @@ pub async fn stream(State(state): State<ApiState>) -> impl IntoResponse {
 
             tokio::time::sleep(Duration::from_secs(1)).await;
 
-            let mut next: Vec<_> = [render_workers(&state).await, render_queues(&state).await]
-                .into_iter()
-                .flatten()
-                .collect();
+            let mut next: Vec<_> = [
+                render_health(&state).await,
+                render_workers(&state).await,
+                render_queues(&state).await,
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
 
             let first = next.pop()?;
             Some((Ok(first), (state, next)))
@@ -87,27 +131,54 @@ pub async fn stream(State(state): State<ApiState>) -> impl IntoResponse {
         // default interval is already 15s.
         Sse::new(ticks).with_keep_alive(KeepAlive::new()),
     )
+        .into_response()
 }
 
 async fn render_queues(state: &ApiState) -> Option<Event<PatchElements>> {
+    // Reads the COUNTER TABLE, never `count(*)` over the jobs table.
+    //
+    // This is the query that made the rule necessary: it runs once a second,
+    // forever, for as long as anyone leaves the dashboard open. An unbounded
+    // aggregate holds the xmin horizon, vacuum cannot reclaim below it, the
+    // table bloats, the aggregate slows, and it holds the horizon longer --
+    // pg-boss's documented death spiral, triggered by watching the dashboard.
     let rows: Vec<(String, String, i64)> = sqlx::query_as(
-        "SELECT queue, state::text, count(*) \
-           FROM stampede_jobs WHERE finished_at IS NULL \
-          GROUP BY 1, 2 ORDER BY 1, 2",
+        "SELECT queue, state, n FROM stampede_queue_counts \
+          WHERE n <> 0 ORDER BY queue, state",
     )
     .fetch_all(state.queue.pool())
     .await
     .ok()?;
 
+    // Age of the oldest waiting job. Depth says how much work there is; this
+    // says whether it is being DONE. 10,000 jobs aged two seconds is healthy,
+    // 3 jobs aged an hour is broken, and depth alone makes the second look
+    // like the quieter of the two.
+    let ages: Vec<(String, f64)> = state
+        .queue
+        .oldest_available_age()
+        .await
+        .unwrap_or_default();
+
     let mut html = String::from(
-        r#"<div id="queues"><table><tr><th>queue</th><th>state</th><th class="n">jobs</th></tr>"#,
+        r#"<div id="queues"><table><tr><th>queue</th><th>state</th><th class="n">jobs</th><th class="n">oldest</th></tr>"#,
     );
     if rows.is_empty() {
-        html.push_str(r#"<tr><td colspan="3">no unfinished jobs</td></tr>"#);
+        html.push_str(r#"<tr><td colspan="4">no jobs</td></tr>"#);
     }
     for (queue, st, n) in rows {
+        // Only against the states that are actually waiting: the oldest
+        // COMPLETED job is just retention, not backlog.
+        let age = if st == "available" || st == "retryable" {
+            ages.iter()
+                .find(|(q, _)| *q == queue)
+                .map(|(_, a)| format_age(*a))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
         html.push_str(&format!(
-            "<tr><td>{}</td><td>{}</td><td class=\"n\">{n}</td></tr>",
+            "<tr><td>{}</td><td>{}</td><td class=\"n\">{n}</td><td class=\"n\">{age}</td></tr>",
             esc(&queue),
             esc(&st)
         ));
@@ -115,6 +186,16 @@ async fn render_queues(state: &ApiState) -> Option<Event<PatchElements>> {
     html.push_str("</table></div>");
 
     patch(html)
+}
+
+/// Compact age, because "3847s" is harder to read at a glance than "1h4m".
+fn format_age(secs: f64) -> String {
+    let s = secs.max(0.0) as u64;
+    match s {
+        0..=59 => format!("{s}s"),
+        60..=3599 => format!("{}m{}s", s / 60, s % 60),
+        _ => format!("{}h{}m", s / 3600, (s % 3600) / 60),
+    }
 }
 
 async fn render_workers(state: &ApiState) -> Option<Event<PatchElements>> {
@@ -143,6 +224,40 @@ async fn render_workers(state: &ApiState) -> Option<Event<PatchElements>> {
     }
     html.push_str("</table></div>");
 
+    patch(html)
+}
+
+/// Autovacuum standing and the wakeup path.
+///
+/// Both are things that silently degrade rather than fail: a queue whose
+/// notifications are eaten by a pooler runs a second late forever, and one whose
+/// autovacuum is behind gets gradually slower. Neither produces an error
+/// anywhere, so neither is discoverable without being shown.
+async fn render_health(state: &ApiState) -> Option<Event<PatchElements>> {
+    let mut html = String::from(r#"<div id="health"><table>"#);
+
+    let wakeups = if state.notifications_live {
+        r#"<td>live</td>"#
+    } else {
+        // Not an error -- the queue is correct either way -- but worth seeing
+        // before someone spends an afternoon wondering about latency.
+        r#"<td class="stale">polling only</td>"#
+    };
+    html.push_str(&format!("<tr><th>wakeups</th>{wakeups}</tr>"));
+
+    if let Ok(rows) = state.queue.vacuum_health().await {
+        for r in rows.into_iter().filter(|r| r.needs_vacuum) {
+            html.push_str(&format!(
+                "<tr><th>vacuum</th><td class=\"stale\">{} — {} dead tuples, past its \
+                 threshold of {:.0}</td></tr>",
+                esc(&r.relname),
+                r.dead_tuples,
+                r.autovac_threshold
+            ));
+        }
+    }
+
+    html.push_str("</table></div>");
     patch(html)
 }
 

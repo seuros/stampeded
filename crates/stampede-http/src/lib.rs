@@ -14,7 +14,6 @@ pub mod dashboard;
 
 pub use api::{ApiState, router};
 
-use stampede_core::Queue;
 use tokio::sync::watch;
 use tracing::info;
 
@@ -36,7 +35,7 @@ use tracing::info;
 /// forever instead of exiting. That was a real bug, found by sending the signal.
 pub async fn serve(
     addr: &str,
-    queue: Queue,
+    state: ApiState,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use rama::Layer;
@@ -47,7 +46,6 @@ pub async fn serve(
     use rama::rt::Executor;
     use rama::tcp::server::TcpListener;
 
-    let state = ApiState::new(queue);
     let app = (ArcLayer::new(), ErrorHandlerLayer::new()).into_layer(
         router(state.clone())
             .with_get("/dashboard", dashboard::index)

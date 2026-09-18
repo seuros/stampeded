@@ -22,6 +22,12 @@ pub struct Config {
     pub migrate: bool,
     /// `Some(addr)` enables the HTTP edge.
     pub http: Option<String>,
+    /// Shared secret for the dashboard. Without it the dashboard is not served.
+    ///
+    /// Opt-OUT rather than opt-in, deliberately: plans/06 names the precedent,
+    /// where an opt-in dashboard auth setting meant the dashboard sat open on
+    /// staging and production for a long time because nobody opted in.
+    pub dashboard_token: Option<String>,
 }
 
 impl Default for Config {
@@ -42,6 +48,7 @@ impl Default for Config {
             maintenance: true,
             migrate: false,
             http: None,
+            dashboard_token: None,
         }
     }
 }
@@ -64,6 +71,8 @@ impl Config {
             "  --no-maintenance       do not reap or prune\n",
             "  --migrate              apply the schema on startup\n",
             "  --http ADDR            serve the HTTP API on ADDR (e.g. 127.0.0.1:7878)\n",
+        "  --dashboard-token TOK  serve the dashboard, gated on this token\n",
+        "                         (without it the dashboard is NOT served)\n",
             "  -h, --help             this message\n",
         )
     }
@@ -110,6 +119,7 @@ impl Config {
                 "--no-maintenance" => c.maintenance = false,
                 "--migrate" => c.migrate = true,
                 "--http" => c.http = Some(value("--http")?),
+                "--dashboard-token" => c.dashboard_token = Some(value("--dashboard-token")?),
                 other => return Err(format!("unknown option {other:?}")),
             }
         }
