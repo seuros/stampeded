@@ -2391,3 +2391,63 @@ async fn a_growing_checkpoint_warns_but_a_merely_large_one_does_not() {
     let seq = q.checkpoint(job, w, &serde_json::from_str::<serde_json::Value>(&cursor(50_000)).unwrap()).await.unwrap();
     assert!(seq.is_some(), "checkpoint must still return its sequence number");
 }
+
+/// A checkpoint resets `interruptions` and leaves `attempt` alone.
+///
+/// This is the plans/17 §4 decision, and it is the one that lets a long job
+/// survive a flaky afternoon without becoming immortal:
+///
+/// - `interruptions` exists to stop a job that KILLS WORKERS from walking the
+///   fleet one process at a time. A job that checkpointed and then died is
+///   demonstrably not that job -- it ran, it worked, something else killed it.
+/// - `attempt` bounds total work regardless, and still increments at claim, so
+///   a job that progresses one unit and then dies forever is still discarded
+///   at `max_attempts`. The brake holds; it just stops punishing success.
+///
+/// Untested until now, which meant deleting `interruptions = 0` from
+/// stampede_checkpoint would have failed nothing -- and the symptom would be a
+/// long job on flaky infrastructure being discarded while making steady
+/// progress, which is the exact outcome this design exists to prevent.
+#[tokio::test]
+async fn a_checkpoint_forgives_interruptions_but_not_attempts() {
+    let q = q!();
+    let w = q.register_worker("test", 1, &["default".into()]).await.unwrap();
+    let id = q.enqueue(NewJob::new("default", "long")).await.unwrap().expect("enqueued");
+
+    let jobs = q.claim("default", w, 1).await.unwrap();
+    let job = jobs.first().expect("claimed").clone();
+
+    // Something killed the worker once already.
+    sqlx::query("UPDATE stampede_jobs SET interruptions = 1 WHERE id = $1")
+        .bind(id)
+        .execute(q.pool())
+        .await
+        .unwrap();
+
+    let before: (i16, i16) =
+        sqlx::query_as("SELECT interruptions, attempt FROM stampede_jobs WHERE id = $1")
+            .bind(id)
+            .fetch_one(q.pool())
+            .await
+            .unwrap();
+    assert_eq!(before, (1, 1), "precondition: one interruption, one attempt");
+
+    q.checkpoint(&job, w, &serde_json::json!({"v": 1, "cursors": {"rows": 50_000}}))
+        .await
+        .unwrap()
+        .expect("checkpoint accepted");
+
+    let after: (i16, i16) =
+        sqlx::query_as("SELECT interruptions, attempt FROM stampede_jobs WHERE id = $1")
+            .bind(id)
+            .fetch_one(q.pool())
+            .await
+            .unwrap();
+
+    assert_eq!(after.0, 0, "progress must forgive interruptions (plans/17 §4)");
+    assert_eq!(
+        after.1, before.1,
+        "progress must NOT refund an attempt, or a job that checkpoints once \
+         and then crashes forever becomes immortal"
+    );
+}

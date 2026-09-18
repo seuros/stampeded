@@ -787,12 +787,31 @@ wall-clock guess.
   timeout the stragglers are left to the reaper and DO get charged, which is
   the honest outcome. Tested on both sides.
 
-- **Interruption budget default.** BullMQ ships `maxStalledCount: 1`. Is one
-  free interruption right when the most common cause is a routine deploy
-  rather than an OOM? A graceful shutdown should not consume the budget at all
-  (River's `EventKindJobInterrupted`, `event.go:26-29`) — so the budget only
-  applies to *ungraceful* death, which argues for keeping it at 1. Needs the
-  shutdown path designed first.
+- ~~**Interruption budget default.**~~ **RESOLVED: 1, and the precondition is
+  now met.** This entry ended "needs the shutdown path designed first" — that
+  path is built, on both workers, and tested. With it in place the entry's own
+  argument goes through, so the answer is the one it predicted.
+
+  The premise was that a deploy is the most common interruption, which would
+  make one free interruption stingy. **It is no longer an interruption at all.**
+  A graceful shutdown drains: each in-flight job reports its own outcome
+  normally, so nothing is recorded as a worker death (asserted by a test — "a
+  routine deploy must NOT consume the interruption budget"). Only stragglers
+  past `shutdown_timeout` are reclaimed and charged, which is correct, because
+  from the queue's point of view that process did die on them.
+
+  So the budget applies only to *ungraceful* death, and a second input closes
+  it: **a checkpoint resets `interruptions` to 0** (plans/17 §4), so a long job
+  making progress is never at risk however many nodes it loses. What is left
+  for the budget to catch is exactly the thing it exists for — a job that kills
+  its worker, twice, having recorded no progress in between. Discarding that on
+  the second kill is the brake doing its job, and matches BullMQ's
+  `maxStalledCount: 1`.
+
+  The reset is now tested too. It was not, which meant deleting one line from
+  `stampede_checkpoint` would have failed nothing while producing the exact
+  outcome the design exists to prevent: a long job on flaky infrastructure
+  discarded while making steady progress.
 - ~~**Error-column budget.**~~ **4,000 characters, CHECK-enforced**, plus
   1,000 per entry in the ring buffer. In SQL rather than in client code, for
   the same reason as the fingerprint: it is the only bound that survives a
