@@ -74,3 +74,47 @@ class ConnectionTest < Minitest::Test
     end
   end
 end
+
+class TruthyTest < Minitest::Test
+  def test_booleans_are_recognised_from_either_connection_type
+    # The same query returns a different Ruby type depending on which
+    # connection ran it: ActiveRecord installs type decoders so a boolean comes
+    # back as TrueClass, while a bare PG.connect returns the string "t". The
+    # gem uses both -- the caller's connection for enqueue, its own for the
+    # worker -- so `== "t"` is correct in one context and silently false in
+    # the other.
+    #
+    # It was silently false in Rails: Schema.installed? always answered "no",
+    # so the installer re-applied the schema over itself and died on the first
+    # table that already existed.
+    assert Stampede.truthy?(true), "ActiveRecord's decoded boolean"
+    assert Stampede.truthy?("t"), "a bare PG connection's string"
+    assert Stampede.truthy?("true")
+
+    refute Stampede.truthy?(false)
+    refute Stampede.truthy?("f")
+    refute Stampede.truthy?(nil), "a function returning NULL is not success"
+  end
+end
+
+class NoRailsTest < Minitest::Test
+  def test_the_gem_declares_only_what_it_needs
+    # ActiveRecord and Rails are OPTIONAL. The gem works in a script, a Sinatra
+    # app, or a service that has no business loading Rails -- verified in a
+    # clean bundle containing only pg, state_machines and stampede.
+    #
+    # state_machines is a hard dependency because the lifecycle is DECLARED
+    # rather than compared against string literals, which is the thing plans/02
+    # criticises every surveyed implementation for.
+    spec = Gem::Specification.load(File.expand_path("../stampede.gemspec", __dir__))
+    declared = spec.dependencies.select { |d| d.type == :runtime }.map(&:name).sort
+
+    assert_equal %w[pg state_machines], declared
+
+    refute_includes declared, "activerecord",
+                    "ActiveRecord must stay optional: Connection uses it only when defined"
+    refute_includes declared, "rails"
+    refute_includes declared, "activejob",
+                    "the adapter file requires active_job; the gem itself must not"
+  end
+end

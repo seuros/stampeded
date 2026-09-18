@@ -90,7 +90,7 @@ module Stampede
         c.exec_params("SELECT stampede_touch($1, $2, $3)",
                       [job.queue, job.id, worker_id])[0]["stampede_touch"]
       end
-      ok == "t"
+      Stampede.truthy?(ok)
     end
   end
 end

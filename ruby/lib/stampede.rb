@@ -28,6 +28,22 @@ require_relative "stampede/railtie" if defined?(Rails::Railtie)
 # `connection.execute` and a downloaded binary. What it sells is the ten lines
 # of glue that make `perform_later` work, and not needing a Rust toolchain.
 module Stampede
+  # Is a value Postgres returned truthy?
+  #
+  # NOT `== "t"`. The same query returns a different Ruby type depending on
+  # WHICH CONNECTION ran it: ActiveRecord installs type decoders, so a boolean
+  # comes back as TrueClass, while a bare PG.connect returns the string "t".
+  # The gem uses both -- the caller's connection for enqueue, its own for the
+  # worker -- so any comparison against "t" is correct in one context and
+  # silently false in the other.
+  #
+  # That is not hypothetical: `Schema.installed?` always answered "no" inside
+  # Rails, so the installer tried to re-apply the schema over itself and died
+  # on the first table that already existed.
+  def self.truthy?(value)
+    value == true || value == "t" || value == "true"
+  end
+
   class << self
     def config
       @config ||= Configuration.new

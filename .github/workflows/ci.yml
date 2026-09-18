@@ -1,0 +1,70 @@
+name: ci
+
+on:
+  push: { branches: [master] }
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      # Postgres 18+ ONLY. The schema uses uuidv7(), RETURNING OLD./NEW. and
+      # generated columns, with no compatibility shims -- so an older image
+      # does not fail a test, it fails to apply the schema at all.
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: stampede
+          POSTGRES_PASSWORD: stampede
+          POSTGRES_DB: stampede_test
+        options: >-
+          --health-cmd pg_isready --health-interval 10s
+          --health-timeout 5s --health-retries 5
+        ports: ["5432:5432"]
+
+    env:
+      STAMPEDE_TEST_DATABASE_URL: postgres://stampede:stampede@localhost/stampede_test
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          # mcp-host's MSRV. Pinned rather than `stable` so a toolchain bump is
+          # a deliberate commit and not a Tuesday morning surprise.
+          toolchain: "1.98"
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo build --workspace
+      - run: cargo clippy --all-targets -- -D warnings
+      # The library alone must compile without rama or mcp-host: an application
+      # embedding the queue should not have to build an HTTP stack, and this is
+      # what stops that regressing silently.
+      - run: cargo build --no-default-features --lib
+      - run: cargo test --workspace
+
+  ruby:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: stampede
+          POSTGRES_PASSWORD: stampede
+          POSTGRES_DB: stampede_test
+        options: >-
+          --health-cmd pg_isready --health-interval 10s
+          --health-timeout 5s --health-retries 5
+        ports: ["5432:5432"]
+
+    env:
+      STAMPEDE_TEST_DATABASE_URL: postgres://stampede:stampede@localhost/stampede_test
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          working-directory: ruby
+          bundler-cache: true
+      - run: bundle exec rake test
+        working-directory: ruby

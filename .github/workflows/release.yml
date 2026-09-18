@@ -1,0 +1,93 @@
+name: release
+
+# The daemon binary, one platform gem per target.
+#
+# Cross-compilation is the reason this exists as CI rather than a local rake
+# task: `rake build[arm64-darwin]` works on a Mac and cannot produce a
+# linux-musl binary, so the matrix IS the build. plans/16 listed this as the
+# last unbuilt piece.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  binaries:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { gem: arm64-darwin,       target: aarch64-apple-darwin,       os: macos-14 }
+          - { gem: x86_64-darwin,      target: x86_64-apple-darwin,        os: macos-13 }
+          - { gem: aarch64-linux-gnu,  target: aarch64-unknown-linux-gnu,  os: ubuntu-latest, cross: true }
+          - { gem: x86_64-linux-gnu,   target: x86_64-unknown-linux-gnu,   os: ubuntu-latest }
+          # musl is not optional: most container images are Alpine, where a gnu
+          # binary fails at exec with a linker error rather than anything
+          # actionable.
+          - { gem: aarch64-linux-musl, target: aarch64-unknown-linux-musl, os: ubuntu-latest, cross: true }
+          - { gem: x86_64-linux-musl,  target: x86_64-unknown-linux-musl,  os: ubuntu-latest, cross: true }
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98"
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --locked
+
+      - name: Build
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --bin stampede --target ${{ matrix.target }}
+          else
+            cargo build --release --bin stampede --target ${{ matrix.target }}
+          fi
+
+      # A binary that cannot start is not a release. --help exercises argument
+      # parsing without needing a database.
+      - name: Smoke test
+        if: '!matrix.cross'
+        run: ./target/${{ matrix.target }}/release/stampede --help
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stampede-${{ matrix.gem }}
+          path: target/${{ matrix.target }}/release/stampede
+
+  gems:
+    needs: binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with: { ruby-version: "3.4" }
+      - uses: actions/download-artifact@v4
+        with: { path: artifacts }
+
+      - name: Assemble platform gems
+        working-directory: ruby-daemon
+        run: |
+          set -euo pipefail
+          for dir in ../artifacts/stampede-*; do
+            plat="${dir#../artifacts/stampede-}"
+            mkdir -p "exe/$plat"
+            cp "$dir/stampede" "exe/$plat/stampede"
+            chmod +x "exe/$plat/stampede"
+            STAMPEDE_GEM_PLATFORM="$plat" gem build stampede-daemon.gemspec
+          done
+          ls -la ./*.gem
+
+      - name: Build the pure-Ruby gem
+        working-directory: ruby
+        run: gem build stampede.gemspec
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gems
+          path: |
+            ruby-daemon/*.gem
+            ruby/*.gem

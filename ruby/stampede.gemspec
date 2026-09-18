@@ -23,7 +23,7 @@ Gem::Specification.new do |spec|
 
   spec.required_ruby_version = ">= 3.2.0"
 
-  spec.files = Dir["lib/**/*.rb", "lib/**/*.rake", "schema/*.sql", "README.md", "LICENSE"]
+  spec.files = Dir["lib/**/*.rb", "lib/**/*.rake", "lib/generators/**/*", "schema/*.sql", "README.md", "LICENSE"]
   spec.require_paths = ["lib"]
 
   spec.add_dependency "pg", ">= 1.4"
