@@ -324,3 +324,37 @@ keeps claiming more that it will also appear to abandon.
   `provider_job_id` equal to the row id.
 - ~~**Nothing tests the gem against a real Rails app.**~~ **CLOSED.** Doing it
   found three bugs, all in §6.
+
+
+## 9. The CI workflow had never run, and did not work
+
+"GitHub Actions cannot be executed locally" was wrong: `act` runs them. Doing
+so found that **the `ruby` job would have failed on the first push**, twice
+over:
+
+1. **`ruby/setup-ruby@v1` had no version to install.** It falls back to
+   `.ruby-version` or `.tool-versions`; this repo has neither (it uses mise).
+   The action fails immediately with *"input ruby-version needs to be
+   specified"*. Now an explicit matrix over **3.2, 3.3 and 3.4** — the gemspec
+   claims `required_ruby_version >= 3.2.0`, and testing only the newest would
+   leave that claim unbacked.
+2. **`bundle exec rake test` ran at the repo root**, which has no Gemfile.
+   `working-directory:` on the `setup-ruby` step governs only that step. Fixed
+   with a job-level `defaults.run.working-directory: ruby`.
+
+With those fixed the job runs end to end — setup, bundler-cache, the Postgres
+service, the suite — and then found a **third** problem that is ours rather
+than the workflow's: `test_a_raising_job_is_recorded_as_retryable_with_the_error`
+failed with *"Expected 1, Actual 2"*. The job fails, gets `rand(0..1000)ms` of
+backoff, and the still-draining worker re-claims it before the assertion reads
+the row. Locally the suite takes ~4 s and it never happens; in CI it took 183 s
+and it did. Fixed by enqueuing with a 30 s backoff so re-claim is impossible
+within the test.
+
+**Caveat on the method.** `act` is not GitHub Actions. One failure it reported
+was purely an artifact — a stale cached copy of `setup-ruby` whose version list
+predated Ruby 3.4, which looked exactly like a real "unknown version" error
+until the cache was cleared. The discipline that matters: reproduce, then
+decide whether the cause is in the workflow or in the harness. Changing the
+workflow to satisfy a harness artifact would have been worse than not running
+it at all.

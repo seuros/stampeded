@@ -73,9 +73,32 @@ module Stampede
       #              dead_letter_queue: "payments_dlq"
       #   end
       def stampede(**options)
+        # backoff_base_ms/backoff_max_ms are here because Stampede::RetryConflict
+        # -- the error raised when a job declares retry_on -- tells the user to
+        # write exactly this:
+        #
+        #   stampede max_attempts: 5, backoff_base_ms: 1_000, backoff_max_ms: 300_000
+        #
+        # They were missing from this list, so following those instructions
+        # raised "unknown stampede options: backoff_base_ms, backoff_max_ms".
+        # The documented migration away from retry_on did not work.
         unknown = options.keys - %i[max_attempts destination dead_letter_queue
-                                    expire_seconds unique unique_period]
+                                    expire_seconds unique unique_period
+                                    backoff_base_ms backoff_max_ms]
         raise ArgumentError, "unknown stampede options: #{unknown.join(", ")}" if unknown.any?
+
+        # backoff_base_ms is a smallint on the row. Without this check the
+        # failure is a PG::NumericValueOutOfRange reading "smallint out of
+        # range" -- raised at ENQUEUE time, which is to say in production,
+        # naming neither the option nor the limit. Here it is raised at
+        # class-load, once, by the person who wrote it.
+        base = options[:backoff_base_ms]
+        if base && base.to_i > 32_767
+          raise ArgumentError,
+                "backoff_base_ms is at most 32767 (smallint on the row), got #{base}. " \
+                "It is the FIRST retry delay, which doubles from there; the ceiling " \
+                "you want is probably backoff_max_ms, which is an integer."
+        end
 
         stampede_options.merge!(options)
       end

@@ -33,7 +33,15 @@ class WorkerTest < Minitest::Test
   end
 
   def test_a_raising_job_is_recorded_as_retryable_with_the_error
-    id = Stampede.enqueue(queue: "default", task: "boom", max_attempts: 5)
+    # A long backoff so the worker CANNOT re-claim before the assertions run.
+    #
+    # Without it this test races: the job fails, gets rand(0..1000)ms of
+    # backoff, and the worker -- still draining -- claims it again, making
+    # `attempt` 2. Locally the loop is fast enough that it almost never
+    # happens; under CI, which ran this suite 40x slower, it failed with
+    # "Expected 1, Actual 2". Found by running the workflow under act.
+    id = Stampede.enqueue(queue: "default", task: "boom", max_attempts: 5,
+                          backoff_base_ms: 30_000)
 
     worker = Stampede::Worker.new(queue: "default", poll_interval: 0.05)
     worker.register("boom") { raise "the downstream exploded" }

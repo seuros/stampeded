@@ -70,7 +70,12 @@ module ActiveJob
           dead_letter_queue: options[:dead_letter_queue],
           expire_seconds: options[:expire_seconds],
           unique: options[:unique]&.then { |u| u.respond_to?(:call) ? u.call(job) : u },
-          unique_period: options[:unique_period]&.to_s
+          unique_period: options[:unique_period]&.to_s,
+          # The retry_on replacement. Accepted by the DSL but dropped here
+          # would be the same bug one layer down: the setting appears to work
+          # and the row still carries the default.
+          backoff_base_ms: options[:backoff_base_ms],
+          backoff_max_ms: options[:backoff_max_ms]
         )
       end
     end

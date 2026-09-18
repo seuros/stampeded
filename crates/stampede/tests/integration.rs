@@ -2451,3 +2451,46 @@ async fn a_checkpoint_forgives_interruptions_but_not_attempts() {
          and then crashes forever becomes immortal"
     );
 }
+
+/// Per-job retry backoff must be settable at enqueue, on both sides.
+///
+/// The row has carried `backoff_base_ms`/`backoff_max_ms` from the start and
+/// NEITHER client could set them, so the documented way to tune retries was
+/// unreachable. On the Ruby side that was worse than a missing feature: the
+/// error raised when a job declares `retry_on` tells the user to write
+/// `stampede backoff_base_ms: 1_000, backoff_max_ms: 300_000`, and the DSL
+/// rejected those very keys.
+#[tokio::test]
+async fn backoff_can_be_set_when_enqueuing() {
+    let q = q!();
+
+    let id = q
+        .enqueue(NewJob::new("default", "t").backoff(5_000, 300_000))
+        .await
+        .unwrap()
+        .expect("enqueued");
+
+    let row: (i16, i32) =
+        sqlx::query_as("SELECT backoff_base_ms, backoff_max_ms FROM stampede_jobs WHERE id = $1")
+            .bind(id)
+            .fetch_one(q.pool())
+            .await
+            .unwrap();
+
+    assert_eq!(row, (5_000, 300_000), "the backoff policy did not reach the row");
+
+    // base is a smallint; clamping here beats an INSERT that fails with
+    // "smallint out of range" and names neither the field nor the limit.
+    let id2 = q
+        .enqueue(NewJob::new("default", "t2").backoff(90_000, 300_000))
+        .await
+        .unwrap()
+        .expect("enqueued");
+    let (base,): (i16,) =
+        sqlx::query_as("SELECT backoff_base_ms FROM stampede_jobs WHERE id = $1")
+            .bind(id2)
+            .fetch_one(q.pool())
+            .await
+            .unwrap();
+    assert_eq!(base, i16::MAX, "an over-range base must clamp, not explode");
+}

@@ -166,9 +166,11 @@ impl Queue {
             r#"
             INSERT INTO stampede_jobs
                 (queue, task, args, tenant_id, priority, max_attempts, scheduled_at,
-                 dedup_scope, dedup_period, destination, dead_letter_queue, expire_seconds)
+                 dedup_scope, dedup_period, destination, dead_letter_queue, expire_seconds,
+                 backoff_base_ms, backoff_max_ms)
             VALUES ($1, $2, $3, $4, $5, $6, coalesce($7, now()),
-                    $8, $9, $10, $11, coalesce($12, 3600))
+                    $8, $9, $10, $11, coalesce($12, 3600),
+                    coalesce($13, 1000), coalesce($14, 3600000))
             ON CONFLICT DO NOTHING
             RETURNING id
             "#,
@@ -185,6 +187,8 @@ impl Queue {
         .bind(&job.destination)
         .bind(&job.dead_letter_queue)
         .bind(job.expire_seconds)
+        .bind(job.backoff_base_ms)
+        .bind(job.backoff_max_ms)
         .fetch_optional(&self.pool)
         .await?
         .flatten();

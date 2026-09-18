@@ -45,6 +45,21 @@ jobs:
 
   ruby:
     runs-on: ubuntu-latest
+    # The gemspec claims `required_ruby_version >= 3.2.0`. Testing only the
+    # newest would make that claim unbacked, and 3.2 is where it would break
+    # first.
+    strategy:
+      fail-fast: false
+      matrix:
+        ruby: ["3.2", "3.3", "3.4"]
+
+    # Every `run` in this job is in the gem directory. Without this the steps
+    # execute at the repo root, which has no Gemfile -- `bundle exec` fails
+    # there with no useful message.
+    defaults:
+      run:
+        working-directory: ruby
+
     services:
       postgres:
         image: postgres:18
@@ -64,6 +79,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ruby/setup-ruby@v1
         with:
+          # REQUIRED. setup-ruby falls back to .ruby-version or
+          # .tool-versions, and this repo has neither -- it uses mise. Without
+          # it the action fails immediately with "input ruby-version needs to
+          # be specified", which is how this job failed the first time it was
+          # ever run.
+          ruby-version: ${{ matrix.ruby }}
           working-directory: ruby
           bundler-cache: true
       - run: bundle exec rake test

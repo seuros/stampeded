@@ -273,6 +273,11 @@ pub struct NewJob {
     /// Database-enforced wall-clock budget. Fires even when the worker is dead,
     /// which is the case the in-process timeout cannot cover.
     pub expire_seconds: Option<i32>,
+    /// First retry delay, doubling from there. `smallint` on the row, so at
+    /// most 32767.
+    pub backoff_base_ms: Option<i16>,
+    /// Ceiling for the doubling.
+    pub backoff_max_ms: Option<i32>,
 }
 
 impl NewJob {
@@ -290,7 +295,26 @@ impl NewJob {
             destination: None,
             dead_letter_queue: None,
             expire_seconds: None,
+            backoff_base_ms: None,
+            backoff_max_ms: None,
         }
+    }
+
+    /// Per-job retry backoff: the first delay, and the ceiling it doubles
+    /// towards.
+    ///
+    /// Parity with Ruby's `stampede backoff_base_ms:, backoff_max_ms:`. The
+    /// row has carried these columns from the start and neither client could
+    /// set them, so the documented way to tune retries was unreachable from
+    /// either side.
+    ///
+    /// `base` is a `smallint` on the row. Values above 32767 are clamped here
+    /// rather than left to fail the INSERT with "smallint out of range", which
+    /// names neither the field nor the limit.
+    pub fn backoff(mut self, base_ms: i32, max_ms: i32) -> Self {
+        self.backoff_base_ms = Some(base_ms.clamp(1, i16::MAX as i32) as i16);
+        self.backoff_max_ms = Some(max_ms.max(1));
+        self
     }
 
     /// What this job talks to, for circuit breaking and per-destination health.
