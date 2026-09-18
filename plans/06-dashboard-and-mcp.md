@@ -42,12 +42,15 @@ no Node toolchain in the deployment.
   Not *over time*: a history needs a time series and somewhere to keep it.
 - ~~jobs by state, live~~ — plus a filterable job list, and failure clusters by
   fingerprint, which is the panel that turns "47 jobs failed" into one row.
-- **a job's transition history, streamed** — not built. The `errors` ring buffer
-  holds it per job; there is no per-job page yet.
+- ~~a job's transition history, streamed~~ — click any job id. Shows the
+  structured `errors` ring buffer with exit statuses annotated (137 = OOM),
+  plus the interruption and deferral budgets.
 - ~~worker heartbeats~~ — with the reaper's `dead_after` flagged before it fires.
-- **retry/backoff visualisation** — not built, though the row now carries
-  `backoff_base_ms`/`backoff_max_ms` precisely so it could be rendered without
-  re-deriving anything.
+- ~~retry/backoff visualisation~~ — the next six attempts, read from the policy
+  ON THE ROW rather than re-deriving the formula, which is why underway persists
+  it. Labelled as an UPPER BOUND: the worker uses full jitter, so each retry
+  lands somewhere below the figure shown. Saying "in 4m" when the truth is "in
+  up to 4m" is a lie an operator would plan around.
 - ~~circuit breaker and throttle state~~ — as *observed*; see the caveat above.
 
 Also built, and not anticipated here because the features did not exist yet:

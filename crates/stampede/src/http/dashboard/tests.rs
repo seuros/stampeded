@@ -37,7 +37,8 @@ fn the_placeholders_are_all_substituted() {
     let page = INDEX
         .replace("__TOKEN__", "t")
         .replace("__Q__", "mail")
-        .replace("__S__", "");
+        .replace("__S__", "")
+        .replace("__J__", "");
     assert!(!page.contains("__"), "an unsubstituted placeholder would break the stream URL");
     assert!(page.contains("token=t"));
     assert!(page.contains("q=mail"));
@@ -51,9 +52,38 @@ fn params_default_to_the_default_queue_and_no_state_filter() {
 
     // Empty strings come from the "all" link and must not become a filter for
     // a queue literally named "".
-    let p = Params { token: None, q: Some(String::new()), s: Some(String::new()) };
+    let p = Params {
+        token: None,
+        q: Some(String::new()),
+        s: Some(String::new()),
+        j: Some(String::new()),
+    };
     assert_eq!(p.queue(), "default");
     assert_eq!(p.state(), None);
+    assert_eq!(p.job(), None);
+}
+
+#[test]
+fn a_link_swaps_one_field_and_keeps_the_rest() {
+    // Filter links are built by swapping a single field, so a stale token or a
+    // lost queue filter would show up here rather than as a dashboard that
+    // silently drops back to defaults on every click.
+    let p = Params {
+        token: Some("secret".into()),
+        q: Some("mail".into()),
+        s: Some("retryable".into()),
+        j: None,
+    };
+
+    let same_queue_all_states = p.link(None, Some(""), None);
+    assert!(same_queue_all_states.contains("token=secret"));
+    assert!(same_queue_all_states.contains("q=mail"));
+    assert!(same_queue_all_states.contains("s=&"), "state should be cleared");
+
+    // Opening a job keeps the filters, so [close] returns to the same list.
+    let opened = p.link(None, None, Some("abc"));
+    assert!(opened.contains("q=mail") && opened.contains("s=retryable"));
+    assert!(opened.contains("j=abc"));
 }
 
 #[test]
@@ -132,4 +162,30 @@ fn progress_renders_steps_and_raw_cursors_differently() {
     // progress -- so it is shown raw and truncated.
     let raw = describe_progress(&base(Some(serde_json::json!({ "cursor": 50_000 }))));
     assert!(raw.contains("50000"), "{raw}");
+}
+
+#[test]
+fn a_patch_is_always_one_sse_line() {
+    // SSE is line-oriented: a newline in the payload splits the frame across
+    // several `data:` lines. Legal, and Datastar reassembles it, but the panels
+    // are built from multi-line Rust literals -- so without collapsing, source
+    // indentation shipped to every client every second and each frame's
+    // correctness depended on a reassembly step nothing here can test without a
+    // browser.
+    let ev = patch("<div id=\"x\">\n   <table>\n     <tr><td>a</td></tr>\n   </table>\n</div>".to_string())
+        .expect("should build");
+
+    let rendered = format!("{ev:?}");
+    assert!(
+        !rendered.contains("\\n"),
+        "a patch must not contain a newline: {rendered}"
+    );
+}
+
+#[test]
+fn collapsing_does_not_run_words_together() {
+    // Joining with "" instead of " " would turn `<td>a</td>\n<td>b</td>` into
+    // valid HTML but `one\ntwo` in a text node into "onetwo".
+    let ev = patch("<div id=\"x\">one\ntwo</div>".to_string()).expect("should build");
+    assert!(format!("{ev:?}").contains("one two"));
 }

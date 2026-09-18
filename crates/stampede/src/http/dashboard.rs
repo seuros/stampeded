@@ -66,11 +66,12 @@ const INDEX: &str = r##"<!doctype html>
   footer { color: var(--dim); margin-top: 2.5rem; font-size: .72rem }
 </style>
 </head>
-<body data-on-load="@get('/dashboard/stream?token=__TOKEN__&amp;q=__Q__&amp;s=__S__')">
+<body data-on-load="@get('/dashboard/stream?token=__TOKEN__&amp;q=__Q__&amp;s=__S__&amp;j=__J__')">
   <header><h1>Stampede</h1><span id="wakeups"></span></header>
   <div id="queues">connecting…</div>
   <div id="destinations"></div>
   <div id="failures"></div>
+  <div id="job"></div>
   <div id="jobs"></div>
   <div id="schedules"></div>
   <div id="health"></div>
@@ -95,6 +96,9 @@ pub struct Params {
     /// State filter.
     #[serde(default)]
     pub s: Option<String>,
+    /// A single job to expand, by id.
+    #[serde(default)]
+    pub j: Option<String>,
 }
 
 impl Params {
@@ -109,6 +113,21 @@ impl Params {
     fn tok(&self) -> String {
         esc(self.token.as_deref().unwrap_or(""))
     }
+
+    fn job(&self) -> Option<&str> {
+        self.j.as_deref().filter(|j| !j.is_empty())
+    }
+
+    /// A stream URL with one field swapped. `Some("")` clears a field.
+    fn link(&self, q: Option<&str>, st: Option<&str>, job: Option<&str>) -> String {
+        format!(
+            "/dashboard/stream?token={}&amp;q={}&amp;s={}&amp;j={}",
+            self.tok(),
+            esc(q.unwrap_or(self.queue())),
+            esc(st.unwrap_or(self.state().unwrap_or(""))),
+            esc(job.unwrap_or(self.job().unwrap_or(""))),
+        )
+    }
 }
 
 pub async fn index(State(state): State<ApiState>, Query(p): Query<Params>) -> impl IntoResponse {
@@ -122,7 +141,8 @@ pub async fn index(State(state): State<ApiState>, Query(p): Query<Params>) -> im
         INDEX
             .replace("__TOKEN__", &p.tok())
             .replace("__Q__", &esc(p.queue()))
-            .replace("__S__", &esc(p.state().unwrap_or(""))),
+            .replace("__S__", &esc(p.state().unwrap_or("")))
+            .replace("__J__", &esc(p.job().unwrap_or(""))),
     )
     .into_response()
 }
@@ -154,6 +174,7 @@ pub async fn stream(State(state): State<ApiState>, Query(p): Query<Params>) -> i
             let mut next: Vec<_> = [
                 render_health(&state).await,
                 render_schedules(&state).await,
+                render_job(&state, &p).await,
                 render_jobs(&state, &p).await,
                 render_failures(&state).await,
                 render_destinations(&state).await,
@@ -220,10 +241,9 @@ async fn render_queues(state: &ApiState, p: &Params) -> Option<Event<PatchElemen
         };
         let on = if queue == p.queue() { r#" class="on""# } else { "" };
         html.push_str(&format!(
-            r#"<tr><td><a{on} data-on-click="@get('/dashboard/stream?token={tok}&amp;q={q}&amp;s={s}')">{q}</a></td><td>{st}</td><td class="n">{n}</td><td class="n dim">{age}</td></tr>"#,
-            tok = p.tok(),
+            r#"<tr><td><a{on} data-on-click="@get('{href}')">{q}</a></td><td>{st}</td><td class="n">{n}</td><td class="n dim">{age}</td></tr>"#,
+            href = p.link(Some(&queue), None, Some("")),
             q = esc(&queue),
-            s = esc(p.state().unwrap_or("")),
             st = esc(&st),
         ));
     }
@@ -350,9 +370,8 @@ async fn render_jobs(state: &ApiState, p: &Params) -> Option<Event<PatchElements
     for s in ["", "available", "executing", "retryable", "discarded", "completed"] {
         let on = if p.state().unwrap_or("") == s { r#" class="on""# } else { "" };
         html.push_str(&format!(
-            r#"<a{on} data-on-click="@get('/dashboard/stream?token={tok}&amp;q={q}&amp;s={s}')">{label}</a>"#,
-            tok = p.tok(),
-            q = esc(p.queue()),
+            r#"<a{on} data-on-click="@get('{href}')">{label}</a>"#,
+            href = p.link(None, Some(s), Some("")),
             label = if s.is_empty() { "all" } else { s },
         ));
     }
@@ -369,7 +388,8 @@ async fn render_jobs(state: &ApiState, p: &Params) -> Option<Event<PatchElements
             _ => "dim",
         };
         html.push_str(&format!(
-            r#"<tr><td class="dim">{id}</td><td>{task}</td><td class="n">{a}/{m}</td><td class="{state_class}">{st}</td><td class="dim">{progress}</td><td class="wide dim">{err}</td></tr>"#,
+            r#"<tr><td><a data-on-click="@get('{href}')" class="dim">{id}</a></td><td>{task}</td><td class="n">{a}/{m}</td><td class="{state_class}">{st}</td><td class="dim">{progress}</td><td class="wide dim">{err}</td></tr>"#,
+            href = p.link(None, None, Some(&j.id.to_string())),
             id = &j.id.to_string()[..8],
             task = esc(&j.task),
             a = j.attempt,
@@ -380,6 +400,126 @@ async fn render_jobs(state: &ApiState, p: &Params) -> Option<Event<PatchElements
         ));
     }
     html.push_str("</table></div>");
+    patch(html)
+}
+
+/// One job, expanded: its failure history and its remaining retry schedule.
+///
+/// The two surfaces plans/06 asked for and did not have. Both render data that
+/// was already on the row — the `errors` ring buffer, and the backoff policy
+/// columns, which exist precisely so this can be shown WITHOUT re-deriving a
+/// formula the dashboard would then have to keep in sync with the worker.
+async fn render_job(state: &ApiState, p: &Params) -> Option<Event<PatchElements>> {
+    let Some(raw) = p.job() else {
+        return patch(r#"<div id="job"></div>"#.to_string());
+    };
+    let Ok(id) = raw.parse::<uuid::Uuid>() else {
+        return patch(r#"<div id="job"></div>"#.to_string());
+    };
+    let Ok(Some(j)) = state.queue.fetch(p.queue(), id).await else {
+        return patch(format!(
+            r#"<div id="job"><h2>job</h2><p class="dim">{id} is not in {q} — it may have been pruned</p></div>"#,
+            q = esc(p.queue())
+        ));
+    };
+
+    let mut html = format!(
+        r#"<div id="job"><h2>job {id} <a class="dim" data-on-click="@get('{back}')">[close]</a></h2><table>"#,
+        back = p.link(None, None, Some("")),
+    );
+
+    html.push_str(&format!(
+        r#"<tr><th>task</th><td>{task}</td><th>state</th><td class="{sc}">{st}</td></tr>
+           <tr><th>attempt</th><td>{a} of {m}</td><th>interruptions</th><td>{i} of {mi}</td></tr>"#,
+        task = esc(&j.task),
+        sc = match j.state.as_str() {
+            "discarded" | "cancelled" => "bad",
+            "retryable" => "warn",
+            _ => "dim",
+        },
+        st = esc(j.state.as_str()),
+        a = j.attempt,
+        m = j.max_attempts,
+        i = j.interruptions,
+        mi = j.max_interruptions,
+    ));
+
+    if j.deferrals > 0 {
+        // Neither attempts nor interruptions: how many times WE declined to
+        // run it. A high count means it is waiting on a sick dependency.
+        html.push_str(&format!(
+            r#"<tr><th>deferred</th><td colspan="3">{d} of {md} <span class="dim">— we declined to run it; no attempt charged</span></td></tr>"#,
+            d = j.deferrals,
+            md = j.max_deferrals,
+        ));
+    }
+    if let Some(d) = &j.destination {
+        html.push_str(&format!(r#"<tr><th>destination</th><td colspan="3">{}</td></tr>"#, esc(d)));
+    }
+    if let Some(src) = &j.source_queue {
+        html.push_str(&format!(
+            r#"<tr><th>dead letter</th><td colspan="3">from {} after {} attempt(s)</td></tr>"#,
+            esc(src),
+            j.source_attempts.unwrap_or(0)
+        ));
+    }
+    if !describe_progress(&j).is_empty() {
+        html.push_str(&format!(
+            r#"<tr><th>progress</th><td colspan="3">{}</td></tr>"#,
+            describe_progress(&j)
+        ));
+    }
+    html.push_str("</table>");
+
+    // The remaining retry schedule, from the policy ON THE ROW.
+    //
+    // underway's shape (plans/15): persisting the policy is what lets this be
+    // rendered without the dashboard re-implementing the backoff formula and
+    // then drifting from the worker's. Shown as the CEILING, because the
+    // worker uses full jitter -- rand(0, ceiling) -- so any given retry lands
+    // somewhere below this. Saying "in 4m" when the truth is "in up to 4m"
+    // would be a lie an operator would plan around.
+    if !j.state.is_terminal() && j.attempt < j.max_attempts {
+        html.push_str(r#"<h2>retry schedule <span class="dim">— upper bound; the worker jitters below it</span></h2><table><tr><th>attempt</th><th>at most</th></tr>"#);
+        for n in j.attempt..j.max_attempts.min(j.attempt + 6) {
+            let ceiling = (j.backoff_base_ms as u64)
+                .saturating_mul(2u64.saturating_pow(n.max(1) as u32 - 1))
+                .min(j.backoff_max_ms as u64);
+            html.push_str(&format!(
+                r#"<tr><td>{}</td><td class="dim">{}</td></tr>"#,
+                n + 1,
+                format_age(ceiling as f64 / 1000.0)
+            ));
+        }
+        html.push_str("</table>");
+    }
+
+    // The failure history: the structured ring buffer, not a formatted blob.
+    // This is what distinguishes a flaky job from a consistently broken one at
+    // a glance -- River bounds attempted_by but appends errors unbounded, so it
+    // cannot show this without unbounded growth.
+    if let Some(errors) = j.errors.as_array().filter(|e| !e.is_empty()) {
+        html.push_str(r#"<h2>history</h2><table><tr><th>attempt</th><th>kind</th><th>when</th><th>error</th></tr>"#);
+        for e in errors {
+            let exit = match e["exit_status"].as_i64() {
+                // The single highest-signal artefact in the survey, and thrown
+                // away by everyone else.
+                Some(137) => " [exit 137 = OOM]".to_string(),
+                Some(c) => format!(" [exit {c}]"),
+                None => String::new(),
+            };
+            html.push_str(&format!(
+                r#"<tr><td class="n">{a}</td><td>{k}</td><td class="dim">{at}</td><td class="wide dim">{m}{exit}</td></tr>"#,
+                a = e["attempt"].as_i64().unwrap_or(0),
+                k = esc(e["kind"].as_str().unwrap_or("?")),
+                at = esc(&e["at"].as_str().unwrap_or("").chars().skip(11).take(8).collect::<String>()),
+                m = esc(e["message"].as_str().unwrap_or("")),
+            ));
+        }
+        html.push_str("</table>");
+    }
+
+    html.push_str("</div>");
     patch(html)
 }
 
@@ -485,6 +625,22 @@ fn format_age(secs: f64) -> String {
 }
 
 fn patch(html: String) -> Option<Event<PatchElements>> {
+    // COLLAPSED TO ONE LINE FIRST.
+    //
+    // SSE is line-oriented: a newline inside the payload splits the frame
+    // across several `data:` lines. That is legal, and Datastar reassembles it
+    // — but the panels here are built with multi-line Rust string literals, so
+    // the indentation in the source was being shipped to every client every
+    // second and the correctness of each frame depended on a reassembly step
+    // nothing here can test without a browser. Collapsing removes both the
+    // doubt and the bytes.
+    let html = html
+        .split('\n')
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+
     // NonEmptyStr makes "nothing to patch" a type-level concern rather than a
     // malformed event that would break the stream.
     let elements = rama::utils::str::NonEmptyStr::try_from(html).ok()?;
