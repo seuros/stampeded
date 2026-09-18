@@ -79,6 +79,20 @@ macro_rules! server {
         match serve().await {
             Some(s) => s,
             None => {
+                // Skipping is a courtesy to someone without a database. It
+                // must never be a courtesy to CI: with the variable unset,
+                // every test here returns early and `cargo test` reports
+                // success, so a renamed variable or a Postgres service
+                // container that never came up turns the entire integration
+                // suite into a no-op WITHOUT turning anything red. A green
+                // build that tested nothing is worse than a red one, because
+                // it is believed.
+                assert!(
+                    std::env::var_os("CI").is_none(),
+                    "STAMPEDE_TEST_DATABASE_URL is not set and CI is. Refusing \
+                     to skip the integration tests and report success. Check \
+                     the Postgres service container."
+                );
                 eprintln!("skipping: STAMPEDE_TEST_DATABASE_URL not set");
                 return;
             }

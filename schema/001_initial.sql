@@ -375,8 +375,28 @@ CREATE INDEX stampede_jobs_expiry_idx
 -- plans/13: a queue table is the pathological autovacuum case — constant
 -- UPDATEs over a small hot working set plus a large finished tail. Defaults
 -- (scale_factor 0.2) mean vacuum waits for 20% of the table to be dead, which
--- on a large table is far too late. Numbers are Oban's documented production
--- values.
+-- on a large table is far too late. The autovacuum numbers are Oban's
+-- documented production values.
+--
+-- fillfactor = 85 is NOT Oban's number taken on faith -- it was measured here,
+-- and the measurement contradicted the reasoning that nearly removed it
+-- (plans/13 s12). 20k jobs through claim + 10 heartbeats + complete:
+--
+--     fillfactor   heap after churn   HOT updates
+--        100            88 MB             0.1%
+--         85            37 MB            60.7%
+--         70            22 MB            77.1%
+--
+-- The reason is heartbeats, not claims. Claiming updates `state` and can never
+-- be HOT -- that much was known, and was the argument for calling this cargo.
+-- But stampede_touch writes `heartbeat_at` ALONE, which is in no index, so
+-- every heartbeat is HOT-eligible and a long job emits a great many of them.
+-- At fillfactor 100 there is no room on the page for the new version, so each
+-- one writes a fresh tuple and an index entry: 2.4x the heap.
+--
+-- 85 rather than 70 because a fresh, idle backlog spreads over 18% more pages
+-- at 70, and a deep idle queue is a real state. The claim path itself is
+-- indifferent (208 buffers either way).
 -- ---------------------------------------------------------------------------
 ALTER TABLE stampede_jobs_default SET (
     autovacuum_vacuum_scale_factor  = 0.02,

@@ -150,6 +150,23 @@ separately, because none would have been found by testing the happy path:
   ActiveRecord's decoders return `true` where a bare `PG.connect` returns
   `"t"`.
 
+And one that appeared from running the suite *wrong*. Measuring `fillfactor`
+meant dropping and recreating databases, which left
+`STAMPEDE_TEST_DATABASE_URL` unset for one run. The Ruby suite reported
+**"78 runs, 0 failures"** and exited 0 — having run 19 tests and skipped 59.
+The Rust integration suite did the same with 64.
+
+Nothing was broken: the variable is set in CI and was set locally almost
+always. But the failure mode is that **123 tests can become no-ops with
+nothing turning red** — a renamed variable, or a Postgres service container
+that never comes up, and every affected test returns early. A skip is not a
+failure, so the build is green.
+
+Skipping is a reasonable courtesy to a contributor without a database. It is
+never a courtesy to CI, so both suites now refuse to skip when `CI` is set and
+say why. A green build that tested nothing is worse than a red one, because it
+is believed.
+
 Things that changed once they met a real database, all corrected in place:
 
 - `13-retention-and-bloat.md` recommends `PARTITION BY LIST (state)`. It is

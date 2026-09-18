@@ -15,10 +15,30 @@ ActiveJob::Base.logger = Logger.new(IO::NULL)
 module StampedeTest
   URL = ENV.fetch("STAMPEDE_TEST_DATABASE_URL", nil)
 
+  # Skipping is a courtesy to someone without a database. It must never be a
+  # courtesy to CI.
+  #
+  # Without this, `rake test` with the variable unset runs 19 of 78 tests,
+  # reports "0 failures", and EXITS 0 -- a green suite that verified almost
+  # nothing. CI sets the variable today, so the hazard is not that it is
+  # missing; it is that renaming the variable, or a Postgres service container
+  # that fails to come up, converts the entire Ruby suite into a no-op without
+  # turning anything red. A green build that tested nothing is worse than a red
+  # one, because it is believed.
+  def self.require_database!
+    return if URL
+    return unless ENV["CI"]
+
+    raise "STAMPEDE_TEST_DATABASE_URL is not set and CI is. Refusing to skip " \
+          "the database tests and report success: that would be a green build " \
+          "that ran nothing. Check the Postgres service container."
+  end
+
   # A private schema per test class, so these can run alongside the Rust
   # integration tests against the same database without fighting over tables.
   module Isolation
     def setup
+      StampedeTest.require_database!
       skip "STAMPEDE_TEST_DATABASE_URL not set" unless URL
 
       @schema = "rb_#{SecureRandom.hex(8)}"

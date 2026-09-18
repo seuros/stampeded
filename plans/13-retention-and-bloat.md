@@ -696,10 +696,8 @@ original analysis did not anticipate.
   there are no cross-partition row moves to measure.
 - ~~**40001 retry budget.**~~ **MOOT**, same reason: no row movement, no
   "tuple to be locked was already moved to another partition" race.
-- **Is `fillfactor = 85` cargo?** Still open, and now applies to every queue
-  partition rather than a `_live` one. Oban justifies 85 as locality rather
-  than HOT-eligibility, and claiming is never HOT-eligible here either. Worth
-  an A/B; it costs 15% of every partition's pages to be wrong.
+- ~~**Is `fillfactor = 85` cargo?**~~ **MEASURED, and no — it is the single
+  highest-leverage storage parameter we set.** See §12.
 - **Retention default.** 1 hour for completed and 7 days for discarded, both
   triangulated from Oban's 60 s and River's 24 h rather than measured. The
   console can now show what it can see, so the introspection window is at least
@@ -721,3 +719,66 @@ original analysis did not anticipate.
   section (`:39-49`) implies virtual can replace Graphile's stored
   `is_available`. It cannot — virtual generated columns are not indexable on
   18.6 (verified). Fix that note before someone builds on it.
+
+
+## 12. `fillfactor = 85`, measured
+
+The open item above asked whether 85 was cargo, and reasoned: *"Oban justifies
+85 as locality rather than HOT-eligibility, and claiming is never HOT-eligible
+here either."*
+
+**That reasoning was wrong, and wrong in a way worth keeping written down.** It
+is true that claiming cannot be HOT — it updates `state`, which is the leading
+edge of the claim index. But claiming is not the frequent update. **Heartbeats
+are**, and `stampede_touch` writes `heartbeat_at` and nothing else
+(`002_operations.sql:312`). `heartbeat_at` is in no index. Every heartbeat is
+HOT-eligible, and a long job emits them for its entire duration.
+
+So the question was asked about the wrong statement. Measured, 20k jobs through
+a real lifecycle — claim, ten heartbeats, complete — on PG18:
+
+| fillfactor | heap after churn | HOT updates |
+|---|---|---|
+| 70 | 22 MB | 77.1% |
+| 80 | 31 MB | 68.0% |
+| **85** | **37 MB** | **60.7%** |
+| 90 | 57 MB | 37.9% |
+| 95 | 71 MB | 21.1% |
+| 100 | 88 MB | 0.1% |
+
+**2.4× the heap, and HOT falls off a cliff at 100** — 0.1%, because with no
+free space on the page there is nowhere for the new tuple version to go, so
+every heartbeat writes a fresh tuple *and* an index entry. Index size follows:
+3128 kB at 100 vs 2072 kB at 85. The gap survives autovacuum with the
+aggressive settings in §above (rerun with `autovacuum_enabled = on`: identical
+figures, one autovacuum cycle each, zero dead tuples on both — so this is not
+a vacuum-lag artefact, it is steady state).
+
+### Why not 70, then?
+
+Because the churn column is only one side. Two more measurements:
+
+- **Short jobs that never heartbeat** (enqueue → claim → complete, then
+  vacuum): 18 MB at 70 vs 20 MB at 100. Essentially flat — low fillfactor
+  costs nothing here, because even two updates benefit from HOT.
+- **A fresh backlog, no churn yet**: 11,765 heap pages at 70 vs 10,000 at 85
+  vs 8,334 at 100. Going to 70 spreads a cold backlog over **41% more pages**
+  than 100, and 18% more than 85. That is cache footprint and full-scan cost
+  for a queue that is deep but idle — a real state for a queue, not a
+  hypothetical one.
+- **The claim path is indifferent**: 209 / 208 / 208 buffers at 70 / 85 / 100
+  for a 100-row claim against a 200k-row table. It is an index scan fetching a
+  bounded number of rows, so pages-per-row does not enter into it.
+
+85 sits where the churn curve has given up most of its slope but the cold-page
+penalty is still small. **Keep 85** — not because Oban says so, but because the
+curve says so, and now for a documented reason that is actually the right one.
+
+### The general lesson
+
+The original question was well-posed and the analysis behind it was careful,
+and it still reached the wrong answer, because it checked HOT-eligibility
+against the operation that was most salient (claiming) rather than the one that
+happens most (heartbeating). "Is this parameter justified?" was answerable in
+about twenty minutes of measurement; it sat open through several rounds of
+reasoning instead. When a parameter is cheap to measure, measure it.
