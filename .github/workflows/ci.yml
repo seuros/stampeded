@@ -35,6 +35,14 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
 
+      # rama-dns runs bindgen in a build script on Linux, which needs
+      # libclang. Whether a runner image happens to ship it is not something to
+      # depend on: without it the build dies with "Unable to find libclang",
+      # which names neither the crate that wanted it nor the package that
+      # provides it. Found by running this workflow under act, where the image
+      # does not have it.
+      - run: sudo apt-get update && sudo apt-get install -y libclang-dev
+
       - run: cargo build --workspace
       - run: cargo clippy --all-targets -- -D warnings
       # The library alone must compile without rama or mcp-host: an application

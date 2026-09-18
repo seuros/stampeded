@@ -351,6 +351,25 @@ the row. Locally the suite takes ~4 s and it never happens; in CI it took 183 s
 and it did. Fixed by enqueuing with a 30 s backoff so re-claim is impossible
 within the test.
 
+### The `test` job was broken too, on Linux only
+
+`cargo build --workspace` died with **"Unable to find libclang"**. The cause is
+a genuine build requirement rather than an act quirk: **`rama-dns` runs
+`bindgen` in a build script on Linux**, and bindgen needs libclang. macOS has
+it via the developer tools, which is why no local build ever hit this — the
+whole dependency is invisible until something builds on Linux.
+
+Whether a given runner image ships libclang is not something to depend on, and
+the failure names neither the crate that wanted it nor the package that
+provides it. Both workflows now install `libclang-dev` explicitly — in `ci.yml`
+before the build, and in `release.yml` only for the *native* Linux target,
+since `cross` builds run inside their own container with their own toolchain.
+
+Re-run under act: `libclang-dev` installs and `rama-dns` compiles rather than
+panicking. **What is verified is that the blocker is gone**; the full build,
+clippy and test run inside the container were cut short by a local timeout, not
+a failure. Those same commands pass on the host.
+
 **Caveat on the method.** `act` is not GitHub Actions. One failure it reported
 was purely an artifact — a stale cached copy of `setup-ruby` whose version list
 predated Ruby 3.4, which looked exactly like a real "unknown version" error

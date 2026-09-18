@@ -577,6 +577,11 @@ make every counter on the dashboard wrong. Use `max_attempts`,
 Postgres **18 or newer**, deliberately. Stampede uses `uuidv7()`,
 `RETURNING OLD./NEW.` and generated columns; there are no compatibility shims.
 
+**Building on Linux needs `libclang`** (`apt install libclang-dev`). A
+dependency runs `bindgen` in a build script there; macOS has it already, so
+this only bites the first time someone builds on Linux — and the error names
+neither the crate that wanted it nor the package that provides it.
+
 ## Testing
 
 ```bash
