@@ -1,4 +1,4 @@
--- Stampede — initial schema
+-- Stampeded — initial schema
 -- Postgres 18+ ONLY. No compatibility shims.
 --
 -- Every design choice here traces to a decision in ../plans/. Where a line
@@ -14,7 +14,7 @@
 -- cheap and wrong the same way in all of them: correctness depends on guessing
 -- the maximum job duration, and a job that outlives the guess runs twice.
 -- ---------------------------------------------------------------------------
-CREATE TABLE stampede_workers (
+CREATE TABLE stampeded_workers (
     id              uuid        PRIMARY KEY DEFAULT uuidv7(),
     hostname        text        NOT NULL,
     pid             integer     NOT NULL,
@@ -25,7 +25,7 @@ CREATE TABLE stampede_workers (
 );
 
 -- The reaper's only index.
-CREATE INDEX stampede_workers_heartbeat_idx ON stampede_workers (last_heartbeat);
+CREATE INDEX stampeded_workers_heartbeat_idx ON stampeded_workers (last_heartbeat);
 
 -- ---------------------------------------------------------------------------
 -- Jobs — partitioned by QUEUE.
@@ -41,7 +41,7 @@ CREATE INDEX stampede_workers_heartbeat_idx ON stampede_workers (last_heartbeat)
 -- partition with live ones, so the pruner and autovacuum settings below are the
 -- ONLY defence against unbounded growth. See plans/13.
 -- ---------------------------------------------------------------------------
-CREATE TABLE stampede_jobs (
+CREATE TABLE stampeded_jobs (
     id              uuid        NOT NULL DEFAULT uuidv7(),
     queue           text        NOT NULL,
     tenant_id       text,
@@ -51,8 +51,8 @@ CREATE TABLE stampede_jobs (
     -- plane (plans/06). An opaque payload would gut `job_search`.
     --
     -- BOUNDED AT 1 MB, generously. Postgres will happily TOAST a huge value
-    -- out of line, so the row stays small -- but `stampede_claim` returns
-    -- `stampede_jobs.*`, which detoasts it on every single claim. Someone
+    -- out of line, so the row stays small -- but `stampeded_claim` returns
+    -- `stampeded_jobs.*`, which detoasts it on every single claim. Someone
     -- stuffing a PDF in here would move megabytes per claim through a query
     -- that is otherwise a few hundred bytes, on the hot path this whole schema
     -- is shaped around (plans/13).
@@ -261,7 +261,7 @@ CREATE TABLE stampede_jobs (
     -- rather than by the PK.
     PRIMARY KEY (queue, id),
 
-    CONSTRAINT stampede_jobs_state_valid CHECK (
+    CONSTRAINT stampeded_jobs_state_valid CHECK (
         state IN ('available','claimed','executing','retryable','completed','discarded','cancelled')
     ),
     -- The taxonomy from plans/15. good_job's error_event enum proves the
@@ -270,7 +270,7 @@ CREATE TABLE stampede_jobs (
     -- keep: worker_exited carries an exit status (137 = OOM, the single
     -- highest-signal artefact in the survey), and breaker_open is ours alone —
     -- it means WE refused to run the job, so it must not be charged for it.
-    CONSTRAINT stampede_jobs_failure_kind_valid CHECK (
+    CONSTRAINT stampeded_jobs_failure_kind_valid CHECK (
         failure_kind IS NULL OR failure_kind IN (
             'raised',          -- ordinary exception
             'timed_out',       -- exceeded expire_seconds or the in-process timeout
@@ -283,12 +283,12 @@ CREATE TABLE stampede_jobs (
             'unrecoverable'    -- will never succeed: unknown task, bad args
         )
     ),
-    CONSTRAINT stampede_jobs_attempt_sane CHECK (attempt >= 0 AND attempt <= max_attempts),
-    CONSTRAINT stampede_jobs_interruptions_sane CHECK (interruptions >= 0),
-    CONSTRAINT stampede_jobs_deferrals_sane CHECK (deferrals >= 0),
+    CONSTRAINT stampeded_jobs_attempt_sane CHECK (attempt >= 0 AND attempt <= max_attempts),
+    CONSTRAINT stampeded_jobs_interruptions_sane CHECK (interruptions >= 0),
+    CONSTRAINT stampeded_jobs_deferrals_sane CHECK (deferrals >= 0),
     -- A job cannot dead-letter onto its own queue: that is an infinite loop
     -- wearing a feature's clothing.
-    CONSTRAINT stampede_jobs_dlq_not_self CHECK (
+    CONSTRAINT stampeded_jobs_dlq_not_self CHECK (
         dead_letter_queue IS NULL OR dead_letter_queue <> queue
     )
 )
@@ -303,12 +303,12 @@ PARTITION BY LIST (queue);
 -- (autovacuum_vacuum_scale_factor 0.2), which on a large partition means vacuum
 -- waits for 20% dead tuples. That is the bloat failure mode in plans/13,
 -- reintroduced one queue at a time. The partition-creation path MUST set them;
--- see stampede_create_queue_partition below.
+-- see stampeded_create_queue_partition below.
 
 -- Catches any queue not explicitly provisioned. Queues are created at runtime,
 -- so each new queue wants its own partition (pg-boss does this in
 -- src/plans.ts:1439-1494); DEFAULT means an unprovisioned queue still works.
-CREATE TABLE stampede_jobs_default PARTITION OF stampede_jobs DEFAULT;
+CREATE TABLE stampeded_jobs_default PARTITION OF stampeded_jobs DEFAULT;
 
 -- ---------------------------------------------------------------------------
 -- Indexes
@@ -323,7 +323,7 @@ CREATE TABLE stampede_jobs_default PARTITION OF stampede_jobs DEFAULT;
 -- expressions must be IMMUTABLE and anything with now() is rejected; virtual
 -- generated columns also cannot be indexed at all. Verified twice. plans/03.
 -- Must cover BOTH claimable states. A retryable job whose backoff has elapsed
--- is claimable (see stampede_claim in 002); indexing only 'available' would
+-- is claimable (see stampeded_claim in 002); indexing only 'available' would
 -- make every retry a seq scan.
 --
 -- `id` is deliberately NOT a trailing tiebreaker. It would make every index
@@ -340,51 +340,51 @@ CREATE TABLE stampede_jobs_default PARTITION OF stampede_jobs DEFAULT;
 -- is simply not defined. Strict FIFO was never on offer across workers anyway,
 -- since FOR UPDATE SKIP LOCKED takes the next UNLOCKED row, not the next row.
 --
--- stampede_claim's ORDER BY must match this index exactly. Adding a column
+-- stampeded_claim's ORDER BY must match this index exactly. Adding a column
 -- there without adding it here reintroduces a sort: measured 0.26 ms and 244
 -- buffers against 0.13 ms and 212. plans/13 s13.
-CREATE INDEX stampede_jobs_claim_idx
-    ON stampede_jobs (queue, priority, scheduled_at)
+CREATE INDEX stampeded_jobs_claim_idx
+    ON stampeded_jobs (queue, priority, scheduled_at)
     WHERE state IN ('available', 'retryable');
 
 -- Uniqueness. Partial: a full constraint costs 1272 kB per 200k non-dedup rows
 -- versus 16 kB partial (plans/10). Led by `queue` because the partition key
 -- must be present — which is also what makes uniqueness per-queue.
-CREATE UNIQUE INDEX stampede_jobs_dedup_idx
-    ON stampede_jobs (queue, dedup_key)
+CREATE UNIQUE INDEX stampeded_jobs_dedup_idx
+    ON stampeded_jobs (queue, dedup_key)
     WHERE dedup_key IS NOT NULL;
 
 -- Orphan reaping: find rows whose worker stopped heartbeating.
-CREATE INDEX stampede_jobs_claimed_idx
-    ON stampede_jobs (claimed_by)
+CREATE INDEX stampeded_jobs_claimed_idx
+    ON stampeded_jobs (claimed_by)
     WHERE state IN ('claimed','executing');
 
 -- Tenant fairness and MCP queries (plans/06).
-CREATE INDEX stampede_jobs_tenant_idx
-    ON stampede_jobs (tenant_id, state)
+CREATE INDEX stampeded_jobs_tenant_idx
+    ON stampeded_jobs (tenant_id, state)
     WHERE tenant_id IS NOT NULL;
 
 -- Pruning and the "what failed recently" MCP tool.
-CREATE INDEX stampede_jobs_finished_idx
-    ON stampede_jobs (finished_at)
+CREATE INDEX stampeded_jobs_finished_idx
+    ON stampeded_jobs (finished_at)
     WHERE finished_at IS NOT NULL;
 
 -- `failure_summary` clusters by fingerprint. Without this index that tool is a
 -- seq scan over every error string in the table, which is exactly the query an
 -- operator runs while the incident is ongoing and the table is at its largest.
-CREATE INDEX stampede_jobs_fingerprint_idx
-    ON stampede_jobs (error_fingerprint)
+CREATE INDEX stampeded_jobs_fingerprint_idx
+    ON stampeded_jobs (error_fingerprint)
     WHERE error_fingerprint IS NOT NULL;
 
 -- Per-destination health, for the breaker and the dashboard.
-CREATE INDEX stampede_jobs_destination_idx
-    ON stampede_jobs (destination, state)
+CREATE INDEX stampeded_jobs_destination_idx
+    ON stampeded_jobs (destination, state)
     WHERE destination IS NOT NULL;
 
 -- The expiry sweep: executing jobs whose wall-clock budget has run out.
 -- Partial, because only executing rows can expire.
-CREATE INDEX stampede_jobs_expiry_idx
-    ON stampede_jobs (claimed_at)
+CREATE INDEX stampeded_jobs_expiry_idx
+    ON stampeded_jobs (claimed_at)
     WHERE state = 'executing';
 
 -- ---------------------------------------------------------------------------
@@ -407,7 +407,7 @@ CREATE INDEX stampede_jobs_expiry_idx
 --
 -- The reason is heartbeats, not claims. Claiming updates `state` and can never
 -- be HOT -- that much was known, and was the argument for calling this cargo.
--- But stampede_touch writes `heartbeat_at` ALONE, which is in no index, so
+-- But stampeded_touch writes `heartbeat_at` ALONE, which is in no index, so
 -- every heartbeat is HOT-eligible and a long job emits a great many of them.
 -- At fillfactor 100 there is no room on the page for the new version, so each
 -- one writes a fresh tuple and an index entry: 2.4x the heap.
@@ -416,7 +416,7 @@ CREATE INDEX stampede_jobs_expiry_idx
 -- at 70, and a deep idle queue is a real state. The claim path itself is
 -- indifferent (208 buffers either way).
 -- ---------------------------------------------------------------------------
-ALTER TABLE stampede_jobs_default SET (
+ALTER TABLE stampeded_jobs_default SET (
     autovacuum_vacuum_scale_factor  = 0.02,
     autovacuum_analyze_scale_factor = 0.02,
     autovacuum_vacuum_cost_limit    = 2000,
@@ -441,17 +441,17 @@ ALTER TABLE stampede_jobs_default SET (
 -- the database notifies, not the client.
 -- ---------------------------------------------------------------------------
 -- The channel is SCHEMA-NAMESPACED. Channel names are global per database, so
--- two Stampede installs in different schemas of one database would wake each
+-- two Stampeded installs in different schemas of one database would wake each
 -- other's workers for queues they do not serve. River (CHANGELOG.md:926) and
 -- pg-boss (src/plans.ts:841-858) both shipped the bare name first and had to
 -- fix it; there is no reason to repeat that.
 --
 -- Budget: a channel name is capped at 63 bytes, so the schema name has
--- 63 - length('.stampede_insert') = 46 to play with. Verified.
-CREATE FUNCTION stampede_notify_insert() RETURNS trigger
+-- 63 - length('.stampeded_insert') = 46 to play with. Verified.
+CREATE FUNCTION stampeded_notify_insert() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
-    PERFORM pg_notify(current_schema() || '.stampede_insert', queue)
+    PERFORM pg_notify(current_schema() || '.stampeded_insert', queue)
     FROM (SELECT DISTINCT queue FROM inserted
           WHERE state = 'available' AND scheduled_at <= now()) q;
     RETURN NULL;
@@ -462,15 +462,15 @@ $$;
 -- directly into a partition silently bypasses a parent-only trigger — a real
 -- hole in the "enqueue is a plain INSERT" promise (plans/12). Duplicate
 -- delivery is free because of the payload collapsing described above.
-CREATE TRIGGER stampede_notify_insert_trg
-    AFTER INSERT ON stampede_jobs
+CREATE TRIGGER stampeded_notify_insert_trg
+    AFTER INSERT ON stampeded_jobs
     REFERENCING NEW TABLE AS inserted
-    FOR EACH STATEMENT EXECUTE FUNCTION stampede_notify_insert();
+    FOR EACH STATEMENT EXECUTE FUNCTION stampeded_notify_insert();
 
-CREATE TRIGGER stampede_notify_insert_trg
-    AFTER INSERT ON stampede_jobs_default
+CREATE TRIGGER stampeded_notify_insert_trg
+    AFTER INSERT ON stampeded_jobs_default
     REFERENCING NEW TABLE AS inserted
-    FOR EACH STATEMENT EXECUTE FUNCTION stampede_notify_insert();
+    FOR EACH STATEMENT EXECUTE FUNCTION stampeded_notify_insert();
 
 -- ---------------------------------------------------------------------------
 -- Queue counters
@@ -478,7 +478,7 @@ CREATE TRIGGER stampede_notify_insert_trg
 -- plans/13 item 6, and the single most important performance rule in that file:
 -- NEVER run an unbounded aggregate over the job table.
 --
--- `SELECT count(*) FROM stampede_jobs GROUP BY state` looks harmless and is the
+-- `SELECT count(*) FROM stampeded_jobs GROUP BY state` looks harmless and is the
 -- documented pg-boss death spiral (src/plans.ts:968-975). A long aggregate holds
 -- the xmin horizon open; vacuum cannot reclaim dead tuples below that horizon;
 -- the table bloats; the aggregate gets slower; it holds the horizon longer. The
@@ -491,12 +491,12 @@ CREATE TRIGGER stampede_notify_insert_trg
 -- Rows are (queue, state) pairs maintained by a statement-level trigger. Small,
 -- fixed cardinality: queues x 7 states.
 -- ---------------------------------------------------------------------------
-CREATE TABLE stampede_queue_counts (
+CREATE TABLE stampeded_queue_counts (
     queue   text     NOT NULL,
     state   text     NOT NULL,
     -- Signed: a counter is allowed to go transiently negative if a row is
     -- deleted by a path the trigger did not see. Clamping it to zero would hide
-    -- exactly the drift that stampede_recount_queue exists to repair.
+    -- exactly the drift that stampeded_recount_queue exists to repair.
     n       bigint   NOT NULL DEFAULT 0,
     PRIMARY KEY (queue, state)
 );
@@ -507,13 +507,13 @@ CREATE TABLE stampede_queue_counts (
 -- THIS is the unbounded aggregate the rest of the system is forbidden from
 -- running. It is acceptable here because it is explicit, manual and rare —
 -- not because it is cheap. Do not call it on a timer.
-CREATE FUNCTION stampede_recount_queue(p_queue text) RETURNS void
+CREATE FUNCTION stampeded_recount_queue(p_queue text) RETURNS void
 LANGUAGE plpgsql AS $$
 BEGIN
-    DELETE FROM stampede_queue_counts WHERE queue = p_queue;
-    INSERT INTO stampede_queue_counts (queue, state, n)
+    DELETE FROM stampeded_queue_counts WHERE queue = p_queue;
+    INSERT INTO stampeded_queue_counts (queue, state, n)
     SELECT queue, state, count(*)
-      FROM stampede_jobs
+      FROM stampeded_jobs
      WHERE queue = p_queue
      GROUP BY queue, state;
 END;
@@ -526,22 +526,22 @@ $$;
 -- Branches on TG_OP because a transition table only EXISTS for the operation it
 -- belongs to: an INSERT trigger may declare NEW TABLE and not OLD TABLE, a
 -- DELETE trigger the reverse. Referencing the absent one is a create-time error.
-CREATE FUNCTION stampede_count_delta() RETURNS trigger
+CREATE FUNCTION stampeded_count_delta() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
     IF TG_OP = 'INSERT' THEN
-        INSERT INTO stampede_queue_counts (queue, state, n)
+        INSERT INTO stampeded_queue_counts (queue, state, n)
         SELECT queue, state, count(*) FROM added GROUP BY queue, state
         -- Deterministic lock order, same reason as the UPDATE branch below.
         ORDER BY queue, state
-        ON CONFLICT (queue, state) DO UPDATE SET n = stampede_queue_counts.n + excluded.n;
+        ON CONFLICT (queue, state) DO UPDATE SET n = stampeded_queue_counts.n + excluded.n;
 
     ELSIF TG_OP = 'DELETE' THEN
-        INSERT INTO stampede_queue_counts (queue, state, n)
+        INSERT INTO stampeded_queue_counts (queue, state, n)
         SELECT queue, state, -count(*) FROM removed GROUP BY queue, state
         -- Deterministic lock order, same reason as the UPDATE branch below.
         ORDER BY queue, state
-        ON CONFLICT (queue, state) DO UPDATE SET n = stampede_queue_counts.n + excluded.n;
+        ON CONFLICT (queue, state) DO UPDATE SET n = stampeded_queue_counts.n + excluded.n;
 
     ELSE
         -- Both directions netted before they touch the table, so a 10k-row
@@ -557,7 +557,7 @@ BEGIN
         net AS (
             SELECT queue, state, sum(d) AS d FROM delta GROUP BY queue, state HAVING sum(d) <> 0
         )
-        INSERT INTO stampede_queue_counts (queue, state, n)
+        INSERT INTO stampeded_queue_counts (queue, state, n)
         SELECT queue, state, d FROM net
         -- ORDER BY IS LOAD-BEARING: it prevents a deadlock.
         --
@@ -569,11 +569,11 @@ BEGIN
         -- 40P01.
         --
         -- Reproduced: four workers completing 200 jobs concurrently deadlocked
-        -- inside stampede_complete every run. In production that is a worker
+        -- inside stampeded_complete every run. In production that is a worker
         -- failing to report a finished job, which then sits until the reaper
         -- notices -- a silent stall under exactly the load this design is for.
         ORDER BY queue, state
-        ON CONFLICT (queue, state) DO UPDATE SET n = stampede_queue_counts.n + excluded.n;
+        ON CONFLICT (queue, state) DO UPDATE SET n = stampeded_queue_counts.n + excluded.n;
     END IF;
 
     RETURN NULL;
@@ -584,21 +584,21 @@ $$;
 -- transition tables on a partitioned root does not see rows routed to leaves,
 -- and a direct INSERT into a partition would bypass a parent-only trigger
 -- anyway -- the same hole the notify trigger closes the same way.
-CREATE FUNCTION stampede_attach_counters(p_table text) RETURNS void
+CREATE FUNCTION stampeded_attach_counters(p_table text) RETURNS void
 LANGUAGE plpgsql AS $$
 BEGIN
     EXECUTE format(
-        'CREATE TRIGGER stampede_count_ins_trg AFTER INSERT ON %I'
+        'CREATE TRIGGER stampeded_count_ins_trg AFTER INSERT ON %I'
         '  REFERENCING NEW TABLE AS added'
-        '  FOR EACH STATEMENT EXECUTE FUNCTION stampede_count_delta()', p_table);
+        '  FOR EACH STATEMENT EXECUTE FUNCTION stampeded_count_delta()', p_table);
     EXECUTE format(
-        'CREATE TRIGGER stampede_count_upd_trg AFTER UPDATE ON %I'
+        'CREATE TRIGGER stampeded_count_upd_trg AFTER UPDATE ON %I'
         '  REFERENCING NEW TABLE AS added OLD TABLE AS removed'
-        '  FOR EACH STATEMENT EXECUTE FUNCTION stampede_count_delta()', p_table);
+        '  FOR EACH STATEMENT EXECUTE FUNCTION stampeded_count_delta()', p_table);
     EXECUTE format(
-        'CREATE TRIGGER stampede_count_del_trg AFTER DELETE ON %I'
+        'CREATE TRIGGER stampeded_count_del_trg AFTER DELETE ON %I'
         '  REFERENCING OLD TABLE AS removed'
-        '  FOR EACH STATEMENT EXECUTE FUNCTION stampede_count_delta()', p_table);
+        '  FOR EACH STATEMENT EXECUTE FUNCTION stampeded_count_delta()', p_table);
 END;
 $$;
 
@@ -611,8 +611,8 @@ $$;
 -- Verified that this does NOT double-count: 5 rows through the parent then 3
 -- straight into the partition gave 8, not 13.
 DO $$ BEGIN
-    PERFORM stampede_attach_counters('stampede_jobs');
-    PERFORM stampede_attach_counters('stampede_jobs_default');
+    PERFORM stampeded_attach_counters('stampeded_jobs');
+    PERFORM stampeded_attach_counters('stampeded_jobs_default');
 END $$;
 
 -- ---------------------------------------------------------------------------
@@ -626,17 +626,17 @@ END $$;
 -- So provisioning is a function, not a runbook step. Callable from any
 -- language, which keeps it consistent with the polyglot stance in plans/05.
 -- ---------------------------------------------------------------------------
-CREATE FUNCTION stampede_create_queue(p_queue text) RETURNS void
+CREATE FUNCTION stampeded_create_queue(p_queue text) RETURNS void
 LANGUAGE plpgsql AS $$
 DECLARE
-    part_name text := 'stampede_jobs_' || regexp_replace(p_queue, '[^a-zA-Z0-9_]', '_', 'g');
+    part_name text := 'stampeded_jobs_' || regexp_replace(p_queue, '[^a-zA-Z0-9_]', '_', 'g');
 BEGIN
     IF to_regclass(part_name) IS NOT NULL THEN
         RETURN;  -- idempotent: provisioning an existing queue is a no-op
     END IF;
 
     EXECUTE format(
-        'CREATE TABLE %I PARTITION OF stampede_jobs FOR VALUES IN (%L)',
+        'CREATE TABLE %I PARTITION OF stampeded_jobs FOR VALUES IN (%L)',
         part_name, p_queue);
 
     -- Not inherited from the parent. See the note on the parent table.
@@ -650,14 +650,14 @@ BEGIN
 
     -- Direct inserts into a partition bypass a parent-only trigger.
     EXECUTE format(
-        'CREATE TRIGGER stampede_notify_insert_trg'
+        'CREATE TRIGGER stampeded_notify_insert_trg'
         '  AFTER INSERT ON %I'
         '  REFERENCING NEW TABLE AS inserted'
-        '  FOR EACH STATEMENT EXECUTE FUNCTION stampede_notify_insert()',
+        '  FOR EACH STATEMENT EXECUTE FUNCTION stampeded_notify_insert()',
         part_name);
 
     -- Counters are per-partition for the same reason the notify trigger is.
-    PERFORM stampede_attach_counters(part_name);
+    PERFORM stampeded_attach_counters(part_name);
 END;
 $$;
 

@@ -482,7 +482,7 @@ partitioned table once the index is legal (verified).
 - Index footprint of a `sha256` key: 100k rows → 7848 kB (~80 B/row), table
   15 MB. Not a factor in any decision here.
 
-## 7. Decision for Stampede
+## 7. Decision for Stampeded
 
 **Hard constraint first.** `05-polyglot-protocol.md` says enqueue is a plain
 INSERT from any Postgres driver. That **rules out**, flatly:
@@ -516,7 +516,7 @@ the real choice is whether `state` appears in the index predicate.
 - `UNIQUE INDEX (dedup_key) WHERE dedup_key IS NOT NULL` — partial, because the
   full constraint costs 1272 kB per 200k non-unique jobs (verified) and the
   predicate is short enough to copy. **Legal only on an unpartitioned table.**
-  Experiment 15: if `stampede_jobs` is ever partitioned, every partition-key
+  Experiment 15: if `stampeded_jobs` is ever partitioned, every partition-key
   column must appear in this index, which forcibly scopes uniqueness to the
   partition key. Either the jobs table stays unpartitioned and retention is
   handled by deletion, or uniqueness becomes per-queue and the index is
@@ -612,7 +612,7 @@ per-job flag, and costs nothing for queues that do not opt in.
   `03-postgres18.md` restricts triggers to "what the database alone can do
   atomically". A release is derivable from `state`, so by that rule it belongs
   in the daemon — but that means a language-native worker calling
-  `stampede_claim()` directly must also release, and will forget.
+  `stampeded_claim()` directly must also release, and will forget.
 - ~~**Uniqueness scope vs partitioning — blocking, and it blocks `03-` too.**~~
   **RESOLVED, and it was resolved by the partitioning decision itself** — this
   entry simply outlived it. `plans/README` §1 chose `PARTITION BY LIST (queue)`
@@ -635,7 +635,7 @@ per-job flag, and costs nothing for queues that do not opt in.
   who routes two jobs to two queues gets both. Now documented in the README
   under *Unique jobs* rather than left to be discovered. `dedup_period` was
   verified in the same run: same hour rejected, next hour accepted.
-- Batch enqueue: does Stampede offer one, and does it dedupe? `DO UPDATE` cannot
+- Batch enqueue: does Stampeded offer one, and does it dedupe? `DO UPDATE` cannot
   (§6, experiment 13), `DO NOTHING` can but returns nothing. Oban punts this to
   Oban Pro (`oban.ex:819-820`); River made it the reason for the whole migration
   (`CHANGELOG.md:709`). If we want it, the multi-row INSERT must either use

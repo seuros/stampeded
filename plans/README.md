@@ -1,4 +1,4 @@
-# Stampede — plans
+# Stampeded — plans
 
 Design notes for a polyglot job processor: Rust core, Postgres 18+ substrate,
 Datastar dashboard, MCP control plane. BSD-3, clean-room.
@@ -47,7 +47,7 @@ becomes **per-queue**, which is the semantic most callers want anyway.
 Verified working:
 
 ```sql
-CREATE TABLE stampede_jobs (
+CREATE TABLE stampeded_jobs (
   id         uuid NOT NULL DEFAULT uuidv7(),
   queue      text NOT NULL,
   tenant_id  text,
@@ -56,8 +56,8 @@ CREATE TABLE stampede_jobs (
   dedup_key  bytea GENERATED ALWAYS AS (sha256(dedup_scope::bytea)) STORED
 ) PARTITION BY LIST (queue);
 
-CREATE TABLE stampede_jobs_default PARTITION OF stampede_jobs DEFAULT;
-CREATE UNIQUE INDEX ON stampede_jobs (queue, dedup_key) WHERE dedup_key IS NOT NULL;
+CREATE TABLE stampeded_jobs_default PARTITION OF stampeded_jobs DEFAULT;
+CREATE UNIQUE INDEX ON stampeded_jobs (queue, dedup_key) WHERE dedup_key IS NOT NULL;
 ```
 
 Behaviour confirmed: duplicate `(queue, scope)` blocked; same scope on a
@@ -191,7 +191,7 @@ shape of is not a result.
 
 And one that appeared from running the suite *wrong*. Measuring `fillfactor`
 meant dropping and recreating databases, which left
-`STAMPEDE_TEST_DATABASE_URL` unset for one run. The Ruby suite reported
+`STAMPEDED_TEST_DATABASE_URL` unset for one run. The Ruby suite reported
 **"78 runs, 0 failures"** and exited 0 — having run 19 tests and skipped 59.
 The Rust integration suite did the same with 64.
 

@@ -2,7 +2,7 @@
 
 ## DECIDED: rama. (2026-09-17, by the project owner.)
 
-**Stampede is built on `rama`.** This is settled and not open for re-litigation
+**Stampeded is built on `rama`.** This is settled and not open for re-litigation
 by a future reader or a future agent.
 
 The rest of this file was written as a decision memo weighing rama against axum.
@@ -21,7 +21,7 @@ survive the decision and become work items rather than objections:
    collision with rama) and never established whether that was the MCP crate we
    would actually use. It is not.
 
-   **Stampede uses `mcp-host` 0.3.2** — `~/Projects/ecosystem/mcp/mcphost-rs`,
+   **Stampeded uses `mcp-host` 0.3.2** — `~/Projects/ecosystem/mcp/mcphost-rs`,
    owner's crate:
 
    - MCP protocol **2025-11-25**, full JSON-RPC 2.0 with version negotiation
@@ -110,7 +110,7 @@ crates.io / the GitHub API on 2026-09-17) and **[I]** (reasoning or recall).
   to the input (`rama-core/src/extensions.rs:1-31`, `rama-core/src/svc_input.rs:11-27`).
 
 This is a genuine improvement on tower's readiness protocol, which exists to
-serve client-side load balancing — a problem Stampede does not have.
+serve client-side load balancing — a problem Stampeded does not have.
 `Service<Input>` is fully generic over input; nothing forces it to be HTTP. A
 job could in principle be an `Input`. That is the honest steelman for (a).
 
@@ -122,7 +122,7 @@ TLS, no HTTP. `std` is a feature; the crate is `no_std`-capable.
 
 Both claims are true; the mass is lopsided. LOC by crate:
 
-| crate | LOC | Stampede needs it? |
+| crate | LOC | Stampeded needs it? |
 |---|---|---|
 | `rama-http` | 98,504 | partly (router, layers, SSE) |
 | `rama-net` | 67,985 | no |
@@ -190,7 +190,7 @@ against it:
    `rama-cli/src/cmd/serve/proxy/dashboard/` — a live traffic inspector on the
    same Router + SSE + Datastar stack, with render coalescing
    (`dashboard/live.rs:57-68`), a `Semaphore` cap on concurrent event streams
-   (`live.rs:33`), and `KeepAliveStream` (`live.rs:40`). Stampede's dashboard is
+   (`live.rs:33`), and `KeepAliveStream` (`live.rs:40`). Stampeded's dashboard is
    structurally the same program. A template, not just an example.
 
 **Against, verified, and this is what flips the memo:**
@@ -242,7 +242,7 @@ bridging, PAC, UA emulation) is irrelevant to a job processor.
 
 ### 2.1 Why MCP is now the deciding row **[V]**
 
-`00-vision.md:36-40` is unambiguous: everything else in Stampede is copyable in a
+`00-vision.md:36-40` is unambiguous: everything else in Stampeded is copyable in a
 quarter; the MCP control plane is not. So the differentiator sits on whichever
 crate serves MCP.
 
@@ -272,11 +272,11 @@ This closes old Still-Open item 3.
 |---|---|
 | **Maturity** | 0.x with a breaking-change train. The 0.3→0.4 changelog carries a dedicated **"Breaking API Changes"** section (~58 lines, 13 headline items, self-described as "not an exhaustive symbol-by-symbol inventory") plus a **"Removed"** section (~25 lines) in one cycle (`CHANGELOG.md:139,318`). 0.3.0 shipped 2026-07-07 and 0.4.0 six weeks later; 0.5.0 is already in tree. Expect to pay that every release. **[V]** |
 | **Adoption** | 72,633 lifetime downloads vs axum's 472,772,128 (116M recent). Roughly a 6,500× gap. Not dispositive on its own — it is dispositive in combination with the forked type system, because obscurity plus a fork means nobody else has hit your integration bug first. **[V]** |
-| **MSRV** | **1.96.0 / edition 2024** — effectively "latest stable, no MSRV policy". Stampede inherits that floor wherever rama is linked. **[V]** |
+| **MSRV** | **1.96.0 / edition 2024** — effectively "latest stable, no MSRV policy". Stampeded inherits that floor wherever rama is linked. **[V]** |
 | **Dependency weight** | 721 locked packages workspace-wide (upper bound; feature-gated builds are far smaller — features are granular, `Cargo.toml:79-160`). apalis's whole workspace locks 399 for comparison. **[V]** |
 | **Docs** | **Better than most 0.x and better than we need**: 64-page book, 91 tested examples, full rustdoc plus edge docs. This is not a weakness and should not be argued as one. **[V]** |
 | **Bus factor** | `CODEOWNERS: * @glendc`; GlenDC has 1,956 of ~2,200 commits (~88%); #2 contributor has 132. Commercial backing (Plabayo, ramaproxy.com) and 51 total contributors are mitigants, not a fix. **Note:** `seuros` is the **#3 contributor at 27 commits** and is credited by name in the 0.4.0 release notes — real influence exists. See §7.2, where this is the counterargument's spine. **[V]** |
-| **Vendored HTTP stack** | `rama-http-core` is a **34,246-line fork of hyper + h2** (`rama-http-core/Cargo.toml`). Stampede would inherit a non-upstream HTTP/1+2 implementation and its CVE-response latency, on an internet-facing surface. With axum you get hyperium's hyper: largest deployed base, fastest security response in the Rust HTTP ecosystem. **This is a risk that cannot be discharged by sending a PR.** **[V]** for the fork; **[I]** for relative response speed. |
+| **Vendored HTTP stack** | `rama-http-core` is a **34,246-line fork of hyper + h2** (`rama-http-core/Cargo.toml`). Stampeded would inherit a non-upstream HTTP/1+2 implementation and its CVE-response latency, on an internet-facing surface. With axum you get hyperium's hyper: largest deployed base, fastest security response in the Rust HTTP ecosystem. **This is a risk that cannot be discharged by sending a PR.** **[V]** for the fork; **[I]** for relative response speed. |
 | **Ecosystem tax** | §1.4. The fork is of the type system, so `http`-ecosystem crates need bridging or reimplementation, permanently. **[V]** |
 | **Abstraction leakage** | Contained *if* rama is confined to one crate. If rama's `Service`/`Extensions` reaches the claim path, the job lifecycle acquires a second, untyped state channel next to `state-machines` — the same two-sources-of-truth failure `03-postgres18.md:81-86` already rejects for triggers. **[I]** |
 | **Backpressure model** | No `poll_ready` means rama cannot express Tower-style demand-driven backpressure. Fine for an HTTP edge. For a dispatcher that must stop claiming when executors saturate, it is a mismatch — and apalis (§5) shows the Tower model genuinely earns its keep there. **[V]** for the trait; **[I]** for the consequence. |
@@ -350,7 +350,7 @@ equivalent.
 
 ### 4.3 What we would do differently **[V]** throughout
 
-| # | underway does | problem | Stampede |
+| # | underway does | problem | Stampeded |
 |---|---|---|---|
 | 1 | **One pooled connection pinned per in-flight job for the job's entire duration.** `pool.acquire()` at `worker.rs:810`, `conn.begin()` at `:820`, held until `tx.commit()` at `:886`. The user's `execute` even receives a savepoint (`:859`). | Connection count scales with *concurrency × job duration*, not query volume. A 30-second HTTP-calling job holds a Postgres connection for 30 seconds doing nothing. | Claim commits immediately; execution holds **no** DB connection; completion is a separate short transaction. **We give up "the job body runs in the queue's transaction" — the one thing underway offers that we will not. Document that loudly.** See §6. |
 | 2 | Heartbeat task borrows a **second** pool connection each beat (`worker.rs:838-851`), deliberately outside the tx. | Doubles peak connection pressure exactly when the pool is most contended. | One heartbeat writer per daemon, batching all in-flight job ids into a single UPDATE on one connection. |
@@ -367,7 +367,7 @@ equivalent.
 
 **Churn warning [V]:** `CHANGELOG.md:1-60` is almost entirely `Breaking:` from
 0.1.0 onward. `sqlx` is in underway's public API (`PgPool`), so a sqlx major
-forces a lockstep major on every consumer (`CHANGELOG.md:3-5`). If Stampede
+forces a lockstep major on every consumer (`CHANGELOG.md:3-5`). If Stampeded
 exposes a pool type publicly, we inherit that. Consider not exposing it.
 
 ---
@@ -407,9 +407,9 @@ fencing, lease expiry and attempt accounting *out* of the framework and into eac
 backend, where every backend re-derives and re-breaks them. Still `1.0.0-rc`
 after a long run.
 
-**For us:** Stampede's Postgres-only stance is the opposite bet and is the right
+**For us:** Stampeded's Postgres-only stance is the opposite bet and is the right
 one for correctness. But note what apalis does to the rama argument — its
-evidence favours **Tower**, whose middleware ecosystem Stampede gets from `tower`
+evidence favours **Tower**, whose middleware ecosystem Stampeded gets from `tower`
 directly, and whose `poll_ready` backpressure rama deliberately dropped. It is
 not evidence for rama.
 
@@ -460,7 +460,7 @@ than a clear error. Five such processes exhaust `max_connections=100` — the st
 dev instance in `03-postgres18.md:93-96` — before a single job is slow.
 
 And because Postgres *is* the protocol (`05-`), the enqueueing applications share
-that same instance. **Stampede's connection budget is not only Stampede's
+that same instance. **Stampeded's connection budget is not only Stampeded's
 problem.**
 
 Note `sqlx::PgListener::connect_with(pool)` (`queue.rs:2236`) takes a connection
@@ -468,7 +468,7 @@ Note `sqlx::PgListener::connect_with(pool)` (`queue.rs:2236`) takes a connection
 **[I]** for sqlx's hold semantics. It is an invisible permanent subtraction from
 `max_size`.
 
-### 6.3 Design for Stampede — three classes, three budgets
+### 6.3 Design for Stampeded — three classes, three budgets
 
 1. **Claim/dispatch pool — small and fixed (2-4).** Claims are microsecond-scale
    statements. They must never queue behind job execution. Sizing this
@@ -497,7 +497,7 @@ pgbouncer in front" is therefore not a substitute for an in-daemon budget: the
 listener and leader-lock connections must bypass it. Record this before someone
 proposes it as the fix.
 
-**Point in favour of `stampede_claim()` as a SQL function (`05-`):** a polyglot
+**Point in favour of `stampeded_claim()` as a SQL function (`05-`):** a polyglot
 worker calling it uses *its own* pool, not ours. The function form moves
 connection cost to the client, where it is already budgeted. A second independent
 reason to prefer the function over daemon-mediated claiming for in-cluster
@@ -529,16 +529,16 @@ Concretely:
 
 **Why:**
 
-1. **rama's unique value sits at layers Stampede does not operate at, and its
+1. **rama's unique value sits at layers Stampeded does not operate at, and its
    unique cost lands on the one component that matters most.** The fork is of
-   the hyperium *type system* (§1.4), and the MCP SDK — carrying Stampede's only
+   the hyperium *type system* (§1.4), and the MCP SDK — carrying Stampeded's only
    non-copyable differentiator (`00-vision.md:36-40`) — is hyperium-native
    (§2.1). That is the collision, and it is head-on.
 2. **The Datastar advantage did not survive contact with the network (§1.5).**
    The official SDK is axum-native by explicit design, and rama's own Datastar
    types cannot be cherry-picked because `Event::serialize()` is `pub(super)`.
    The first draft named this as its flip condition; the condition is met.
-3. **Everything rama offers below the edge, Stampede already owns** — published,
+3. **Everything rama offers below the edge, Stampeded already owns** — published,
    in use, and the thesis of `02-crate-family.md`. Routing through rama means two
    vocabularies for backoff, rate limiting and concurrency.
 4. **The re-export tells the story.** `rama::graceful` is six lines of
@@ -561,14 +561,14 @@ miscalibration.
 Stacked on that:
 
 - **"The edge is easy, the core is hard" is how you build a job processor nobody
-  can reach.** Per `00-vision.md`, Stampede's two differentiators — the MCP
+  can reach.** Per `00-vision.md`, Stampeded's two differentiators — the MCP
   control plane and the Datastar dashboard — are **both edge features**. The
   claiming logic is a few hundred lines of SQL that Oban, River and Graphile
   have already solved and PG18 makes easier; it is the *least* differentiated
   part of the system. If the edge is where the product value and the code volume
   actually live, "use the weaker framework for the important part" is backwards.
 - **rama's `&self`, no-`poll_ready` model is a better fit than tower** for the
-  long-lived, shared, stateful components Stampede actually has — a claim
+  long-lived, shared, stateful components Stampeded actually has — a claim
   dispatcher, a throttle, a breaker — where tower's readiness protocol and
   per-call `Clone` are friction. apalis (§5) is the live experiment in what
   tower-shaped job processing costs.
@@ -608,7 +608,7 @@ out loud, before the first line of edge code is written.
   payoff.
 
 **What would flip this back:** rama reaching 1.0 with a stability commitment; or
-`rmcp` (or a viable alternative) growing a rama-native transport; or Stampede's
+`rmcp` (or a viable alternative) growing a rama-native transport; or Stampeded's
 edge acquiring a genuine transport-layer requirement — mTLS worker
 authentication, protocol multiplexing on one port, or a QUIC/gRPC worker channel.
 Any one of those and (c) becomes correct.
@@ -641,7 +641,7 @@ Any one of those and (c) becomes correct.
    version every sqlx major (`CHANGELOG.md:3-5`).
 9. Exact connection budget numbers need a load test. The *design* must declare a
    budget before that test exists; the test then validates it.
-10. pgbouncer compatibility matrix for `stampede_claim()` under transaction-mode
+10. pgbouncer compatibility matrix for `stampeded_claim()` under transaction-mode
     pooling — specifically whether the claim function is safe there while the
     listener and leader lock bypass the pooler. Supported-in-session-mode-only,
     or shipped guidance for transaction mode with LISTEN disabled and polling

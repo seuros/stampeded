@@ -465,7 +465,7 @@ the table*. That is the entire thesis of this document.
 
 ---
 
-## 7. What Stampede should do
+## 7. What Stampeded should do
 
 ### PG18 facts, executed on 18.6 today
 
@@ -568,9 +568,9 @@ SQLSTATE **40001** — a serialization failure, i.e. retryable, i.e. exactly wha
 settings, plus pg-boss's detection. No `pg_partman`, no time partitioning, no
 per-queue partitioning at v1.**
 
-1. **`stampede_jobs PARTITION BY LIST (state)`, exactly two leaves.**
-   - `stampede_jobs_live` — `available, scheduled, executing, retryable`
-   - `stampede_jobs_done` — `completed, discarded, cancelled`
+1. **`stampeded_jobs PARTITION BY LIST (state)`, exactly two leaves.**
+   - `stampeded_jobs_live` — `available, scheduled, executing, retryable`
+   - `stampeded_jobs_done` — `completed, discarded, cancelled`
    - Fixed at install. No partition is ever created or dropped at runtime, so
      none of pg-boss's DDL-in-transaction hazards apply.
    - Every claim-path index lives only on `_live`. `_done` carries a pkey and
@@ -612,7 +612,7 @@ per-queue partitioning at v1.**
      batches, per-statement timeout, halve the batch on timeout
      (`river/internal/maintenance/job_cleaner.go:184-236`, `:214-217`).
      This is the only correct pruner in the survey; copy it wholesale.
-   - Leader-elected off the `stampede_workers` heartbeat table that `04-`
+   - Leader-elected off the `stampeded_workers` heartbeat table that `04-`
      already requires. No second coordination mechanism.
 
 4. **Reindex nightly, concurrently, measured — not scheduled blindly.** Take
@@ -639,7 +639,7 @@ per-queue partitioning at v1.**
 6. **Never run an unbounded aggregate over the job table.** This is the lesson
    of `plans.ts:968-975`. Any dashboard count, any metric, any `SELECT count(*)`
    over `_live` holds the horizon and stops vacuum from reclaiming. Maintain
-   counters on a small `stampede_queues` row via trigger — which is exactly the
+   counters on a small `stampeded_queues` row via trigger — which is exactly the
    narrow, invariant-maintaining trigger use that `03-postgres18.md:81-86`
    already permits — and read the counter, never the table. If an aggregate is
    ever unavoidable, port pg-boss's naptime-proportional backoff verbatim.
@@ -679,7 +679,7 @@ them in whatever order the CTE happened to emit: worker A takes
 reverse, and Postgres resolves it by killing one with SQLSTATE 40P01.
 
 Reproduced reliably: four workers completing 200 jobs concurrently deadlocked
-inside `stampede_complete` on every run. In production that is a worker failing
+inside `stampeded_complete` on every run. In production that is a worker failing
 to report a *finished* job, which then sits in `executing` until the reaper
 notices — a silent stall under exactly the load this design exists for, and one
 that would have looked like a reaper bug rather than a counter bug.
@@ -735,8 +735,8 @@ original analysis did not anticipate.
   survives every worker being down — the pruner is a maintenance role, not a
   worker role, and `--no-worker` runs it.
 - ~~**`pgstattuple` cost.**~~ **MOOT — it was never shipped.** The concern was
-  about a background pass doing full relation scans; `stampede_vacuum_health`
-  and `stampede_index_density` read `pg_stat_user_tables` and `pg_class`
+  about a background pass doing full relation scans; `stampeded_vacuum_health`
+  and `stampeded_index_density` read `pg_stat_user_tables` and `pg_class`
   instead, which are catalog lookups with no relation scan at all. Nothing in
   `schema/` or `crates/` references `pgstattuple` or `pgstatindex`. If one is
   ever added it should be operator-invoked, per the reasoning here.
@@ -756,7 +756,7 @@ here either."*
 **That reasoning was wrong, and wrong in a way worth keeping written down.** It
 is true that claiming cannot be HOT — it updates `state`, which is the leading
 edge of the claim index. But claiming is not the frequent update. **Heartbeats
-are**, and `stampede_touch` writes `heartbeat_at` and nothing else
+are**, and `stampeded_touch` writes `heartbeat_at` and nothing else
 (`002_operations.sql:312`). `heartbeat_at` is in no index. Every heartbeat is
 HOT-eligible, and a long job emits them for its entire duration.
 
@@ -841,7 +841,7 @@ thing in the table:
 
 ### What the tiebreaker buys, exactly
 
-`stampede_claim` orders by `priority, scheduled_at, id`. Dropping `id` from the
+`stampeded_claim` orders by `priority, scheduled_at, id`. Dropping `id` from the
 index while keeping it in the ORDER BY is the worst of both worlds — measured
 at 300k rows, 100-row claim:
 
@@ -869,8 +869,8 @@ not the system's.
 
 ### Decided: dropped
 
-The owner took the 8.5x. `id` is gone from both `stampede_jobs_claim_idx` and
-`stampede_claim`'s ORDER BY. Measured on the real schema afterwards: **12 MB at
+The owner took the 8.5x. `id` is gone from both `stampeded_jobs_claim_idx` and
+`stampeded_claim`'s ORDER BY. Measured on the real schema afterwards: **12 MB at
 1M rows against 85 MB**, claim unchanged at 0.11 ms with no sort, and no
 existing test depended on the old ordering.
 

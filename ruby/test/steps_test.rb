@@ -6,19 +6,19 @@ SIDE_EFFECTS = Queue.new
 
 class SteppedJob < ActiveJob::Base
   def perform
-    stampede_step("charge") { SIDE_EFFECTS << :charged }
+    stampeded_step("charge") { SIDE_EFFECTS << :charged }
 
-    path = stampede_step("render") do
+    path = stampeded_step("render") do
       SIDE_EFFECTS << :rendered
       "/tmp/receipt.pdf"
     end
     SIDE_EFFECTS << [:path, path]
 
-    stampede_step("email", cursor: 0) do |step|
+    stampeded_step("email", cursor: 0) do |step|
       (step.cursor...3).each do |i|
         SIDE_EFFECTS << [:emailed, i]
         step.advance!(i + 1)
-        raise "crash after email #{i}" if i == 1 && !stampede_resumed?
+        raise "crash after email #{i}" if i == 1 && !stampeded_resumed?
       end
     end
 
@@ -27,11 +27,11 @@ class SteppedJob < ActiveJob::Base
 end
 
 class StepsTest < Minitest::Test
-  include StampedeTest::Isolation
+  include StampededTest::Isolation
 
   def setup
     super
-    ActiveJob::Base.queue_adapter = ActiveJob::QueueAdapters::StampedeAdapter.new
+    ActiveJob::Base.queue_adapter = ActiveJob::QueueAdapters::StampededAdapter.new
     SIDE_EFFECTS.clear
   end
 
@@ -55,7 +55,7 @@ class StepsTest < Minitest::Test
     # The point of the whole feature: a charge that succeeded must not be
     # charged again because a LATER step crashed.
     job = SteppedJob.perform_later
-    drain(Stampede::ActiveJobWorker.new(queue: "default", poll_interval: 0.05)) do
+    drain(Stampeded::ActiveJobWorker.new(queue: "default", poll_interval: 0.05)) do
       job_row(job.provider_job_id)["state"] == "completed"
     end
 
@@ -70,7 +70,7 @@ class StepsTest < Minitest::Test
     # nil on resume. Persisting small results is the departure that makes the
     # obvious usage correct.
     job = SteppedJob.perform_later
-    drain(Stampede::ActiveJobWorker.new(queue: "default", poll_interval: 0.05)) do
+    drain(Stampeded::ActiveJobWorker.new(queue: "default", poll_interval: 0.05)) do
       job_row(job.provider_job_id)["state"] == "completed"
     end
 
@@ -81,7 +81,7 @@ class StepsTest < Minitest::Test
 
   def test_a_cursor_resumes_mid_step
     job = SteppedJob.perform_later
-    drain(Stampede::ActiveJobWorker.new(queue: "default", poll_interval: 0.05)) do
+    drain(Stampeded::ActiveJobWorker.new(queue: "default", poll_interval: 0.05)) do
       job_row(job.provider_job_id)["state"] == "completed"
     end
 
@@ -93,16 +93,16 @@ class StepsTest < Minitest::Test
     # Two steps with one name makes "have I done this?" ambiguous and the
     # fast-forward silently wrong. River detects this too.
     ctx = fake_context
-    steps = Stampede::Steps.new(ctx)
+    steps = Stampeded::Steps.new(ctx)
     steps.step("a") { 1 }
-    assert_raises(Stampede::Steps::DuplicateStep) { steps.step("a") { 2 } }
+    assert_raises(Stampeded::Steps::DuplicateStep) { steps.step("a") { 2 } }
   end
 
   def test_a_large_step_result_is_refused_with_advice
     # Silently dropping it would give a job that works until the first crash
     # and then behaves differently.
-    steps = Stampede::Steps.new(fake_context)
-    error = assert_raises(Stampede::Steps::ResultTooLarge) do
+    steps = Stampeded::Steps.new(fake_context)
+    error = assert_raises(Stampeded::Steps::ResultTooLarge) do
       steps.step("big") { "x" * 20_000 }
     end
     assert_match(/reference to it/, error.message)
@@ -112,7 +112,7 @@ class StepsTest < Minitest::Test
     # The common case is a step run purely for its side effect; storing nil for
     # every one of them would bloat the state for nothing.
     ctx = fake_context
-    steps = Stampede::Steps.new(ctx)
+    steps = Stampeded::Steps.new(ctx)
     steps.step("side_effect") { nil }
     assert_empty ctx.saved.last["values"]
     assert_equal ["side_effect"], ctx.saved.last["completed"]

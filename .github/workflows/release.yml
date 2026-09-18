@@ -42,16 +42,16 @@ jobs:
       - name: Build
         run: |
           if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --release --bin stampede --target ${{ matrix.target }}
+            cross build --release --bin stampeded --target ${{ matrix.target }}
           else
-            cargo build --release --bin stampede --target ${{ matrix.target }}
+            cargo build --release --bin stampeded --target ${{ matrix.target }}
           fi
 
       # A binary that cannot start is not a release. --help exercises argument
       # parsing without needing a database.
       - name: Smoke test
         if: '!matrix.cross'
-        run: ./target/${{ matrix.target }}/release/stampede --help
+        run: ./target/${{ matrix.target }}/release/stampeded --help
 
       # rama-dns runs bindgen on Linux and needs libclang. Only for the
       # native Linux build -- `cross` compiles inside its own container, which
@@ -62,8 +62,8 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: stampede-${{ matrix.gem }}
-          path: target/${{ matrix.target }}/release/stampede
+          name: stampeded-${{ matrix.gem }}
+          path: target/${{ matrix.target }}/release/stampeded
 
   gems:
     needs: binaries
@@ -79,18 +79,18 @@ jobs:
         working-directory: ruby-daemon
         run: |
           set -euo pipefail
-          for dir in ../artifacts/stampede-*; do
-            plat="${dir#../artifacts/stampede-}"
+          for dir in ../artifacts/stampeded-*; do
+            plat="${dir#../artifacts/stampeded-}"
             mkdir -p "exe/$plat"
-            cp "$dir/stampede" "exe/$plat/stampede"
-            chmod +x "exe/$plat/stampede"
-            STAMPEDE_GEM_PLATFORM="$plat" gem build stampede-daemon.gemspec
+            cp "$dir/stampeded" "exe/$plat/stampeded"
+            chmod +x "exe/$plat/stampeded"
+            STAMPEDED_GEM_PLATFORM="$plat" gem build stampeded-daemon.gemspec
           done
           ls -la ./*.gem
 
       - name: Build the pure-Ruby gem
         working-directory: ruby
-        run: gem build stampede.gemspec
+        run: gem build stampeded.gemspec
 
       - uses: actions/upload-artifact@v4
         with:

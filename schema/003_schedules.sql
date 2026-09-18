@@ -1,4 +1,4 @@
--- Stampede — recurring schedules
+-- Stampeded — recurring schedules
 --
 -- Design from plans/11. Two mechanisms, each doing exactly one job.
 
@@ -17,7 +17,7 @@
 --   * schedules queryable and mutable at runtime, which Oban, River, good_job
 --     and procrastinate cannot offer because their schedules live in config.
 -- ---------------------------------------------------------------------------
-CREATE TABLE stampede_schedules (
+CREATE TABLE stampeded_schedules (
     key             text        PRIMARY KEY,
 
     queue           text        NOT NULL,
@@ -27,12 +27,12 @@ CREATE TABLE stampede_schedules (
     priority        smallint    NOT NULL DEFAULT 0,
 
     -- Exactly one of the two. A cron expression is parsed in Rust (jiff does
-    -- the timezone arithmetic -- see crates/stampede-core/src/cron.rs), which is
+    -- the timezone arithmetic -- see crates/stampeded-core/src/cron.rs), which is
     -- why the firing loop lives there rather than in PL/pgSQL; a fixed interval
     -- needs no parser at all and is kept for the common "every N seconds" case.
     interval_secs   bigint      CHECK (interval_secs > 0),
     cron_expr       text,
-    CONSTRAINT stampede_schedules_one_rule CHECK (
+    CONSTRAINT stampeded_schedules_one_rule CHECK (
         (interval_secs IS NULL) <> (cron_expr IS NULL)
     ),
 
@@ -72,14 +72,14 @@ CREATE TABLE stampede_schedules (
 );
 
 -- The claim path: due, unpaused schedules, oldest first.
-CREATE INDEX stampede_schedules_due_idx
-    ON stampede_schedules (next_run_at)
+CREATE INDEX stampeded_schedules_due_idx
+    ON stampeded_schedules (next_run_at)
     WHERE NOT paused;
 
 -- ---------------------------------------------------------------------------
 -- Occurrence ledger — idempotency backstop and audit trail.
 --
--- Deliberately a SEPARATE NARROW TABLE, not a column on stampede_jobs.
+-- Deliberately a SEPARATE NARROW TABLE, not a column on stampeded_jobs.
 -- good_job and solid_queue both put the cron key on the jobs table, and both
 -- then had to guarantee cron rows are never pruned. Coupling cron correctness
 -- to job retention would make the retention horizon load-bearing for
@@ -87,9 +87,9 @@ CREATE INDEX stampede_schedules_due_idx
 --
 -- procrastinate's separate ledger is the precedent.
 -- ---------------------------------------------------------------------------
-CREATE TABLE stampede_cron_occurrences (
+CREATE TABLE stampeded_cron_occurrences (
     id                bigserial   PRIMARY KEY,
-    cron_key          text        NOT NULL REFERENCES stampede_schedules(key) ON DELETE CASCADE,
+    cron_key          text        NOT NULL REFERENCES stampeded_schedules(key) ON DELETE CASCADE,
 
     -- The DST policy made concrete. For 'instant' this is the UTC epoch
     -- second; for 'wall_clock' it is the local 'YYYY-MM-DD HH24:MI' string,
@@ -104,8 +104,8 @@ CREATE TABLE stampede_cron_occurrences (
     UNIQUE (cron_key, occurrence_token)
 );
 
-CREATE INDEX stampede_cron_occurrences_enqueued_idx
-    ON stampede_cron_occurrences (enqueued_at);
+CREATE INDEX stampeded_cron_occurrences_enqueued_idx
+    ON stampeded_cron_occurrences (enqueued_at);
 
 -- ---------------------------------------------------------------------------
 -- Firing, in two halves.
@@ -116,9 +116,9 @@ CREATE INDEX stampede_cron_occurrences_enqueued_idx
 -- the transaction stayed put:
 --
 --     BEGIN
---       stampede_claim_due_schedules(n)   -- takes the row locks
+--       stampeded_claim_due_schedules(n)   -- takes the row locks
 --       ...Rust computes each next_run_at with jiff...
---       stampede_fire_schedule(key, next) -- once per schedule
+--       stampeded_fire_schedule(key, next) -- once per schedule
 --     COMMIT
 --
 -- The row lock is still the leader election, and it is held across the round
@@ -128,12 +128,12 @@ CREATE INDEX stampede_cron_occurrences_enqueued_idx
 
 -- Take the locks. MUST be called inside a transaction: the locks are what stop
 -- two nodes firing the same occurrence, and they last exactly as long as it.
-CREATE FUNCTION stampede_claim_due_schedules(p_limit integer DEFAULT 100)
-RETURNS SETOF stampede_schedules
+CREATE FUNCTION stampeded_claim_due_schedules(p_limit integer DEFAULT 100)
+RETURNS SETOF stampeded_schedules
 LANGUAGE plpgsql AS $$
 BEGIN
     RETURN QUERY
-        SELECT * FROM stampede_schedules
+        SELECT * FROM stampeded_schedules
          WHERE NOT paused AND next_run_at <= now()
          ORDER BY next_run_at
          LIMIT p_limit
@@ -146,18 +146,18 @@ $$;
 -- Returns the job id, or NULL if this occurrence was already enqueued by
 -- someone else — in which case the schedule is still advanced, or we would spin
 -- on it forever.
-CREATE FUNCTION stampede_fire_schedule(p_key text, p_next_run_at timestamptz)
+CREATE FUNCTION stampeded_fire_schedule(p_key text, p_next_run_at timestamptz)
 RETURNS uuid
 LANGUAGE plpgsql AS $$
 DECLARE
-    s        stampede_schedules%ROWTYPE;
+    s        stampeded_schedules%ROWTYPE;
     v_token  text;
     v_job    uuid;
     -- Separate from v_job: the ledger's id is bigserial, the job's is uuid.
     -- Reusing one variable for both is a runtime cast error, not a compile one.
     v_occ    bigint;
 BEGIN
-    SELECT * INTO s FROM stampede_schedules WHERE key = p_key;
+    SELECT * INTO s FROM stampeded_schedules WHERE key = p_key;
     IF NOT FOUND THEN
         RETURN NULL;
     END IF;
@@ -169,27 +169,27 @@ BEGIN
             extract(epoch FROM s.next_run_at)::bigint::text
     END;
 
-    INSERT INTO stampede_cron_occurrences (cron_key, occurrence_token)
+    INSERT INTO stampeded_cron_occurrences (cron_key, occurrence_token)
     VALUES (s.key, v_token)
     ON CONFLICT (cron_key, occurrence_token) DO NOTHING
     RETURNING id INTO v_occ;
 
     IF v_occ IS NULL THEN
-        UPDATE stampede_schedules
+        UPDATE stampeded_schedules
            SET next_run_at = p_next_run_at, updated_at = now()
          WHERE key = s.key;
         RETURN NULL;
     END IF;
 
-    INSERT INTO stampede_jobs (queue, task, args, tenant_id, priority)
+    INSERT INTO stampeded_jobs (queue, task, args, tenant_id, priority)
     VALUES (s.queue, s.task, s.args, s.tenant_id, s.priority)
     RETURNING id INTO v_job;
 
-    UPDATE stampede_cron_occurrences
+    UPDATE stampeded_cron_occurrences
        SET job_id = v_job
      WHERE cron_key = s.key AND occurrence_token = v_token;
 
-    UPDATE stampede_schedules
+    UPDATE stampeded_schedules
        SET next_run_at = p_next_run_at, last_run_at = now(), updated_at = now()
      WHERE key = s.key;
 
@@ -198,18 +198,18 @@ END;
 $$;
 
 -- Prune the ledger on its own horizon, independent of job retention.
-CREATE FUNCTION stampede_prune_occurrences(p_older_than interval DEFAULT interval '30 days')
+CREATE FUNCTION stampeded_prune_occurrences(p_older_than interval DEFAULT interval '30 days')
 RETURNS integer
 LANGUAGE sql AS $$
     WITH doomed AS (
-        SELECT id FROM stampede_cron_occurrences
+        SELECT id FROM stampeded_cron_occurrences
          WHERE enqueued_at < now() - p_older_than
          LIMIT 10000
     )
-    -- Counted, for the same reason as stampede_prune: RETURNING 1 through a
+    -- Counted, for the same reason as stampeded_prune: RETURNING 1 through a
     -- RETURNS integer function is a constant, not a count.
     , deleted AS (
-        DELETE FROM stampede_cron_occurrences o USING doomed d
+        DELETE FROM stampeded_cron_occurrences o USING doomed d
          WHERE o.id = d.id
         RETURNING 1
     )

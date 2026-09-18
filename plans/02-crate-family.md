@@ -1,6 +1,6 @@
 # The machines crate family
 
-All four are published, in use, and owned by us. Stampede is largely an
+All four are published, in use, and owned by us. Stampeded is largely an
 integration of these rather than new resilience code.
 
 | crate | version | downloads | repo |
@@ -32,10 +32,10 @@ it with string literals scattered across the codebase. Making transitions
 type-checked, with guards, is a real advantage — illegal transitions become
 compile errors instead of a production incident.
 
-> **IMPLEMENTED, in both languages.** `crates/stampede/src/lifecycle.rs` uses
+> **IMPLEMENTED, in both languages.** `crates/stampeded/src/lifecycle.rs` uses
 > `state-machines` (dynamic mode — a job arrives as a database row carrying its
 > state as text, so the state is not known at compile time and cannot be a type
-> parameter). `ruby/lib/stampede/lifecycle.rb` uses the `state_machines` gem to
+> parameter). `ruby/lib/stampeded/lifecycle.rb` uses the `state_machines` gem to
 > declare the same table.
 >
 > The Ruby side spent a while as exactly the thing this paragraph criticises —
@@ -106,7 +106,7 @@ rate limiter, with one set of semantics to reason about and one dashboard
 surface to render them. The integration work most projects would spend a quarter
 on is already done, by prior choices rather than by luck.
 
-`state-machines` is the one not yet used there — and it is the one Stampede adds.
+`state-machines` is the one not yet used there — and it is the one Stampeded adds.
 
 ## What is genuinely missing
 
@@ -121,5 +121,5 @@ Nothing in the resilience layer. The gaps are all substrate and edges:
 
 The earlier assumption that "none of my crates have proper state machines or
 retry" turned out to be wrong — all four exist and are published. What is true
-is that none of the *application* crates consume them. For Stampede they are
+is that none of the *application* crates consume them. For Stampeded they are
 ready to use as-is.

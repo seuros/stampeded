@@ -15,7 +15,7 @@ module FakeAR
 end
 
 class ConnectionTest < Minitest::Test
-  include StampedeTest::Isolation
+  include StampededTest::Isolation
 
   def teardown
     Object.send(:remove_const, :ActiveRecord) if Object.const_defined?(:ActiveRecord)
@@ -33,15 +33,15 @@ class ConnectionTest < Minitest::Test
 
   def test_active_record_wins_over_database_url
     # THE bug this exists for. An earlier version preferred
-    # Stampede.config.database_url, so in a Rails app with DATABASE_URL set in
+    # Stampeded.config.database_url, so in a Rails app with DATABASE_URL set in
     # the shell -- which is extremely common -- jobs were written to a
     # DIFFERENT database than the app was using. The enqueue succeeded, the
     # schema installed "successfully" in the wrong place, and the enqueue
     # silently stopped being transactional. Nothing errored.
-    Stampede.config.database_url = "postgres://someone@elsewhere/wrong_db"
+    Stampeded.config.database_url = "postgres://someone@elsewhere/wrong_db"
 
     with_active_record do
-      params = Stampede::Connection.connection_params
+      params = Stampeded::Connection.connection_params
 
       assert_kind_of Hash, params
       assert_equal "app_db", params[:dbname], "the app's database must win"
@@ -51,14 +51,14 @@ class ConnectionTest < Minitest::Test
   end
 
   def test_an_explicit_url_is_honoured_outside_rails
-    Stampede.config.database_url = "postgres://u:p@h/db"
-    assert_equal "postgres://u:p@h/db", Stampede::Connection.connection_params
+    Stampeded.config.database_url = "postgres://u:p@h/db"
+    assert_equal "postgres://u:p@h/db", Stampeded::Connection.connection_params
   end
 
   def test_no_configuration_at_all_says_what_to_do
-    Stampede.config.database_url = nil
-    error = assert_raises(Stampede::Error) { Stampede::Connection.connection_params }
-    assert_match(/STAMPEDE_DATABASE_URL/, error.message)
+    Stampeded.config.database_url = nil
+    error = assert_raises(Stampeded::Error) { Stampeded::Connection.connection_params }
+    assert_match(/STAMPEDED_DATABASE_URL/, error.message)
   end
 
   def test_the_daemon_url_is_built_from_the_same_source_as_the_workers
@@ -67,7 +67,7 @@ class ConnectionTest < Minitest::Test
     # workers would run against different databases -- the scheduler would fire
     # jobs nobody ever claims.
     with_active_record(host: "db.internal", database: "prod", username: "app") do
-      url = Stampede.database_url_for_daemon
+      url = Stampeded.database_url_for_daemon
       assert_includes url, "db.internal"
       assert_includes url, "/prod"
       assert_includes url, "app:"
@@ -87,13 +87,13 @@ class TruthyTest < Minitest::Test
     # It was silently false in Rails: Schema.installed? always answered "no",
     # so the installer re-applied the schema over itself and died on the first
     # table that already existed.
-    assert Stampede.truthy?(true), "ActiveRecord's decoded boolean"
-    assert Stampede.truthy?("t"), "a bare PG connection's string"
-    assert Stampede.truthy?("true")
+    assert Stampeded.truthy?(true), "ActiveRecord's decoded boolean"
+    assert Stampeded.truthy?("t"), "a bare PG connection's string"
+    assert Stampeded.truthy?("true")
 
-    refute Stampede.truthy?(false)
-    refute Stampede.truthy?("f")
-    refute Stampede.truthy?(nil), "a function returning NULL is not success"
+    refute Stampeded.truthy?(false)
+    refute Stampeded.truthy?("f")
+    refute Stampeded.truthy?(nil), "a function returning NULL is not success"
   end
 end
 
@@ -101,12 +101,12 @@ class NoRailsTest < Minitest::Test
   def test_the_gem_declares_only_what_it_needs
     # ActiveRecord and Rails are OPTIONAL. The gem works in a script, a Sinatra
     # app, or a service that has no business loading Rails -- verified in a
-    # clean bundle containing only pg, state_machines and stampede.
+    # clean bundle containing only pg, state_machines and stampeded.
     #
     # state_machines is a hard dependency because the lifecycle is DECLARED
     # rather than compared against string literals, which is the thing plans/02
     # criticises every surveyed implementation for.
-    spec = Gem::Specification.load(File.expand_path("../stampede.gemspec", __dir__))
+    spec = Gem::Specification.load(File.expand_path("../stampeded.gemspec", __dir__))
     declared = spec.dependencies.select { |d| d.type == :runtime }.map(&:name).sort
 
     assert_equal %w[pg state_machines], declared

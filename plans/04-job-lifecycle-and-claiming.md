@@ -107,11 +107,11 @@ Note Graphile also guards `complete_jobs` and `permanently_fail_jobs` with the
 same `locked_at IS NULL OR locked_at < now() - 4h` predicate, so a worker that
 overran its lease cannot even complete its own job.
 
-## Decision for Stampede
+## Decision for Stampeded
 
 **Take solid_queue's heartbeat model, not a time lease.** A lease turns a slow
 job into duplicate execution, and no Postgres version fixes that. A heartbeat
-costs a `stampede_workers` table and a reaper, which is a known, bounded cost.
+costs a `stampeded_workers` table and a reaper, which is a known, bounded cost.
 
 Worth stating plainly: **every Postgres queue surveyed except solid_queue uses a
 time lease** — Oban OSS 60 min, Graphile 4 h, pg-boss 15 min, underway a
@@ -123,7 +123,7 @@ it a heartbeat in all but name.
 
 Concretely:
 
-- `stampede_workers` heartbeat table; rescuer requeues jobs whose worker went
+- `stampeded_workers` heartbeat table; rescuer requeues jobs whose worker went
   silent
 - `attempted_by` as a **bounded** array (River's trick)
 - claim via `UPDATE ... RETURNING OLD.state, NEW.state`, with `state-machines`
@@ -153,7 +153,7 @@ because the counter never moves. Procrastinate compounds it: a stuck `doing` row
 holds the unique index `procrastinate_jobs_lock_idx_v1 (lock) WHERE
 status='doing'`, so one poison job blocks every other job sharing that lock.
 
-Stampede increments at claim. A worker that dies has already spent the attempt.
+Stampeded increments at claim. A worker that dies has already spent the attempt.
 
 **The CTE fence becomes unnecessary** — but only because `RETURNING OLD.`
 removes the need for the LIMIT subquery at all. That reasoning MUST be written

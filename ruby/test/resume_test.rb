@@ -10,26 +10,26 @@ class ResumableImportJob < ActiveJob::Base
   TOTAL = 10
 
   def perform
-    cursor = stampede_checkpoint&.dig("cursor") || 0
+    cursor = stampeded_checkpoint&.dig("cursor") || 0
     PROCESSED << [:started_at, cursor]
 
     (cursor...TOTAL).each do |i|
       # Commit the work FIRST, then record it. The other order replays a chunk
       # on resume, which for a non-idempotent job is silent duplication.
       PROCESSED << [:did, i]
-      stampede_checkpoint!(cursor: i + 1)
+      stampeded_checkpoint!(cursor: i + 1)
 
-      raise "worker died at #{i}" if i == 4 && !stampede_resumed?
+      raise "worker died at #{i}" if i == 4 && !stampeded_resumed?
     end
   end
 end
 
 class ResumeTest < Minitest::Test
-  include StampedeTest::Isolation
+  include StampededTest::Isolation
 
   def setup
     super
-    ActiveJob::Base.queue_adapter = ActiveJob::QueueAdapters::StampedeAdapter.new
+    ActiveJob::Base.queue_adapter = ActiveJob::QueueAdapters::StampededAdapter.new
     PROCESSED.clear
   end
 
@@ -47,7 +47,7 @@ class ResumeTest < Minitest::Test
     job = ResumableImportJob.perform_later
     id = job.provider_job_id
 
-    worker = Stampede::ActiveJobWorker.new(queue: "default", poll_interval: 0.05)
+    worker = Stampeded::ActiveJobWorker.new(queue: "default", poll_interval: 0.05)
     drain(worker) { job_row(id)["state"] == "completed" }
 
     events = []
@@ -64,7 +64,7 @@ class ResumeTest < Minitest::Test
 
   def test_a_job_can_tell_whether_it_resumed
     job = ResumableImportJob.perform_later
-    drain(Stampede::ActiveJobWorker.new(queue: "default", poll_interval: 0.05)) do
+    drain(Stampeded::ActiveJobWorker.new(queue: "default", poll_interval: 0.05)) do
       job_row(job.provider_job_id)["state"] == "completed"
     end
 
@@ -77,23 +77,23 @@ class ResumeTest < Minitest::Test
   def test_checkpointing_outside_a_worker_is_a_clear_error
     # Rather than a NoMethodError on nil, which is what a bare thread-local
     # lookup would give.
-    error = assert_raises(Stampede::Error) do
-      ResumableImportJob.new.stampede_checkpoint!(cursor: 1)
+    error = assert_raises(Stampeded::Error) do
+      ResumableImportJob.new.stampeded_checkpoint!(cursor: 1)
     end
-    assert_match(/Stampede worker/, error.message)
+    assert_match(/Stampeded worker/, error.message)
   end
 
   def test_reading_a_checkpoint_outside_a_worker_is_just_nil
     # Reading is harmless -- a job might check it defensively.
-    assert_nil ResumableImportJob.new.stampede_checkpoint
+    assert_nil ResumableImportJob.new.stampeded_checkpoint
   end
 
   def test_a_plain_worker_gets_a_context_too
     # Not an ActiveJob feature: the same thing works for a bare Ruby handler.
     seen = Queue.new
-    id = Stampede.enqueue(queue: "default", task: "chunky")
+    id = Stampeded.enqueue(queue: "default", task: "chunky")
 
-    worker = Stampede::Worker.new(queue: "default", poll_interval: 0.05)
+    worker = Stampeded::Worker.new(queue: "default", poll_interval: 0.05)
     worker.register("chunky") do |ctx|
       seen << ctx.checkpoint
       ctx.checkpoint!(cursor: 42)
@@ -108,7 +108,7 @@ class ResumeTest < Minitest::Test
 end
 
 class ResumeTransactionTest < Minitest::Test
-  include StampedeTest::Isolation
+  include StampededTest::Isolation
 
   def test_a_checkpoint_rolls_back_with_the_work_it_describes
     # The hazard, closed. If the cursor is written on its own connection it
@@ -116,21 +116,21 @@ class ResumeTransactionTest < Minitest::Test
     # cursor claiming work that was undone -- and the resume skips it.
     #
     # River offers ResumableSetStepCursorTx for exactly this reason.
-    q = Stampede
+    q = Stampeded
     id = q.enqueue(queue: "default", task: "chunky")
     worker_id = conn do |c|
-      c.exec_params("INSERT INTO stampede_workers (hostname,pid,queues) VALUES ($1,$2,$3) RETURNING id",
+      c.exec_params("INSERT INTO stampeded_workers (hostname,pid,queues) VALUES ($1,$2,$3) RETURNING id",
                     ["h", 1, "{default}"])[0]["id"]
     end
 
-    job = conn { |c| Stampede::Job.new(c.exec_params("SELECT * FROM stampede_claim($1,$2,$3)",
+    job = conn { |c| Stampeded::Job.new(c.exec_params("SELECT * FROM stampeded_claim($1,$2,$3)",
                                                      ["default", worker_id, 1])[0]) }
-    ctx = Stampede::JobContext.new(job, worker_id)
+    ctx = Stampeded::JobContext.new(job, worker_id)
 
     # The connection is passed explicitly: outside Rails there is no ambient
     # "caller's connection" to join, which is the whole reason the parameter
     # exists.
-    Stampede::Connection.own do |c|
+    Stampeded::Connection.own do |c|
       c.exec("BEGIN")
       ctx.checkpoint!({ cursor: 500 }, conn: c)
       c.exec("ROLLBACK")
@@ -143,16 +143,16 @@ class ResumeTransactionTest < Minitest::Test
   end
 
   def test_a_committed_checkpoint_survives
-    id = Stampede.enqueue(queue: "default", task: "chunky")
+    id = Stampeded.enqueue(queue: "default", task: "chunky")
     worker_id = conn do |c|
-      c.exec_params("INSERT INTO stampede_workers (hostname,pid,queues) VALUES ($1,$2,$3) RETURNING id",
+      c.exec_params("INSERT INTO stampeded_workers (hostname,pid,queues) VALUES ($1,$2,$3) RETURNING id",
                     ["h", 1, "{default}"])[0]["id"]
     end
-    job = conn { |c| Stampede::Job.new(c.exec_params("SELECT * FROM stampede_claim($1,$2,$3)",
+    job = conn { |c| Stampeded::Job.new(c.exec_params("SELECT * FROM stampeded_claim($1,$2,$3)",
                                                     ["default", worker_id, 1])[0]) }
-    ctx = Stampede::JobContext.new(job, worker_id)
+    ctx = Stampeded::JobContext.new(job, worker_id)
 
-    Stampede::Connection.own do |c|
+    Stampeded::Connection.own do |c|
       c.exec("BEGIN")
       ctx.checkpoint!({ cursor: 500 }, conn: c)
       c.exec("COMMIT")

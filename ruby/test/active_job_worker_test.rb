@@ -19,11 +19,11 @@ class DiscardingJob < ActiveJob::Base
 end
 
 class ActiveJobWorkerTest < Minitest::Test
-  include StampedeTest::Isolation
+  include StampededTest::Isolation
 
   def setup
     super
-    ActiveJob::Base.queue_adapter = ActiveJob::QueueAdapters::StampedeAdapter.new
+    ActiveJob::Base.queue_adapter = ActiveJob::QueueAdapters::StampededAdapter.new
     RESULTS.clear
   end
 
@@ -43,17 +43,17 @@ class ActiveJobWorkerTest < Minitest::Test
     # SQL function the Rust worker uses and then hands off to ActiveJob.
     job = EndToEndJob.perform_later("world")
 
-    worker = Stampede::ActiveJobWorker.new(queue: "default", poll_interval: 0.05)
+    worker = Stampeded::ActiveJobWorker.new(queue: "default", poll_interval: 0.05)
     run_worker(worker) { !RESULTS.empty? }
 
     assert_equal "hello world", RESULTS.pop
     assert_equal "completed", job_row(job.provider_job_id)["state"]
   end
 
-  def test_an_unhandled_exception_becomes_a_stampede_failure
+  def test_an_unhandled_exception_becomes_a_stampeded_failure
     job = FailingEndToEndJob.perform_later
 
-    worker = Stampede::ActiveJobWorker.new(queue: "default", poll_interval: 0.05)
+    worker = Stampeded::ActiveJobWorker.new(queue: "default", poll_interval: 0.05)
     run_worker(worker) { job_row(job.provider_job_id)["state"] == "retryable" }
 
     row = job_row(job.provider_job_id)
@@ -66,7 +66,7 @@ class ActiveJobWorkerTest < Minitest::Test
     # why discard_on needs no special handling while retry_on is refused.
     job = DiscardingJob.perform_later
 
-    worker = Stampede::ActiveJobWorker.new(queue: "default", poll_interval: 0.05)
+    worker = Stampeded::ActiveJobWorker.new(queue: "default", poll_interval: 0.05)
     run_worker(worker) { job_row(job.provider_job_id)["state"] != "available" }
 
     assert_equal "completed", job_row(job.provider_job_id)["state"]
@@ -75,14 +75,14 @@ class ActiveJobWorkerTest < Minitest::Test
   def test_a_job_class_that_no_longer_exists_is_unrecoverable
     # A rename deployed to the enqueuer but not to the workers. No amount of
     # retrying brings the constant back, so it must not burn 25 attempts.
-    id = Stampede.enqueue(
+    id = Stampeded.enqueue(
       queue: "default", task: "DeletedJob",
       args: { "job_class" => "DeletedJob", "job_id" => SecureRandom.uuid,
               "queue_name" => "default", "arguments" => [], "executions" => 0,
               "priority" => nil, "locale" => "en" }
     )
 
-    worker = Stampede::ActiveJobWorker.new(queue: "default", poll_interval: 0.05)
+    worker = Stampeded::ActiveJobWorker.new(queue: "default", poll_interval: 0.05)
     run_worker(worker) { job_row(id)["state"] == "discarded" }
 
     row = job_row(id)
@@ -96,11 +96,11 @@ class NoMethodJob < ActiveJob::Base
 end
 
 class MisclassificationTest < Minitest::Test
-  include StampedeTest::Isolation
+  include StampededTest::Isolation
 
   def setup
     super
-    ActiveJob::Base.queue_adapter = ActiveJob::QueueAdapters::StampedeAdapter.new
+    ActiveJob::Base.queue_adapter = ActiveJob::QueueAdapters::StampededAdapter.new
   end
 
   def test_a_nomethoderror_inside_a_job_is_retried_not_discarded
@@ -111,7 +111,7 @@ class MisclassificationTest < Minitest::Test
     job = NoMethodJob.perform_later(*[])
     id = job.provider_job_id
 
-    worker = Stampede::ActiveJobWorker.new(queue: "default", poll_interval: 0.05)
+    worker = Stampeded::ActiveJobWorker.new(queue: "default", poll_interval: 0.05)
     t = Thread.new { worker.run }
     deadline = Time.now + 10
     sleep 0.05 until job_row(id)["state"] != "available" || Time.now > deadline
@@ -128,14 +128,14 @@ class MisclassificationTest < Minitest::Test
 
   def test_a_genuinely_missing_job_class_is_still_unrecoverable
     # The case the rescue was there for must keep working.
-    id = Stampede.enqueue(
+    id = Stampeded.enqueue(
       queue: "default", task: "VanishedJob",
       args: { "job_class" => "VanishedJob", "job_id" => SecureRandom.uuid,
               "queue_name" => "default", "arguments" => [], "executions" => 0,
               "priority" => nil, "locale" => "en" }
     )
 
-    worker = Stampede::ActiveJobWorker.new(queue: "default", poll_interval: 0.05)
+    worker = Stampeded::ActiveJobWorker.new(queue: "default", poll_interval: 0.05)
     t = Thread.new { worker.run }
     deadline = Time.now + 10
     sleep 0.05 until job_row(id)["state"] == "discarded" || Time.now > deadline

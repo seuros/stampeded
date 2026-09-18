@@ -22,19 +22,19 @@ task :build, [:platform] do |_t, args|
   platform = args[:platform] or abort "usage: rake build[arm64-darwin]"
   target = PLATFORMS.fetch(platform) { abort "unknown platform #{platform}" }
 
-  sh "cargo build --release --bin stampede --target #{target} --manifest-path #{WORKSPACE}/Cargo.toml"
+  sh "cargo build --release --bin stampeded --target #{target} --manifest-path #{WORKSPACE}/Cargo.toml"
 
   dest = File.join(__dir__, "exe", platform)
   mkdir_p dest
-  cp File.join(WORKSPACE, "target", target, "release", "stampede"), File.join(dest, "stampede")
-  chmod 0o755, File.join(dest, "stampede")
+  cp File.join(WORKSPACE, "target", target, "release", "stampeded"), File.join(dest, "stampeded")
+  chmod 0o755, File.join(dest, "stampeded")
 end
 
 desc "Package a platform gem"
 task :package, [:platform] => :build do |_t, args|
   platform = args[:platform]
-  ENV["STAMPEDE_GEM_PLATFORM"] = platform
-  sh "gem build stampede-daemon.gemspec"
+  ENV["STAMPEDED_GEM_PLATFORM"] = platform
+  sh "gem build stampeded-daemon.gemspec"
 end
 
 desc "List shippable platforms"

@@ -164,7 +164,7 @@ Write (guarded):
 
 ### Positioning
 
-Everything else in Stampede is copyable in a quarter by a motivated competitor.
+Everything else in Stampeded is copyable in a quarter by a motivated competitor.
 A well-designed MCP control plane is not, because it requires the schema, the
 resilience crates and the daemon to have been designed for introspection from
 the start.
@@ -177,8 +177,8 @@ binary, driving JSON-RPC by hand:
 
 | | tools advertised | `job_cancel` | job afterwards |
 |---|---|---|---|
-| `STAMPEDE_MCP_ALLOW_WRITES=0` | 7 | `Tool not found` | `available` |
-| `STAMPEDE_MCP_ALLOW_WRITES=1` | 11 | `job … cancelled` | `cancelled` |
+| `STAMPEDED_MCP_ALLOW_WRITES=0` | 7 | `Tool not found` | `available` |
+| `STAMPEDED_MCP_ALLOW_WRITES=1` | 11 | `job … cancelled` | `cancelled` |
 
 The gate is correct, and the write tools are not merely hidden from
 `tools/list` — calling one by name on a read-only server is refused, which is

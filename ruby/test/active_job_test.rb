@@ -14,7 +14,7 @@ class GreetJob < ActiveJob::Base
 end
 
 class ChargeJob < ActiveJob::Base
-  stampede max_attempts: 5, destination: "stripe.com", dead_letter_queue: "payments_dlq"
+  stampeded max_attempts: 5, destination: "stripe.com", dead_letter_queue: "payments_dlq"
 
   def perform(*); end
 end
@@ -24,11 +24,11 @@ class BoomJob < ActiveJob::Base
 end
 
 class ActiveJobTest < Minitest::Test
-  include StampedeTest::Isolation
+  include StampededTest::Isolation
 
   def setup
     super
-    ActiveJob::Base.queue_adapter = ActiveJob::QueueAdapters::StampedeAdapter.new
+    ActiveJob::Base.queue_adapter = ActiveJob::QueueAdapters::StampededAdapter.new
     GreetJob.ran.clear
   end
 
@@ -61,9 +61,9 @@ class ActiveJobTest < Minitest::Test
 
   def test_retry_on_is_refused_at_class_definition
     # The clash that would otherwise produce nonsense numbers: retry_on
-    # re-enqueues as a NEW ROW while Stampede counts attempts at claim, so both
+    # re-enqueues as a NEW ROW while Stampeded counts attempts at claim, so both
     # together give 125 executions all reporting attempt 1.
-    error = assert_raises(Stampede::RetryConflict) do
+    error = assert_raises(Stampeded::RetryConflict) do
       Class.new(ActiveJob::Base) do
         def self.name = "RetryingJob"
         retry_on StandardError, attempts: 5
@@ -71,7 +71,7 @@ class ActiveJobTest < Minitest::Test
     end
 
     assert_match(/re-enqueues the job as a NEW job/, error.message)
-    assert_match(/max_attempts/, error.message, "must name the Stampede equivalent")
+    assert_match(/max_attempts/, error.message, "must name the Stampeded equivalent")
   end
 
   def test_discard_on_is_left_alone
@@ -90,22 +90,22 @@ class ActiveJobTest < Minitest::Test
     jobs = 3.times.map { GreetJob.new("bulk") }
 
     assert_equal 3, adapter.enqueue_all(jobs)
-    assert_equal 3, Stampede.depth("default")["available"]
+    assert_equal 3, Stampeded.depth("default")["available"]
   end
 
   def test_a_rolled_back_transaction_takes_its_jobs_with_it
     # THE property a Redis-backed queue cannot offer, and the reason Rails 8's
     # `enqueue_after_transaction_commit = false` default is right for us and a
     # hazard for Sidekiq. The enqueue is an INSERT on the caller's connection.
-    conn = PG.connect(Stampede.config.database_url)
+    conn = PG.connect(Stampeded.config.database_url)
     conn.exec("BEGIN")
     conn.exec_params(
-      "INSERT INTO stampede_jobs (queue, task) VALUES ($1, $2)", ["default", "GreetJob"]
+      "INSERT INTO stampeded_jobs (queue, task) VALUES ($1, $2)", ["default", "GreetJob"]
     )
-    assert_equal 1, conn.exec("SELECT count(*) FROM stampede_jobs")[0]["count"].to_i
+    assert_equal 1, conn.exec("SELECT count(*) FROM stampeded_jobs")[0]["count"].to_i
     conn.exec("ROLLBACK")
 
-    assert_equal 0, conn.exec("SELECT count(*) FROM stampede_jobs")[0]["count"].to_i,
+    assert_equal 0, conn.exec("SELECT count(*) FROM stampeded_jobs")[0]["count"].to_i,
                  "the job must vanish with the transaction that created it"
     conn.close
   end

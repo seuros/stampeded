@@ -3,10 +3,10 @@
 require "test_helper"
 
 class EnqueueTest < Minitest::Test
-  include StampedeTest::Isolation
+  include StampededTest::Isolation
 
   def test_enqueue_returns_the_row_id
-    id = Stampede.enqueue(queue: "default", task: "greet", args: { who: "ruby" })
+    id = Stampeded.enqueue(queue: "default", task: "greet", args: { who: "ruby" })
 
     refute_nil id
     row = job_row(id)
@@ -18,7 +18,7 @@ class EnqueueTest < Minitest::Test
   def test_every_column_the_row_has_is_reachable
     # The Rust HTTP API shipped silently dropping three of these, so the gem
     # gets the same test: a field the caller sets must actually land.
-    id = Stampede.enqueue(
+    id = Stampeded.enqueue(
       queue: "default", task: "sync",
       destination: "api.vendor.com", dead_letter_queue: "dead",
       expire_seconds: 42, priority: 3, max_attempts: 7, tenant_id: "acme"
@@ -36,17 +36,17 @@ class EnqueueTest < Minitest::Test
   def test_a_deduplicated_job_returns_nil_rather_than_raising
     # The caller's intent -- ensure this job exists -- was satisfied. Making it
     # an error forces every caller to tell "already queued" from "failed".
-    first = Stampede.enqueue(queue: "default", task: "report", unique: "daily")
-    second = Stampede.enqueue(queue: "default", task: "report", unique: "daily")
+    first = Stampeded.enqueue(queue: "default", task: "report", unique: "daily")
+    second = Stampeded.enqueue(queue: "default", task: "report", unique: "daily")
 
     refute_nil first
     assert_nil second
   end
 
   def test_a_period_bucket_is_one_per_window_not_one_ever
-    a = Stampede.enqueue(queue: "default", task: "r", unique: "k", unique_period: "hour")
-    b = Stampede.enqueue(queue: "default", task: "r", unique: "k", unique_period: "hour")
-    c = Stampede.enqueue(queue: "default", task: "r", unique: "k", unique_period: "day")
+    a = Stampeded.enqueue(queue: "default", task: "r", unique: "k", unique_period: "hour")
+    b = Stampeded.enqueue(queue: "default", task: "r", unique: "k", unique_period: "hour")
+    c = Stampeded.enqueue(queue: "default", task: "r", unique: "k", unique_period: "day")
 
     refute_nil a
     assert_nil b, "same scope, same hour"
@@ -54,8 +54,8 @@ class EnqueueTest < Minitest::Test
   end
 
   def test_depth_reads_counters_not_an_aggregate
-    3.times { Stampede.enqueue(queue: "default", task: "x") }
+    3.times { Stampeded.enqueue(queue: "default", task: "x") }
 
-    assert_equal({ "available" => 3 }, Stampede.depth("default"))
+    assert_equal({ "available" => 3 }, Stampeded.depth("default"))
   end
 end

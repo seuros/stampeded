@@ -4,16 +4,16 @@ require "minitest/autorun"
 require "securerandom"
 require "tmpdir"
 require "active_job"
-require "stampede"
-require "stampede/active_job_ext"
-require "stampede/active_job_worker"
-require "active_job/queue_adapters/stampede_adapter"
+require "stampeded"
+require "stampeded/active_job_ext"
+require "stampeded/active_job_worker"
+require "active_job/queue_adapters/stampeded_adapter"
 
-ActiveJob::Base.include(Stampede::ActiveJobExt)
+ActiveJob::Base.include(Stampeded::ActiveJobExt)
 ActiveJob::Base.logger = Logger.new(IO::NULL)
 
-module StampedeTest
-  URL = ENV.fetch("STAMPEDE_TEST_DATABASE_URL", nil)
+module StampededTest
+  URL = ENV.fetch("STAMPEDED_TEST_DATABASE_URL", nil)
 
   # Skipping is a courtesy to someone without a database. It must never be a
   # courtesy to CI.
@@ -29,7 +29,7 @@ module StampedeTest
     return if URL
     return unless ENV["CI"]
 
-    raise "STAMPEDE_TEST_DATABASE_URL is not set and CI is. Refusing to skip " \
+    raise "STAMPEDED_TEST_DATABASE_URL is not set and CI is. Refusing to skip " \
           "the database tests and report success: that would be a green build " \
           "that ran nothing. Check the Postgres service container."
   end
@@ -38,17 +38,17 @@ module StampedeTest
   # integration tests against the same database without fighting over tables.
   module Isolation
     def setup
-      StampedeTest.require_database!
-      skip "STAMPEDE_TEST_DATABASE_URL not set" unless URL
+      StampededTest.require_database!
+      skip "STAMPEDED_TEST_DATABASE_URL not set" unless URL
 
       @schema = "rb_#{SecureRandom.hex(8)}"
       admin = PG.connect(URL)
       admin.exec("CREATE SCHEMA #{@schema}")
       admin.close
 
-      Stampede.config.database_url = "#{URL}?options=-csearch_path%3D#{@schema}"
-      Stampede::Connection.own { |c| Stampede::Schema.install!(c) }
-      Stampede.create_queue("default")
+      Stampeded.config.database_url = "#{URL}?options=-csearch_path%3D#{@schema}"
+      Stampeded::Connection.own { |c| Stampeded::Schema.install!(c) }
+      Stampeded.create_queue("default")
       super
     end
 
@@ -63,10 +63,10 @@ module StampedeTest
       admin.close
     end
 
-    def conn(&) = Stampede::Connection.own(&)
+    def conn(&) = Stampeded::Connection.own(&)
 
     def job_row(id)
-      conn { |c| c.exec_params("SELECT * FROM stampede_jobs WHERE id = $1", [id])[0] }
+      conn { |c| c.exec_params("SELECT * FROM stampeded_jobs WHERE id = $1", [id])[0] }
     end
   end
 end

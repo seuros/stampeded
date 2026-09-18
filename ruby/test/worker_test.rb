@@ -4,7 +4,7 @@ require "test_helper"
 require "time"
 
 class WorkerTest < Minitest::Test
-  include StampedeTest::Isolation
+  include StampededTest::Isolation
 
   # Run a worker until `until_done` is satisfied, then stop it. Bounded so a
   # broken worker fails the test instead of hanging the suite.
@@ -21,9 +21,9 @@ class WorkerTest < Minitest::Test
 
   def test_a_job_is_claimed_executed_and_completed
     ran = Queue.new
-    id = Stampede.enqueue(queue: "default", task: "greet", args: { "who" => "ruby" })
+    id = Stampeded.enqueue(queue: "default", task: "greet", args: { "who" => "ruby" })
 
-    worker = Stampede::Worker.new(queue: "default", poll_interval: 0.05)
+    worker = Stampeded::Worker.new(queue: "default", poll_interval: 0.05)
     worker.register("greet") { |job| ran << job.args["who"] }
 
     run_worker(worker) { !ran.empty? }
@@ -40,10 +40,10 @@ class WorkerTest < Minitest::Test
     # `attempt` 2. Locally the loop is fast enough that it almost never
     # happens; under CI, which ran this suite 40x slower, it failed with
     # "Expected 1, Actual 2". Found by running the workflow under act.
-    id = Stampede.enqueue(queue: "default", task: "boom", max_attempts: 5,
+    id = Stampeded.enqueue(queue: "default", task: "boom", max_attempts: 5,
                           backoff_base_ms: 30_000)
 
-    worker = Stampede::Worker.new(queue: "default", poll_interval: 0.05)
+    worker = Stampeded::Worker.new(queue: "default", poll_interval: 0.05)
     worker.register("boom") { raise "the downstream exploded" }
 
     run_worker(worker) { job_row(id)["state"] == "retryable" }
@@ -58,9 +58,9 @@ class WorkerTest < Minitest::Test
   def test_an_unknown_task_is_unrecoverable_rather_than_retried_forever
     # A job enqueued for a task no worker handles: a rename deployed to the
     # enqueuer but not the workers. Retrying cannot help.
-    id = Stampede.enqueue(queue: "default", task: "nobody_handles_this", max_attempts: 25)
+    id = Stampeded.enqueue(queue: "default", task: "nobody_handles_this", max_attempts: 25)
 
-    worker = Stampede::Worker.new(queue: "default", poll_interval: 0.05)
+    worker = Stampeded::Worker.new(queue: "default", poll_interval: 0.05)
     run_worker(worker) { job_row(id)["state"] == "discarded" }
 
     row = job_row(id)
@@ -69,14 +69,14 @@ class WorkerTest < Minitest::Test
   end
 
   def test_the_worker_registers_and_deregisters_itself
-    worker = Stampede::Worker.new(queue: "default", poll_interval: 0.05)
+    worker = Stampeded::Worker.new(queue: "default", poll_interval: 0.05)
     seen = Queue.new
     worker.register("x") { seen << true }
-    Stampede.enqueue(queue: "default", task: "x")
+    Stampeded.enqueue(queue: "default", task: "x")
 
     run_worker(worker) { !seen.empty? }
 
-    count = conn { |c| c.exec("SELECT count(*) FROM stampede_workers")[0]["count"].to_i }
+    count = conn { |c| c.exec("SELECT count(*) FROM stampeded_workers")[0]["count"].to_i }
     assert_equal 0, count, "a clean shutdown must not leave a phantom worker for the reaper"
   end
 
@@ -88,9 +88,9 @@ class WorkerTest < Minitest::Test
     mutex = Mutex.new
     running = 0
 
-    10.times { Stampede.enqueue(queue: "default", task: "slow") }
+    10.times { Stampeded.enqueue(queue: "default", task: "slow") }
 
-    worker = Stampede::Worker.new(queue: "default", concurrency: 2, poll_interval: 0.05)
+    worker = Stampeded::Worker.new(queue: "default", concurrency: 2, poll_interval: 0.05)
     worker.register("slow") do
       mutex.synchronize { running += 1; peak = [peak, running].max }
       sleep 0.15
@@ -108,9 +108,9 @@ class WorkerTest < Minitest::Test
     # drain is what achieves that -- the job reports its own outcome normally,
     # so nothing is ever recorded as a worker death.
     started = Queue.new
-    id = Stampede.enqueue(queue: "default", task: "slow")
+    id = Stampeded.enqueue(queue: "default", task: "slow")
 
-    worker = Stampede::Worker.new(queue: "default", poll_interval: 0.05)
+    worker = Stampeded::Worker.new(queue: "default", poll_interval: 0.05)
     worker.register("slow") do
       started << true
       sleep 0.4
@@ -146,8 +146,8 @@ class WorkerTest < Minitest::Test
   # first version of this test passed with the fix reverted for exactly that
   # reason. The subprocess test below is the one that actually holds the line.
   def test_an_ordinary_failure_is_reported
-    id = Stampede.enqueue(queue: "default", task: "boom", max_attempts: 1)
-    worker = Stampede::Worker.new(queue: "default", poll_interval: 0.05)
+    id = Stampeded.enqueue(queue: "default", task: "boom", max_attempts: 1)
+    worker = Stampeded::Worker.new(queue: "default", poll_interval: 0.05)
     worker.register("boom") { raise ArgumentError, "ordinary failure" }
 
     run_worker(worker) { job_row(id)["state"] != "available" }
@@ -165,13 +165,13 @@ class WorkerTest < Minitest::Test
   # The Ruby worker had no per-job timeout at all, so River's
   # `rescue_after > job_timeout` invariant was violated by construction rather
   # than by misconfiguration: a hanging job kept its thread while
-  # `stampede_expire` returned the row to `retryable` for someone else to claim.
+  # `stampeded_expire` returned the row to `retryable` for someone else to claim.
   def test_a_hanging_job_is_timed_out_before_the_database_expires_it
-    Stampede.config.job_timeout = 1.0
-    id = Stampede.enqueue(queue: "default", task: "hang", expire_seconds: 60, max_attempts: 1)
+    Stampeded.config.job_timeout = 1.0
+    id = Stampeded.enqueue(queue: "default", task: "hang", expire_seconds: 60, max_attempts: 1)
 
     starts = Queue.new
-    worker = Stampede::Worker.new(queue: "default", poll_interval: 0.05)
+    worker = Stampeded::Worker.new(queue: "default", poll_interval: 0.05)
     worker.register("hang") { starts << 1; sleep 30 }
 
     run_worker(worker) { %w[discarded retryable].include?(job_row(id)["state"]) }
@@ -180,12 +180,12 @@ class WorkerTest < Minitest::Test
     assert_equal "timed_out", job_row(id)["failure_kind"]
     assert_match(/job_timeout/, job_row(id)["last_error"])
   ensure
-    Stampede.config.job_timeout = 900.0
+    Stampeded.config.job_timeout = 900.0
   end
 
 
 
-  # A handler choosing its own retry delay -- the Stampede answer to
+  # A handler choosing its own retry delay -- the Stampeded answer to
   # retry_on(wait:), which the adapter refuses because it re-enqueues a NEW row
   # and resets every counter.
   #
@@ -193,9 +193,9 @@ class WorkerTest < Minitest::Test
   # it: the whole point is that scheduled_at moves, and a delay computed and
   # then dropped on the floor would look identical from Ruby.
   def test_a_handler_can_choose_its_own_retry_delay
-    id = Stampede.enqueue(queue: "default", task: "ratelimited", max_attempts: 5)
-    worker = Stampede::Worker.new(queue: "default", poll_interval: 0.05)
-    worker.register("ratelimited") { raise Stampede::RetryIn.new(3600, "rate limited") }
+    id = Stampeded.enqueue(queue: "default", task: "ratelimited", max_attempts: 5)
+    worker = Stampeded::Worker.new(queue: "default", poll_interval: 0.05)
+    worker.register("ratelimited") { raise Stampeded::RetryIn.new(3600, "rate limited") }
 
     run_worker(worker) { job_row(id)["state"] == "retryable" }
 
@@ -210,9 +210,9 @@ class WorkerTest < Minitest::Test
 
   # RetryIn picks when, not whether: the poison brake still applies.
   def test_retry_in_does_not_exempt_a_job_from_max_attempts
-    id = Stampede.enqueue(queue: "default", task: "always", max_attempts: 1)
-    worker = Stampede::Worker.new(queue: "default", poll_interval: 0.05)
-    worker.register("always") { raise Stampede::RetryIn.new(0.01) }
+    id = Stampeded.enqueue(queue: "default", task: "always", max_attempts: 1)
+    worker = Stampeded::Worker.new(queue: "default", poll_interval: 0.05)
+    worker.register("always") { raise Stampeded::RetryIn.new(0.01) }
 
     run_worker(worker) { %w[discarded retryable].include?(job_row(id)["state"]) }
 
@@ -224,15 +224,15 @@ end
 
 class WorkerValidationTest < Minitest::Test
   def test_a_worker_that_could_never_work_is_refused
-    # `CONCURRENCY=abc bin/rails stampede:work` becomes 0 via String#to_i, and
+    # `CONCURRENCY=abc bin/rails stampeded:work` becomes 0 via String#to_i, and
     # the loop then computes `free = 0 - 0` and sleeps in a tight circle doing
     # nothing -- a process that looks healthy, passes every liveness check, and
     # silently runs no jobs.
-    assert_raises(ArgumentError) { Stampede::Worker.new(queue: "q", concurrency: 0) }
-    assert_raises(ArgumentError) { Stampede::Worker.new(queue: "q", concurrency: "abc") }
-    assert_raises(ArgumentError) { Stampede::Worker.new(queue: "q", batch_size: 0) }
+    assert_raises(ArgumentError) { Stampeded::Worker.new(queue: "q", concurrency: 0) }
+    assert_raises(ArgumentError) { Stampeded::Worker.new(queue: "q", concurrency: "abc") }
+    assert_raises(ArgumentError) { Stampeded::Worker.new(queue: "q", batch_size: 0) }
 
-    assert Stampede::Worker.new(queue: "q", concurrency: 1, batch_size: 1)
+    assert Stampeded::Worker.new(queue: "q", concurrency: 1, batch_size: 1)
   end
 
 end

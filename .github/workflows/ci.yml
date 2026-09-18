@@ -14,16 +14,16 @@ jobs:
       postgres:
         image: postgres:18
         env:
-          POSTGRES_USER: stampede
-          POSTGRES_PASSWORD: stampede
-          POSTGRES_DB: stampede_test
+          POSTGRES_USER: stampeded
+          POSTGRES_PASSWORD: stampeded
+          POSTGRES_DB: stampeded_test
         options: >-
           --health-cmd pg_isready --health-interval 10s
           --health-timeout 5s --health-retries 5
         ports: ["5432:5432"]
 
     env:
-      STAMPEDE_TEST_DATABASE_URL: postgres://stampede:stampede@localhost/stampede_test
+      STAMPEDED_TEST_DATABASE_URL: postgres://stampeded:stampeded@localhost/stampeded_test
 
     steps:
       - uses: actions/checkout@v4
@@ -72,16 +72,16 @@ jobs:
       postgres:
         image: postgres:18
         env:
-          POSTGRES_USER: stampede
-          POSTGRES_PASSWORD: stampede
-          POSTGRES_DB: stampede_test
+          POSTGRES_USER: stampeded
+          POSTGRES_PASSWORD: stampeded
+          POSTGRES_DB: stampeded_test
         options: >-
           --health-cmd pg_isready --health-interval 10s
           --health-timeout 5s --health-retries 5
         ports: ["5432:5432"]
 
     env:
-      STAMPEDE_TEST_DATABASE_URL: postgres://stampede:stampede@localhost/stampede_test
+      STAMPEDED_TEST_DATABASE_URL: postgres://stampeded:stampeded@localhost/stampeded_test
 
     steps:
       - uses: actions/checkout@v4

@@ -9,11 +9,11 @@ class ConcurrentJob < ActiveJob::Base
 end
 
 class ConcurrencyTest < Minitest::Test
-  include StampedeTest::Isolation
+  include StampededTest::Isolation
 
   def setup
     super
-    ActiveJob::Base.queue_adapter = ActiveJob::QueueAdapters::StampedeAdapter.new
+    ActiveJob::Base.queue_adapter = ActiveJob::QueueAdapters::StampededAdapter.new
     RAN.clear
   end
 
@@ -25,7 +25,7 @@ class ConcurrencyTest < Minitest::Test
     30.times { |i| ConcurrentJob.perform_later(i) }
 
     workers = 4.times.map do
-      Stampede::ActiveJobWorker.new(queue: "default", concurrency: 2, poll_interval: 0.05)
+      Stampeded::ActiveJobWorker.new(queue: "default", concurrency: 2, poll_interval: 0.05)
     end
     threads = workers.map { |w| Thread.new { w.run } }
 
@@ -41,7 +41,7 @@ class ConcurrencyTest < Minitest::Test
     assert_equal ran.uniq.sort, (0...30).to_a, "each exactly once, none twice"
 
     states = conn do |c|
-      c.exec("SELECT state, count(*) FROM stampede_jobs GROUP BY state")
+      c.exec("SELECT state, count(*) FROM stampeded_jobs GROUP BY state")
        .each_with_object({}) { |r, h| h[r["state"]] = r["count"].to_i }
     end
     assert_equal({ "completed" => 30 }, states)
@@ -56,7 +56,7 @@ class ConcurrencyTest < Minitest::Test
     20.times { |i| ConcurrentJob.perform_later(i) }
 
     workers = 3.times.map do
-      Stampede::ActiveJobWorker.new(queue: "default", concurrency: 3, poll_interval: 0.05)
+      Stampeded::ActiveJobWorker.new(queue: "default", concurrency: 3, poll_interval: 0.05)
     end
     threads = workers.map { |w| Thread.new { w.run } }
 
@@ -65,11 +65,11 @@ class ConcurrencyTest < Minitest::Test
     workers.each(&:stop)
     threads.each { |t| t.join(5) }
 
-    assert_equal({ "completed" => 20 }, Stampede.depth("default"))
+    assert_equal({ "completed" => 20 }, Stampeded.depth("default"))
 
     # Cross-checked against the truth, which is the one place an aggregate is
     # allowed.
-    actual = conn { |c| c.exec("SELECT count(*) FROM stampede_jobs WHERE state='completed'")[0]["count"].to_i }
+    actual = conn { |c| c.exec("SELECT count(*) FROM stampeded_jobs WHERE state='completed'")[0]["count"].to_i }
     assert_equal 20, actual, "the counter and the table must agree"
   ensure
     threads&.each(&:kill)
@@ -81,7 +81,7 @@ class ConcurrencyTest < Minitest::Test
     results = Queue.new
     threads = 40.times.map do
       Thread.new do
-        results << Stampede.enqueue(queue: "default", task: "refresh", unique: "cache:products")
+        results << Stampeded.enqueue(queue: "default", task: "refresh", unique: "cache:products")
       end
     end
     threads.each(&:join)
@@ -89,6 +89,6 @@ class ConcurrencyTest < Minitest::Test
     ids = []
     ids << results.pop until results.empty?
     assert_equal 1, ids.compact.size, "exactly one enqueue may win"
-    assert_equal 1, conn { |c| c.exec("SELECT count(*) FROM stampede_jobs")[0]["count"].to_i }
+    assert_equal 1, conn { |c| c.exec("SELECT count(*) FROM stampeded_jobs")[0]["count"].to_i }
   end
 end

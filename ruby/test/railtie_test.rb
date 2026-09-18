@@ -12,11 +12,11 @@ require "open3"
 # railtie loads it. The first version of this test passed happily with the fix
 # deleted, which is worse than having no test.
 #
-# The bug it exists for: `config.active_job.queue_adapter = :stampede` goes
+# The bug it exists for: `config.active_job.queue_adapter = :stampeded` goes
 # through ActiveJob::QueueAdapters.lookup, a bare `const_get`. Autoload covers
 # the built-in adapters only and nothing in that path requires anything, so a
 # real app died at boot with "uninitialized constant
-# ActiveJob::QueueAdapters::StampedeAdapter" -- naming a class sitting right
+# ActiveJob::QueueAdapters::StampededAdapter" -- naming a class sitting right
 # there in the gem.
 class RailtieTest < Minitest::Test
   LIB = File.expand_path("../lib", __dir__)
@@ -28,13 +28,13 @@ class RailtieTest < Minitest::Test
         require "rails"
         require "rake"
         require "active_job/railtie"
-        require "stampede"          # railtie only; NOTHING required by hand
+        require "stampeded"          # railtie only; NOTHING required by hand
 
         class BootApp < Rails::Application
           config.eager_load = false
           config.logger = Logger.new(IO::NULL)
           config.root = #{root.inspect}
-          config.active_job.queue_adapter = :stampede
+          config.active_job.queue_adapter = :stampeded
         end
         BootApp.initialize!
       RUBY
@@ -54,7 +54,7 @@ class RailtieTest < Minitest::Test
     out, err, ok = boot('puts ActiveJob::Base.queue_adapter.class.name')
 
     assert ok, "Rails failed to boot:\n#{err}"
-    assert_equal "ActiveJob::QueueAdapters::StampedeAdapter", out
+    assert_equal "ActiveJob::QueueAdapters::StampededAdapter", out
   end
 
   def test_the_adapter_is_a_proper_abstract_adapter_subclass
@@ -68,7 +68,7 @@ class RailtieTest < Minitest::Test
 
   def test_the_dsl_is_mixed_into_job_classes
     out, err, ok = boot(<<~RUBY)
-      puts ActiveJob::Base.respond_to?(:stampede) && ActiveJob::Base.respond_to?(:stampede_options)
+      puts ActiveJob::Base.respond_to?(:stampeded) && ActiveJob::Base.respond_to?(:stampeded_options)
     RUBY
 
     assert ok, err
@@ -83,7 +83,7 @@ class RailtieTest < Minitest::Test
           retry_on StandardError
         end
         puts "NOT GUARDED"
-      rescue Stampede::RetryConflict => e
+      rescue Stampeded::RetryConflict => e
         puts(e.message.include?("max_attempts") ? "guarded" : "guarded but unhelpful")
       end
     RUBY
@@ -95,11 +95,11 @@ class RailtieTest < Minitest::Test
   def test_the_rake_tasks_are_registered_by_the_railtie
     out, err, ok = boot(<<~RUBY)
       BootApp.load_tasks
-      puts %w[stampede:install stampede:work stampede:daemon]
+      puts %w[stampeded:install stampeded:work stampeded:daemon]
              .select { |t| Rake::Task.task_defined?(t) }.join(",")
     RUBY
 
     assert ok, err
-    assert_equal "stampede:install,stampede:work,stampede:daemon", out
+    assert_equal "stampeded:install,stampeded:work,stampeded:daemon", out
   end
 end

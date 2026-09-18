@@ -1,11 +1,11 @@
--- Stampede — operations
+-- Stampeded — operations
 --
 -- The semantics live here. 001 encodes the decisions; this file encodes the
 -- rules that make them correct.
 --
 -- Everything is a FUNCTION rather than daemon-side SQL, deliberately: one round
 -- trip, atomic, and callable from any language with a Postgres driver. That is
--- the polyglot story in plans/05 — a Python worker calls stampede_claim() and
+-- the polyglot story in plans/05 — a Python worker calls stampeded_claim() and
 -- gets the same fence, the same attempt accounting and the same transition
 -- rules as the Rust daemon, because there is only one implementation.
 
@@ -29,18 +29,18 @@
 --     attempt, so max_attempts is eventually reached. If the increment moves to
 --     the failure path, a worker-killing job is re-claimed forever.
 -- ---------------------------------------------------------------------------
-CREATE FUNCTION stampede_claim(
+CREATE FUNCTION stampeded_claim(
     p_queue     text,
     p_worker_id uuid,
     p_limit     integer DEFAULT 1,
     -- Injectable clock (River's `coalesce($now, now())`). Makes scheduling
     -- testable without sleeping.
     p_now       timestamptz DEFAULT NULL
-) RETURNS SETOF stampede_jobs
+) RETURNS SETOF stampeded_jobs
 LANGUAGE sql AS $$
     WITH candidate AS MATERIALIZED (
         SELECT id
-          FROM stampede_jobs
+          FROM stampeded_jobs
          WHERE queue        = p_queue
            -- 'retryable' is claimable once its backoff has elapsed. plans/11
            -- catalogues three ways to handle this: a claim predicate
@@ -57,7 +57,7 @@ LANGUAGE sql AS $$
            AND state        IN ('available','retryable')
            AND scheduled_at <= coalesce(p_now, now())
            AND attempt      < max_attempts
-         -- Must match stampede_jobs_claim_idx EXACTLY. `id` is not a
+         -- Must match stampeded_jobs_claim_idx EXACTLY. `id` is not a
          -- tiebreaker here: adding one reintroduces a sort unless it is also
          -- added to the index, and in the index it costs 8.5x the size by
          -- defeating btree deduplication. See the index comment in 001.
@@ -65,11 +65,11 @@ LANGUAGE sql AS $$
          LIMIT p_limit
          FOR UPDATE SKIP LOCKED
     )
-    UPDATE stampede_jobs j
+    UPDATE stampeded_jobs j
        SET state        = 'executing',
            attempt      = j.attempt + 1,
-           -- Seed the job heartbeat at claim so stampede_expire has a baseline
-           -- for a job that never calls stampede_touch. Left NULL it would fall
+           -- Seed the job heartbeat at claim so stampeded_expire has a baseline
+           -- for a job that never calls stampeded_touch. Left NULL it would fall
            -- back to claimed_at, which is the same thing -- but only by accident,
            -- and the expiry predicate should not depend on that coincidence.
            heartbeat_at = coalesce(p_now, now()),
@@ -101,13 +101,13 @@ $$;
 -- (plans/10). Keys can only LEAVE the index, so no transition can ever raise
 -- 23505 — River's whole conflict-CTE and its shipped bug are designed out.
 -- ---------------------------------------------------------------------------
-CREATE FUNCTION stampede_complete(
+CREATE FUNCTION stampeded_complete(
     p_queue     text,
     p_id        uuid,
     p_worker_id uuid
 ) RETURNS TABLE (was text, now_state text, owned boolean)
 LANGUAGE sql AS $$
-    UPDATE stampede_jobs
+    UPDATE stampeded_jobs
        SET state       = 'completed',
            finished_at = now(),
            dedup_scope = NULL,
@@ -143,7 +143,7 @@ $$;
 -- instead of causes.
 --
 -- IMMUTABLE so it can be computed in an index or a generated column later.
-CREATE FUNCTION stampede_fingerprint(p_error text) RETURNS bytea
+CREATE FUNCTION stampeded_fingerprint(p_error text) RETURNS bytea
 LANGUAGE sql IMMUTABLE AS $$
     SELECT sha256(convert_to(
         regexp_replace(
@@ -171,7 +171,7 @@ $$;
 -- pg-boss is right that the DLQ should be a QUEUE: re-drive is then just
 -- working it, and every tool that understands jobs already understands it.
 -- ---------------------------------------------------------------------------
-CREATE FUNCTION stampede_fail(
+CREATE FUNCTION stampeded_fail(
     p_queue        text,
     p_id           uuid,
     p_worker_id    uuid,
@@ -195,7 +195,7 @@ CREATE FUNCTION stampede_fail(
 ) RETURNS TABLE (was text, now_state text, dead_lettered boolean)
 LANGUAGE plpgsql AS $$
 DECLARE
-    j            stampede_jobs%ROWTYPE;
+    j            stampeded_jobs%ROWTYPE;
     v_was        text;
     v_state      text;
     v_interrupt  boolean;
@@ -203,7 +203,7 @@ DECLARE
     v_terminal   boolean;
     v_dlq        boolean := false;
 BEGIN
-    SELECT * INTO j FROM stampede_jobs
+    SELECT * INTO j FROM stampeded_jobs
      WHERE queue = p_queue AND id = p_id AND claimed_by = p_worker_id;
     IF NOT FOUND THEN
         -- Not ours: the reaper already reclaimed it and somebody else owns the
@@ -243,7 +243,7 @@ BEGIN
 
     v_state := CASE WHEN v_terminal THEN 'discarded' ELSE 'retryable' END;
 
-    UPDATE stampede_jobs
+    UPDATE stampeded_jobs
        SET state        = v_state,
            failure_kind = p_kind,
            attempt      = CASE WHEN v_refund THEN greatest(attempt - 1, 0) ELSE attempt END,
@@ -253,7 +253,7 @@ BEGIN
            -- implementation that bounds error text database-side, and it is the
            -- only bound that survives a polyglot worker (plans/15).
            last_error   = left(p_error, 4000),
-           error_fingerprint = stampede_fingerprint(p_error),
+           error_fingerprint = stampeded_fingerprint(p_error),
            -- Ring buffer, newest last, capped at 10. River bounds attempted_by
            -- but appends errors unbounded -- the half that actually leaks,
            -- since error text dwarfs a worker id.
@@ -289,7 +289,7 @@ BEGIN
     -- action. Its own dead_letter_queue is left NULL: a dead letter that can
     -- itself dead-letter is a loop.
     IF v_terminal AND j.dead_letter_queue IS NOT NULL THEN
-        INSERT INTO stampede_jobs
+        INSERT INTO stampeded_jobs
             (queue, task, args, tenant_id, priority, destination,
              source_id, source_queue, source_attempts, max_attempts)
         VALUES
@@ -310,10 +310,10 @@ $$;
 -- progressing. Without it a legitimately long job and a wedged one look
 -- identical, and the only available response is to guess a timeout.
 -- ---------------------------------------------------------------------------
-CREATE FUNCTION stampede_touch(p_queue text, p_id uuid, p_worker_id uuid)
+CREATE FUNCTION stampeded_touch(p_queue text, p_id uuid, p_worker_id uuid)
 RETURNS boolean
 LANGUAGE sql AS $$
-    UPDATE stampede_jobs SET heartbeat_at = now()
+    UPDATE stampeded_jobs SET heartbeat_at = now()
      WHERE queue = p_queue AND id = p_id
        AND claimed_by = p_worker_id AND state = 'executing'
     RETURNING true;
@@ -333,7 +333,7 @@ $$;
 -- units of work -- or does them twice, if the job is not perfectly idempotent.
 --
 -- It also sets heartbeat_at: a job that just saved progress is demonstrably
--- alive, and requiring a separate stampede_touch would be asking the caller to
+-- alive, and requiring a separate stampeded_touch would be asking the caller to
 -- say the same thing twice. Forgetting that second call would let a job which
 -- is plainly working get expired out from under itself.
 --
@@ -363,7 +363,7 @@ $$;
 -- A WARNING, never an ERROR. The job is working, and the 64 KB CHECK is
 -- already the enforcement; turning a heuristic into a hard failure would
 -- discard jobs over a guess about intent.
-CREATE FUNCTION stampede_checkpoint(
+CREATE FUNCTION stampeded_checkpoint(
     p_queue     text,
     p_id        uuid,
     p_worker_id uuid,
@@ -389,7 +389,7 @@ DECLARE
     -- The text length is the logical size on both sides.
     v_new_size   integer := length(p_state::text);
 BEGIN
-    UPDATE stampede_jobs
+    UPDATE stampeded_jobs
        SET checkpoint     = p_state,
            checkpoint_at  = now(),
            checkpoint_seq = checkpoint_seq + 1,
@@ -429,7 +429,7 @@ $$;
 -- Routes through the NORMAL fail path so it consumes a retry, backs off and
 -- dead-letters like any other failure. pg-boss's failJobsByTimeout.
 -- ---------------------------------------------------------------------------
-CREATE FUNCTION stampede_expire(p_limit integer DEFAULT 100)
+CREATE FUNCTION stampeded_expire(p_limit integer DEFAULT 100)
 RETURNS TABLE (out_id uuid, out_queue text, out_worker uuid)
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -437,7 +437,7 @@ DECLARE
 BEGIN
     FOR r IN
         SELECT id, queue, claimed_by, expire_seconds
-          FROM stampede_jobs
+          FROM stampeded_jobs
          WHERE state = 'executing'
            -- From the last sign of life, not from claim: a job that is touching
            -- is working, however long it has been running.
@@ -445,7 +445,7 @@ BEGIN
          LIMIT p_limit
          FOR UPDATE SKIP LOCKED
     LOOP
-        PERFORM stampede_fail(
+        PERFORM stampeded_fail(
             r.queue, r.id, r.claimed_by, 'timed_out',
             format('exceeded expire_seconds (%s)', r.expire_seconds), NULL, NULL);
         out_id := r.id; out_queue := r.queue; out_worker := r.claimed_by;
@@ -466,15 +466,15 @@ $$;
 -- walks its attempt budget down and eventually discards itself. That is the
 -- poison-job brake, and it costs nothing here.
 -- ---------------------------------------------------------------------------
-CREATE FUNCTION stampede_reap(
+CREATE FUNCTION stampeded_reap(
     p_dead_after interval DEFAULT interval '5 minutes'
 ) RETURNS TABLE (id uuid, queue text, worker_id uuid)
 LANGUAGE sql AS $$
     WITH dead AS MATERIALIZED (
-        SELECT w.id FROM stampede_workers w
+        SELECT w.id FROM stampeded_workers w
          WHERE w.last_heartbeat < now() - p_dead_after
     )
-    UPDATE stampede_jobs j
+    UPDATE stampeded_jobs j
        -- TWO budgets now, and the tighter one usually wins. `attempt` was spent
        -- at claim (the plans/04 poison brake); `interruptions` is the plans/15
        -- brake specific to jobs that KILL their worker, defaulting to one free
@@ -489,7 +489,7 @@ LANGUAGE sql AS $$
            failure_kind  = 'worker_missing',
            interruptions = j.interruptions + 1,
            last_error    = 'worker stopped heartbeating; job reclaimed',
-           error_fingerprint = stampede_fingerprint('worker stopped heartbeating; job reclaimed'),
+           error_fingerprint = stampeded_fingerprint('worker stopped heartbeating; job reclaimed'),
            claimed_by   = NULL,
            claimed_at   = NULL,
            heartbeat_at = NULL,
@@ -526,14 +526,14 @@ $$;
 --
 -- Defaults: 1 hour for completed (between Oban's 60s and River's 24h), 7 days
 -- for discarded and cancelled (River's number).
-CREATE FUNCTION stampede_prune(
+CREATE FUNCTION stampeded_prune(
     p_older_than interval DEFAULT interval '1 hour',
     p_limit      integer  DEFAULT 10000,
     p_failed_older_than interval DEFAULT interval '7 days'
 ) RETURNS integer
 LANGUAGE sql AS $$
     WITH doomed AS MATERIALIZED (
-        SELECT queue, id FROM stampede_jobs
+        SELECT queue, id FROM stampeded_jobs
          WHERE finished_at IS NOT NULL
            AND CASE state
                  WHEN 'completed' THEN finished_at < now() - p_older_than
@@ -556,7 +556,7 @@ LANGUAGE sql AS $$
     -- iteration. The pruner looked correct and quietly did a fraction of the
     -- work.
     deleted AS (
-        DELETE FROM stampede_jobs j
+        DELETE FROM stampeded_jobs j
          USING doomed d
          WHERE j.queue = d.queue AND j.id = d.id
         RETURNING 1
@@ -578,7 +578,7 @@ $$;
 -- actually use for THAT table (its own reloptions, not the global defaults --
 -- which is the whole reason a naive n_dead_tup alert misfires), and when it
 -- last ran.
-CREATE FUNCTION stampede_vacuum_health()
+CREATE FUNCTION stampeded_vacuum_health()
 RETURNS TABLE (
     relname       text,
     live_tuples   bigint,
@@ -614,9 +614,9 @@ LANGUAGE sql AS $$
                 WHERE option_name = 'autovacuum_vacuum_scale_factor'),
               current_setting('autovacuum_vacuum_scale_factor')::float8) AS factor
       ) threshold
-     WHERE c.relname LIKE 'stampede_jobs%'
+     WHERE c.relname LIKE 'stampeded_jobs%'
        -- SCOPED TO THIS SCHEMA. pg_stat_user_tables spans the whole database,
-       -- so without this a second Stampede install -- or, here, a few hundred
+       -- so without this a second Stampeded install -- or, here, a few hundred
        -- leftover test schemas -- reports as this one's partitions. Found by
        -- running it and getting 200 rows for a 2-partition install.
        AND s.schemaname = current_schema()
@@ -636,7 +636,7 @@ $$;
 -- density should be HIGHER and this gate should hold with more margin --
 -- inferred, not measured, so treat a positive as a prompt to look rather than
 -- as a verdict.
-CREATE FUNCTION stampede_index_density()
+CREATE FUNCTION stampeded_index_density()
 RETURNS TABLE (
     indexname   text,
     pages       bigint,
@@ -656,14 +656,14 @@ LANGUAGE sql AS $$
       JOIN pg_index i ON i.indexrelid = c.oid
       JOIN pg_class t ON t.oid = i.indrelid
      WHERE c.relkind = 'i'
-       AND t.relname LIKE 'stampede_%'
+       AND t.relname LIKE 'stampeded_%'
        -- Skip REINDEX CONCURRENTLY's leftovers rather than trying to rebuild
        -- them: _ccnew/_ccold are transient artefacts and retrying one is how a
        -- reindexer gets stuck in a loop.
        AND c.relname NOT LIKE '%\_ccnew%'
        AND c.relname NOT LIKE '%\_ccold%'
        -- SCOPED TO THIS SCHEMA. pg_class spans the whole database, so without
-       -- this a second Stampede install's indexes -- or, when this was first
+       -- this a second Stampeded install's indexes -- or, when this was first
        -- run, a few hundred leftover test schemas -- are reported as ours.
        -- 1167 indexes for a two-partition install is how it was noticed.
        AND t.relnamespace = current_schema()::regnamespace
@@ -673,9 +673,9 @@ $$;
 -- ---------------------------------------------------------------------------
 -- HEARTBEAT
 -- ---------------------------------------------------------------------------
-CREATE FUNCTION stampede_heartbeat(p_worker_id uuid) RETURNS void
+CREATE FUNCTION stampeded_heartbeat(p_worker_id uuid) RETURNS void
 LANGUAGE sql AS $$
-    UPDATE stampede_workers SET last_heartbeat = now() WHERE id = p_worker_id;
+    UPDATE stampeded_workers SET last_heartbeat = now() WHERE id = p_worker_id;
 $$;
 
 -- ---------------------------------------------------------------------------
@@ -683,13 +683,13 @@ $$;
 --
 -- The wakeup trigger is FOR EACH STATEMENT with a transition table, and
 -- Postgres does NOT clone statement-level triggers to partitions -- verified
--- on 18.6: a `CREATE TABLE ... PARTITION OF stampede_jobs` gets zero triggers,
+-- on 18.6: a `CREATE TABLE ... PARTITION OF stampeded_jobs` gets zero triggers,
 -- and an INSERT straight into it notifies nobody. (Row-level triggers ARE
 -- cloned, including to partitions created later, but a row-level wakeup costs
 -- +3.5% per row against +1.2% for the statement form -- measured in plans/12 --
 -- which is why the statement trigger was chosen.)
 --
--- `stampede_create_queue` attaches the trigger, so every partition made the
+-- `stampeded_create_queue` attaches the trigger, so every partition made the
 -- supported way is covered. This catches the unsupported way. The symptom it
 -- prevents is nasty and quiet: jobs enqueued into that queue are CORRECT and
 -- claimed on the poll interval, so nothing breaks -- latency just silently
@@ -699,7 +699,7 @@ $$;
 -- enforce it, at the cost of more plpgsql running on every DDL statement in
 -- the database (03-postgres18 resists exactly that), to stop a mistake this
 -- reports in one query.
-CREATE FUNCTION stampede_partition_health()
+CREATE FUNCTION stampeded_partition_health()
 RETURNS TABLE (
     partition      text,
     queue          text,
@@ -711,7 +711,7 @@ LANGUAGE sql STABLE AS $$
            -- The bound is `FOR VALUES IN ('name')`; pull the queue name back
            -- out rather than assuming the table is named for its queue.
            --
-           -- stampede_jobs_default is the DEFAULT partition, not a partition
+           -- stampeded_jobs_default is the DEFAULT partition, not a partition
            -- for a queue called "default" -- it catches every queue that has
            -- none of its own. Labelling it "default" would be wrong in the
            -- confusing direction: it would read as one queue among many when
@@ -724,15 +724,15 @@ LANGUAGE sql STABLE AS $$
            ),
            EXISTS (SELECT 1 FROM pg_trigger t
                     WHERE t.tgrelid = c.oid AND NOT t.tgisinternal
-                      AND t.tgname = 'stampede_notify_insert_trg'),
+                      AND t.tgname = 'stampeded_notify_insert_trg'),
            EXISTS (SELECT 1 FROM pg_trigger t
                     WHERE t.tgrelid = c.oid AND NOT t.tgisinternal
-                      AND t.tgname = 'stampede_count_ins_trg')
+                      AND t.tgname = 'stampeded_count_ins_trg')
       FROM pg_class c
       JOIN pg_inherits i ON i.inhrelid = c.oid
       JOIN pg_class p ON p.oid = i.inhparent
       JOIN pg_namespace n ON n.oid = c.relnamespace
-     WHERE p.relname = 'stampede_jobs'
+     WHERE p.relname = 'stampeded_jobs'
        AND n.nspname = current_schema()
      ORDER BY 1;
 $$;

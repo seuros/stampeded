@@ -101,7 +101,7 @@ INSERT INTO pj_avail(queue,state) VALUES ('direct','available');  --> no notific
 ```
 
 **This is a live hazard for the polyglot story.** `05-polyglot-protocol.md:22-27`
-tells people to `INSERT INTO stampede_jobs`. Nothing stops them — or a `COPY`, or
+tells people to `INSERT INTO stampeded_jobs`. Nothing stops them — or a `COPY`, or
 a migration tool, or a well-meaning DBA — from targeting the partition, and the
 job then waits out the poll interval with no error anywhere. Mitigation is to put
 the trigger on **each partition that can hold `available` rows**, not on the
@@ -143,7 +143,7 @@ listener observed the notification only after the commit
 ```
 
 Delivery latency has a hard floor of "time remaining in the enclosing
-transaction". For Stampede this is *correct* — `05-polyglot-protocol.md:33-37`
+transaction". For Stampeded this is *correct* — `05-polyglot-protocol.md:33-37`
 sells transactional enqueue, and you must not wake a worker for a row that has
 not committed — but it means **notify latency is bounded below by business
 transaction length, not by queue machinery**. A 30-second business transaction
@@ -247,11 +247,11 @@ perform pg_notify('jobs:insert', '{"r":' || random()::text || ',"count":1}');
 Payload is a **count hint plus a random nonce**. (Inference: the `r` field exists
 to *defeat* the transaction-level dedup, so N `add_job` calls in one transaction
 produce N wakeups instead of collapsing to one. That is the exact opposite of
-what Stampede wants.)
+what Stampeded wants.)
 
 Consequence of moving NOTIFY into the function: a raw
 `INSERT INTO _private_jobs` no longer wakes anybody. Graphile can afford that —
-its client library *is* `add_job`. **Stampede cannot** (`05-polyglot-protocol.md:22-27`).
+its client library *is* `add_job`. **Stampeded cannot** (`05-polyglot-protocol.md:22-27`).
 
 Listener: dedicated client checked out of the pool
 (`src/main.ts:544-546`, `// Create a client dedicated to listening for new jobs.`),
@@ -604,7 +604,7 @@ requires a persistent connection) and rely on polling instead"* —
 `enable_listen_notify = false`, `advisory_lock_heartbeat = false`,
 `poll_interval = 5`. Toggle at `lib/good_job/configuration.rb:366-372`.
 Note the coupling: good_job's pooler problem is *advisory locks* as much as
-NOTIFY. Stampede does not have that problem — `04-…` claims with
+NOTIFY. Stampeded does not have that problem — `04-…` claims with
 `FOR UPDATE SKIP LOCKED`, not advisory locks, so only the notifier is at risk.
 
 **procrastinate — a flag, and no claim about poolers.** `listen_notify: False`
@@ -944,7 +944,7 @@ path without a poll floor, and the reason is not caution: `SKIP LOCKED` makes a
 redundant wakeup cost one empty query, so the floor is nearly free while a missed
 wakeup is a stuck job.
 
-## What Stampede should do
+## What Stampeded should do
 
 ### The constraint that decides it
 
@@ -955,8 +955,8 @@ Postgres driver."* That kills two of the three options outright:
 - **Client-side NOTIFY (River/pg-boss/Graphile/good_job current design) is
   unavailable.** All four moved NOTIFY into application code or into an
   `add_job()` function. Both require the enqueuer to run our code. A Ruby script
-  doing `INSERT INTO stampede_jobs …` runs neither.
-- **NOTIFY inside `stampede_claim()` is nonsense** — that is the consumer side.
+  doing `INSERT INTO stampeded_jobs …` runs neither.
+- **NOTIFY inside `stampeded_claim()` is nonsense** — that is the consumer side.
 
 Leaving: a trigger, or polling, or both.
 
@@ -964,7 +964,7 @@ The survey splits cleanly along exactly this line. **The four projects that kept
 a trigger (que, procrastinate, underway, and Graphile before 000018) are the four
 whose enqueue path the library does not control or does not want to control.**
 The four that moved NOTIFY into client code all ship a client library that is the
-only supported way to enqueue. Stampede is structurally in the first group and
+only supported way to enqueue. Stampeded is structurally in the first group and
 should stop trying to inherit the second group's conclusions.
 
 ### Recommendation
@@ -982,11 +982,11 @@ Concretely:
 2. **One trigger, statement-level, transition table:**
 
    ```
-   AFTER INSERT ON stampede_jobs
+   AFTER INSERT ON stampeded_jobs
      REFERENCING NEW TABLE AS inserted
      FOR EACH STATEMENT
    ```
-   emitting `pg_notify('<schema>.stampede_insert', queue)` over
+   emitting `pg_notify('<schema>.stampeded_insert', queue)` over
    `SELECT DISTINCT queue FROM inserted WHERE state='available' AND scheduled_at <= now()`.
 
    Measured: **+1.2 % on a 50 k-row insert**, versus +71 % for the per-row form
@@ -1010,7 +1010,7 @@ Concretely:
    attach it to the parent as well. Verified above: direct-to-partition inserts
    bypass a parent-only trigger, and duplicate parent+partition triggers still
    deliver exactly one notification because the payload has no nonce. Belt and
-   braces costs nothing here and closes the `INSERT INTO stampede_jobs_available`
+   braces costs nothing here and closes the `INSERT INTO stampeded_jobs_available`
    hole. If `13-retention-and-bloat.md` changes the partition key, this needs
    re-deriving — note it there.
 
@@ -1025,11 +1025,11 @@ Concretely:
    a priority decision before claiming — we broadcast, so there is nothing to
    decide.
 
-4. **Channel name is `{schema}.stampede_insert`.** Both River (`CHANGELOG.md:926`)
+4. **Channel name is `{schema}.stampeded_insert`.** Both River (`CHANGELOG.md:926`)
    and pg-boss (`src/plans.ts:841-858`) shipped the un-namespaced version first
-   and had to fix it. The channel namespace is global per database; two Stampede
+   and had to fix it. The channel namespace is global per database; two Stampeded
    installs in different schemas will collide. Budget: 63 bytes total
-   (verified), so the schema name is capped at `63 - len('.stampede_insert')` = 46.
+   (verified), so the schema name is capped at `63 - len('.stampeded_insert')` = 46.
 
 5. **This trigger is the narrow exception `03-postgres18.md:81-86` permits.**
    That section says triggers fight `state-machines` because lifecycle rules end
@@ -1049,7 +1049,7 @@ Concretely:
 7. **Detect isolation, do not require configuration.** Oban's Sonar
    (`lib/oban/sonar.ex:50-56`, `:153-168`) is the right idea and pg-boss's
    `pg_listening_channels()` probe (`src/db.ts:190-196`) is the right
-   implementation. Combine: NOTIFY our own daemon id on a `stampede_sonar`
+   implementation. Combine: NOTIFY our own daemon id on a `stampeded_sonar`
    channel; if it does not come back, log once, set status, and stop relying on
    notifications. Do not offer a `PollOnly` flag as the *primary* answer — River
    does, and it requires the operator to already know their pooler eats NOTIFY.
@@ -1112,7 +1112,7 @@ that boundary — two writers to one channel is how River's schema-namespace bug
 
 Que's trigger addresses one specific worker by shelling out to a registry table
 (`lib/que/migrations/5/up.sql:36-45`). **We already have that table** —
-`04-job-lifecycle-and-claiming.md:104-106` commits to a `stampede_workers`
+`04-job-lifecycle-and-claiming.md:104-106` commits to a `stampeded_workers`
 heartbeat table with a rescuer. The trigger could shard `uuidv7` → one live
 worker and notify only that worker's private channel. Herd eliminated at the
 source, not absorbed at 50 receivers. No debouncer, no GCRA, no jitter.
@@ -1123,7 +1123,7 @@ Reasons not to do it *yet*:
   draws (*"Business logic in PL/pgSQL: no"*). Fairness across queues and tenants
   is `throttle-machines`' job (`05-polyglot-protocol.md:92-94`), and a modulo in
   a trigger is a second, divergent implementation of it.
-- It reads `stampede_workers` on every insert statement. Que gets away with a
+- It reads `stampeded_workers` on every insert statement. Que gets away with a
   few processes; at 200 workers the shard query is on the hot enqueue path.
 - Que's own failure mode (above): a stale `listening` flag sends the wakeup to a
   dead worker and the job waits out a full poll interval. Our heartbeat table
@@ -1177,14 +1177,14 @@ worker-side code is identical. Record it so the option is not forgotten.
   plpgsql loop on one connection, which isolates the trigger but is not quite
   the polyglot shape of separate statements from a client.
 - ~~**Decide whether the daemon exports queue usage as a health metric.**~~
-  **It does**, as `stampede.notify.queue_usage`, with a warning past 50%. None
+  **It does**, as `stampeded.notify.queue_usage`, with a warning past 50%. None
   of the surveyed implementations export it, and the failure is worth the
   gauge: once the queue fills every `NOTIFY` errors, and because the notify
   trigger runs INSIDE the insert, enqueueing itself stops working — a symptom
   nowhere near its cause. **Still untested**: reproducing it needs a backend
   deliberately wedged in a long transaction.
 - ~~**GCRA parameters are guesses.**~~ **MEASURED, and the guess was 5x too
-  conservative.** One `stampede_claim` at batch 5 costs **668 us** on 18.6 with
+  conservative.** One `stampeded_claim` at batch 5 costs **668 us** on 18.6 with
   60k available rows, so a worker sustains roughly **7,500 jobs/s**. A 5 ms
   cooldown caps that at 1,000 — about a seventh. Exactly the effect this note
   predicted: Oban's number paces Oban's CTE round trip, ours is a single
@@ -1252,7 +1252,7 @@ worker-side code is identical. Record it so the option is not forgotten.
   | `FOR EACH STATEMENT` + `REFERENCING NEW TABLE` (ours) | **no** |
   | `FOR EACH ROW` | **yes**, including partitions created later |
 
-  A raw `CREATE TABLE ... PARTITION OF stampede_jobs` gets **zero** triggers,
+  A raw `CREATE TABLE ... PARTITION OF stampeded_jobs` gets **zero** triggers,
   and an INSERT straight into it notifies nobody — tested with a real listener.
   So the hole is structural: it cannot be closed by inheritance without moving
   to a row-level trigger, which costs +3.5% per row against +1.2% for the
@@ -1265,7 +1265,7 @@ worker-side code is identical. Record it so the option is not forgotten.
   claimed correctly, just on the poll interval, so one queue is quietly slow
   for ever and nothing says why.
 
-  `stampede_partition_health()` reports every partition and whether it carries
+  `stampeded_partition_health()` reports every partition and whether it carries
   the notify and counter triggers; the dashboard health panel shows any that do
   not, saying what it means. Detection rather than the event trigger, because
   an event trigger runs plpgsql on every DDL statement in the database

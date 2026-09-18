@@ -26,7 +26,7 @@ Durable execution is enormously more powerful and is **flatly incompatible with
 effect, which means a deterministic execution model and a per-language SDK that
 wraps every call the job makes. That is precisely the ~10-client-library tax
 Faktory pays and that this project exists to avoid. A Ruby script doing
-`INSERT INTO stampede_jobs` cannot participate in a replay engine, and never
+`INSERT INTO stampeded_jobs` cannot participate in a replay engine, and never
 will.
 
 So: **checkpointing.** It is a column and a function, callable from any
@@ -83,19 +83,19 @@ checkpoint_seq  integer NOT NULL DEFAULT 0
 and one function:
 
 ```sql
-stampede_checkpoint(p_queue, p_id, p_worker_id, p_state jsonb) RETURNS integer
+stampeded_checkpoint(p_queue, p_id, p_worker_id, p_state jsonb) RETURNS integer
 ```
 
-The checkpoint rides on the job row that `stampede_claim` already returns, so
+The checkpoint rides on the job row that `stampeded_claim` already returns, so
 resuming costs **no extra round trip** — the worker hands the handler whatever
 state was last saved, or NULL on the first attempt.
 
 ### 3.1 A checkpoint is also a heartbeat
 
-`stampede_checkpoint` sets `heartbeat_at` as well.
+`stampeded_checkpoint` sets `heartbeat_at` as well.
 
 A job that just saved progress is demonstrably alive, so making the caller also
-invoke `stampede_touch` would be asking them to say the same thing twice — and
+invoke `stampeded_touch` would be asking them to say the same thing twice — and
 the failure mode of forgetting is that a job which is plainly working gets
 expired out from under itself by layer 2 of the timeout stack (`15-`). One
 call, both meanings.
@@ -170,7 +170,7 @@ an error that says to store a cursor rather than a set.
 
 ## 8. Still open
 
-- ~~**Named steps, per River.**~~ **DONE in Ruby** (`Stampede::Steps`), with one
+- ~~**Named steps, per River.**~~ **DONE in Ruby** (`Stampeded::Steps`), with one
   deliberate departure: a step's return value is PERSISTED when small and handed
   back when the step is skipped. River returns nothing, so the obvious usage —
   `data = step("download") { fetch(url) }` — is silently nil on resume. A result
@@ -217,7 +217,7 @@ an error that says to store a cursor rather than a set.
   it stays about the same size while its value changes. **A result set
   accumulates**, so it grows on every write.
 
-  `stampede_checkpoint` now RAISEs a WARNING when a checkpoint is both larger
+  `stampeded_checkpoint` now RAISEs a WARNING when a checkpoint is both larger
   than 8 KB (an eighth of the cap, so thousands of writes of runway remain) and
   bigger than the one it replaced. Neither condition alone means anything: a
   large constant checkpoint is fine, and a small growing one has room. Together
@@ -259,7 +259,7 @@ an error that says to store a cursor rather than a set.
     `Timeout::Error` but the worker never imposed one, so River's
     `rescue_after > job_timeout` invariant was violated **by construction**
     rather than by misconfiguration. A hanging job — an HTTP call with no
-    timeout is the usual cause — kept its thread while `stampede_expire`
+    timeout is the usual cause — kept its thread while `stampeded_expire`
     returned the row to `retryable` for a second worker to claim. Demonstrated:
     the job reached `retryable` while execution 1 was still running.
   - **The gem never required `timeout`.** Nothing inside Rails notices, because

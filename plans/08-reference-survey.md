@@ -17,7 +17,7 @@ stack/      rama datastar
 
 ## LICENCE WARNING — read before opening source
 
-Stampede is BSD-3 and clean-room. Reading strong-copyleft source and then
+Stampeded is BSD-3 and clean-room. Reading strong-copyleft source and then
 writing a competing implementation in the same problem space invites
 contamination claims. This rule is load-bearing, not decorative.
 

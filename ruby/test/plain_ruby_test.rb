@@ -10,7 +10,7 @@ require "test_helper"
 # first version of this test asserted `defined?(Timeout)` in-process and passed
 # with the bug reverted, which is no test at all.
 #
-# So these boot a clean interpreter that requires ONLY stampede. The gem
+# So these boot a clean interpreter that requires ONLY stampeded. The gem
 # documents a plain-Ruby worker (`Worker#register`) as a supported way to use
 # the queue without the framework, so this is a real configuration, not a
 # contrived one.
@@ -29,9 +29,9 @@ class PlainRubyTest < Minitest::Test
   # eventually reclaimed by the reaper as though the worker had died -- charging
   # an interruption for a clean application error.
   def test_the_gem_does_not_rely_on_rails_to_define_timeout
-    out, ok = ruby('require "stampede"; puts defined?(Timeout) ? "yes" : "no"')
+    out, ok = ruby('require "stampeded"; puts defined?(Timeout) ? "yes" : "no"')
 
-    assert ok, "requiring stampede on its own failed: #{out}"
+    assert ok, "requiring stampeded on its own failed: #{out}"
     assert_equal "yes", out.strip,
                  "worker.rb references Timeout::Error but nothing requires timeout; " \
                  "outside Rails that is a NameError while reporting a job failure"
@@ -40,8 +40,8 @@ class PlainRubyTest < Minitest::Test
   # The classifier itself, exercised the way the worker exercises it.
   def test_failure_classification_works_without_rails
     out, ok = ruby(<<~RUBY)
-      require "stampede"
-      w = Stampede::Worker.new(queue: "default")
+      require "stampeded"
+      w = Stampeded::Worker.new(queue: "default")
       puts w.send(:failure_kind_for, ArgumentError.new("boom"))
     RUBY
 

@@ -1,4 +1,4 @@
-# Stampede — Vision
+# Stampeded — Vision
 
 ## What it is
 
@@ -30,13 +30,13 @@ it sounds; see `04-job-lifecycle-and-claiming.md`.
 **2. The resilience primitives already exist.**
 The four `*-machines` crates (state, chrono, breaker, throttle) are published,
 used, and cover exactly the cross-cutting concerns a job processor is made of.
-Stampede is substantially an integration of crates that already work, not a
+Stampeded is substantially an integration of crates that already work, not a
 greenfield build. See `02-crate-family.md`.
 
 **3. MCP is the differentiator.**
 No job processor has a first-class MCP interface. "Why does this job keep
 failing", "retry everything matching X", "what is my queue depth trend" are
-natural tool calls. Everything else in Stampede can be copied in a quarter by a
+natural tool calls. Everything else in Stampeded can be copied in a quarter by a
 motivated competitor. This cannot, quickly.
 
 ## Non-goals
@@ -54,5 +54,5 @@ BSD-3. Clean-room: reference implementations are read for design and protocol
 documentation only, never for code. Several references are GPL/LGPL, which makes
 this rule load-bearing rather than decorative — see `08-reference-survey.md`.
 
-Name status in `09-naming.md`. Short version: `stampede` is squatted on both
+Name status in `09-naming.md`. Short version: `stampeded` is squatted on both
 registries, both plausibly reclaimable, and renaming later is cheap.

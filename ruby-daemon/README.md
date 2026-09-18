@@ -1,9 +1,9 @@
-# stampede-daemon
+# stampeded-daemon
 
-The precompiled [Stampede](https://github.com/seuros/stampede) daemon.
+The precompiled [Stampeded](https://github.com/seuros/stampeded) daemon.
 
 ```ruby
-gem "stampede-daemon"
+gem "stampeded-daemon"
 ```
 
 One binary per platform, so you do not need a Rust toolchain. **Optional** —
@@ -12,8 +12,8 @@ retention and the dashboard.
 
 It runs the roles that operate on *rows* rather than on job bodies, and is
 therefore language-agnostic: scheduler, reaper, pruner, expirer, health checks,
-HTTP API, dashboard. Your jobs stay in Ruby, run by `bin/rails stampede:work` —
-see the `stampede` gem.
+HTTP API, dashboard. Your jobs stay in Ruby, run by `bin/rails stampeded:work` —
+see the `stampeded` gem.
 
 ## Platforms
 
@@ -26,7 +26,7 @@ For anything else, build from source and point at it:
 
 ```bash
 cargo build --release
-export STAMPEDE_INSTALL_DIR=/path/to/stampede/target/release
+export STAMPEDED_INSTALL_DIR=/path/to/stampeded/target/release
 ```
 
 ## Building the gems

@@ -1,4 +1,4 @@
-# Stampede
+# Stampeded
 
 A polyglot job processor. Rust core, Postgres 18+ substrate, Datastar dashboard,
 MCP control plane. BSD-3.
@@ -18,11 +18,11 @@ claim.
 ## Why
 
 Every serious job processor is locked to one runtime — Sidekiq is Ruby, Oban is
-Elixir, Celery is Python, BullMQ is Node. Stampede's substrate is Postgres, so
+Elixir, Celery is Python, BullMQ is Node. Stampeded's substrate is Postgres, so
 **enqueue is a plain `INSERT` and every language already has a client**:
 
 ```sql
-INSERT INTO stampede_jobs (queue, task, args)
+INSERT INTO stampeded_jobs (queue, task, args)
 VALUES ('mail', 'send_welcome', '{"user_id": 42}'::jsonb);
 ```
 
@@ -32,7 +32,7 @@ transaction as the business data that caused it.
 **Workers are polyglot too.** Claiming carries the fence, the attempt accounting
 and the ownership rules, so it must not be reimplemented per language — but it
 does not have to be, because it is a SQL function. A complete worker in Ruby,
-with no Stampede client library anywhere:
+with no Stampeded client library anywhere:
 
 ```ruby
 require 'pg'
@@ -41,15 +41,15 @@ require 'json'
 db = PG.connect(ENV['DATABASE_URL'])
 
 worker = db.exec_params(
-  "INSERT INTO stampede_workers (hostname, pid, queues) VALUES ($1,$2,$3) RETURNING id",
+  "INSERT INTO stampeded_workers (hostname, pid, queues) VALUES ($1,$2,$3) RETURNING id",
   ['ruby-worker', Process.pid, '{default}']
 ).getvalue(0, 0)
 
 loop do
-  db.exec_params("SELECT stampede_heartbeat($1)", [worker])
-  db.exec_params("SELECT * FROM stampede_claim($1,$2,$3)", ['default', worker, 5]).each do |job|
+  db.exec_params("SELECT stampeded_heartbeat($1)", [worker])
+  db.exec_params("SELECT * FROM stampeded_claim($1,$2,$3)", ['default', worker, 5]).each do |job|
     handle(JSON.parse(job['args']))
-    db.exec_params("SELECT stampede_complete($1,$2,$3)", ['default', job['id'], worker])
+    db.exec_params("SELECT stampeded_complete($1,$2,$3)", ['default', job['id'], worker])
   end
   sleep 0.5
 end
@@ -60,7 +60,7 @@ Faktory's" — it is that **there is no protocol**.
 
 ## What is different
 
-Stampede was designed after surveying thirteen job processors in six languages
+Stampeded was designed after surveying thirteen job processors in six languages
 (`plans/08-reference-survey.md`). Most of the design is a response to something
 measured in one of them:
 
@@ -98,8 +98,8 @@ measured in one of them:
 ## Running it
 
 ```bash
-createdb stampede
-stampede --migrate --database-url postgres://localhost/stampede \
+createdb stampeded
+stampeded --migrate --database-url postgres://localhost/stampeded \
          --queue default --http 127.0.0.1:7878
 ```
 
@@ -111,7 +111,7 @@ the dashboard. Split them later by running the same binary with different flags
   **Off unless you pass `--dashboard-token`**, deliberately: a job dashboard
   exposes customer data in job args and offers a retry button, and opt-in auth
   is how dashboards end up open on production.
-- **MCP** — `stampede-mcp` over stdio; point any MCP client at it
+- **MCP** — `stampeded-mcp` over stdio; point any MCP client at it
 - **API** — for callers that cannot hold a Postgres connection (browsers, edge
   functions, third parties). Everyone else should just `INSERT`.
 
@@ -124,42 +124,42 @@ the dashboard. Split them later by running the same binary with different flags
   | `GET /health` | |
 
 Rust handlers are registered in-process
-(`crates/stampede-core/examples/worker.rs`); workers in other languages use
-`stampede_claim` as shown above. Neither needs a client library.
+(`crates/stampeded-core/examples/worker.rs`); workers in other languages use
+`stampeded_claim` as shown above. Neither needs a client library.
 
 ## Rails
 
 ```ruby
-gem "stampede"
-gem "stampede-daemon"   # optional: the precompiled binary
+gem "stampeded"
+gem "stampeded-daemon"   # optional: the precompiled binary
 ```
 
 ```ruby
-config.active_job.queue_adapter = :stampede
+config.active_job.queue_adapter = :stampeded
 ```
 
-Two processes: `bin/rails stampede:work` runs your jobs, `bin/rails
-stampede:daemon` runs the scheduler, reaper, pruner and dashboard. They are
+Two processes: `bin/rails stampeded:work` runs your jobs, `bin/rails
+stampeded:daemon` runs the scheduler, reaper, pruner and dashboard. They are
 split because the Rust daemon cannot execute an ActiveJob job — an ActiveJob
 job is a Ruby class — while every other role operates on *rows* and so does not
 care what language wrote them. See `ruby/README.md` and `plans/16`.
 
-`retry_on` raises: it re-enqueues as a new row while Stampede counts attempts
+`retry_on` raises: it re-enqueues as a new row while Stampeded counts attempts
 at claim, which would make every attempt column read 1. Use
-`stampede max_attempts: 5` instead.
+`stampeded max_attempts: 5` instead.
 
 ## Layout
 
 ```
 plans/     design notes — what was measured, and why each decision was made
 schema/    001_initial, 002_operations, 003_schedules  (PG18+ only)
-crates/stampede/  one crate, features gate the weight
+crates/stampeded/  one crate, features gate the weight
   src/            queue, worker, lifecycle, cron, wakeup, maintenance, metrics
   src/http/       enqueue API + Datastar dashboard, on rama   [feature: http]
   src/mcp/        MCP control plane, on mcp-host              [feature: mcp]
-  src/bin/        `stampede` (daemon) and `stampede-mcp`
-ruby/             the `stampede` gem: ActiveJob adapter, worker, schedules
-ruby-daemon/      the `stampede-daemon` gem: one binary per platform
+  src/bin/        `stampeded` (daemon) and `stampeded-mcp`
+ruby/             the `stampeded` gem: ActiveJob adapter, worker, schedules
+ruby-daemon/      the `stampeded-daemon` gem: one binary per platform
 ```
 
 One crate rather than a workspace of four, because the four bought nothing:
@@ -169,8 +169,8 @@ they carry a lot of it — the queue core alone locks **374** crates, everything
 locks **958**. An application embedding the queue should not compile rama:
 
 ```bash
-cargo install stampede                       # the daemon, batteries included
-cargo add stampede --no-default-features     # just the queue
+cargo install stampeded                       # the daemon, batteries included
+cargo add stampeded --no-default-features     # just the queue
 ```
 
 All four `*-machines` crates are load-bearing: `state-machines` holds the
@@ -202,7 +202,7 @@ was never shown.
 Cron expressions or fixed intervals:
 
 ```sql
-INSERT INTO stampede_schedules (key, queue, task, cron_expr, timezone, dst_policy)
+INSERT INTO stampeded_schedules (key, queue, task, cron_expr, timezone, dst_policy)
 VALUES ('nightly', 'reports', 'daily_summary', '0 3 * * *', 'America/New_York', 'wall_clock');
 ```
 
@@ -220,7 +220,7 @@ cannot offer because their schedules live in config.
 
 **DST is a per-schedule column, not an algorithm.** Every surveyed
 implementation keys occurrences on a UTC instant, so a 01:30 job runs *twice* on
-a fall-back day. Stampede makes it a choice:
+a fall-back day. Stampeded makes it a choice:
 
 | | fall-back (01:30 happens twice) | spring-forward (02:30 does not exist) |
 |---|---|---|
@@ -268,7 +268,7 @@ columns the claim actually orders by.
 Set `dedup_scope` and the database refuses a second job with the same one:
 
 ```sql
-INSERT INTO stampede_jobs (queue, task, dedup_scope)
+INSERT INTO stampeded_jobs (queue, task, dedup_scope)
 VALUES ('default', 'SyncAccount', 'acct:42');
 ```
 
@@ -314,12 +314,12 @@ look like a thousand broken jobs.
 
 ```ruby
 def perform(file)
-  cursor = stampede_checkpoint&.dig("cursor") || 0
+  cursor = stampeded_checkpoint&.dig("cursor") || 0
 
   rows[cursor..].each_slice(1_000) do |chunk|
     import(chunk)                          # commit the work FIRST
     cursor += chunk.size
-    stampede_checkpoint!(cursor: cursor)   # then record it
+    stampeded_checkpoint!(cursor: cursor)   # then record it
   end
 end
 ```
@@ -329,10 +329,10 @@ not be repeated:
 
 ```ruby
 def perform(order)
-  stampede_step("charge") { Stripe.charge(order.total) }    # never charged twice
-  path = stampede_step("render") { render_pdf(order) }      # value kept on resume
+  stampeded_step("charge") { Stripe.charge(order.total) }    # never charged twice
+  path = stampeded_step("render") { render_pdf(order) }      # value kept on resume
 
-  stampede_step("email", cursor: 0) do |step|
+  stampeded_step("email", cursor: 0) do |step|
     recipients[step.cursor..].each do |to|
       Mailer.receipt(to, path).deliver_now
       step.advance!(step.cursor + 1)
@@ -348,8 +348,8 @@ when the step is skipped, so `path = step { ... }` is not silently nil the
 second time round. Results over 8 KB raise; store the big thing yourself and
 return a reference.
 
-A checkpoint is otherwise opaque to Stampede — your cursor, your meaning. It
-rides on the row `stampede_claim` already returns, so resuming costs no extra
+A checkpoint is otherwise opaque to Stampeded — your cursor, your meaning. It
+rides on the row `stampeded_claim` already returns, so resuming costs no extra
 round trip.
 
 Steps work the same from Rust:
@@ -385,7 +385,7 @@ was rolled back:
 ```ruby
 ActiveRecord::Base.transaction do
   import(chunk)
-  stampede_checkpoint!(cursor: n)   # commits with the work, or not at all
+  stampeded_checkpoint!(cursor: n)   # commits with the work, or not at all
 end
 ```
 
@@ -401,7 +401,7 @@ the common one in front of Rails — `LISTEN`/`NOTIFY` does not survive it. The
 pooler accepts the `LISTEN` without error and the connection will even tell you
 it is subscribed; the notifications simply never arrive.
 
-Stampede detects this rather than letting you find out from latency graphs. The
+Stampeded detects this rather than letting you find out from latency graphs. The
 dashboard says:
 
 ```
@@ -445,7 +445,7 @@ say so:
 
 ```ruby
 rescue RateLimited => e
-  raise Stampede::RetryIn.new(e.retry_after)   # honour the server
+  raise Stampeded::RetryIn.new(e.retry_after)   # honour the server
 end
 ```
 
@@ -453,7 +453,7 @@ end
 Err(Box::new(RetryIn::secs(3600)))
 ```
 
-This is Stampede's answer to ActiveJob's `retry_on(wait:)`, which the adapter
+This is Stampeded's answer to ActiveJob's `retry_on(wait:)`, which the adapter
 refuses — see *Rails* above. The objection to `retry_on` is not custom backoff;
 it is that `retry_on` re-enqueues the job as a **new row**, which resets every
 counter and makes the dashboard lie about how many times anything has run.
@@ -507,7 +507,7 @@ three are surfaced on the dashboard and through the `system_health` MCP tool:
 - **Autovacuum falling behind.** A queue table is the pathological case —
   constant `UPDATE`s over a small hot set. When vacuum falls behind, nothing
   fails; things just get slower, which presents as "the queue is mysteriously
-  slow" and sends people reading their job code. Stampede compares dead tuples
+  slow" and sends people reading their job code. Stampeded compares dead tuples
   against the threshold autovacuum will *actually* use for that table, from its
   own reloptions. (pg-boss's `#checkVacuum`, which `plans/13` rates the most
   valuable operational feature in the survey.)
@@ -560,7 +560,7 @@ retention.
 
 **Every worker needs database credentials.** The tables are the protocol: a
 worker claims by calling a SQL function, so a worker you would not trust with
-the jobs table cannot be a Stampede worker. There is no broker handing work out
+the jobs table cannot be a Stampeded worker. There is no broker handing work out
 over HTTP, which rules out browser-side or customer-hosted workers. That is a
 consequence of the design rather than a missing feature — see
 `plans/05-polyglot-protocol.md`, which weighs the alternative and declines it.
@@ -574,7 +574,7 @@ make every counter on the dashboard wrong. Use `max_attempts`,
 
 ## Requirements
 
-Postgres **18 or newer**, deliberately. Stampede uses `uuidv7()`,
+Postgres **18 or newer**, deliberately. Stampeded uses `uuidv7()`,
 `RETURNING OLD./NEW.` and generated columns; there are no compatibility shims.
 
 **Building on Linux needs `libclang`** (`apt install libclang-dev`). A
@@ -586,8 +586,8 @@ neither the crate that wanted it nor the package that provides it.
 
 ```bash
 cargo test                                   # unit only
-createdb stampede_test
-STAMPEDE_TEST_DATABASE_URL=postgres://localhost/stampede_test cargo test
+createdb stampeded_test
+STAMPEDED_TEST_DATABASE_URL=postgres://localhost/stampeded_test cargo test
 ```
 
 With the env var set that is 183 Rust tests — unit, integration against real

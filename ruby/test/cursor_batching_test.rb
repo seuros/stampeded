@@ -9,14 +9,14 @@ require "test_helper"
 # the work it is recording. `every:` trades durability for throughput, and the
 # trade is written at the call site rather than hidden in the framework.
 class CursorBatchingTest < Minitest::Test
-  include StampedeTest::Isolation
+  include StampededTest::Isolation
 
   # A context stub: Steps only needs #checkpoint to build itself, and we
   # replace #persist! so the test counts writes instead of doing them.
   def steps_for(writes)
     ctx = Object.new
     ctx.define_singleton_method(:checkpoint) { nil }
-    state = Stampede::Steps.new(ctx)
+    state = Stampeded::Steps.new(ctx)
     state.define_singleton_method(:persist!) { writes << 1 }
     state
   end

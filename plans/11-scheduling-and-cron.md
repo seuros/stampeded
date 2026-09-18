@@ -276,16 +276,16 @@ null third column confirms *available, not installed*, as `03-` states.
 
 The in-daemon tick loop and, if we chose Family A, the leader election behind it.
 Nothing else. It does not store jobs, claim them, retry them, or know anything
-about Stampede's schema.
+about Stampeded's schema.
 
 ### Limitations, in order of how much they hurt
 
 1. **Install is an operator action, not a migration.** Requires
    `shared_preload_libraries = 'pg_cron'`, a cluster restart, and superuser to
-   `CREATE EXTENSION`. A self-hoster cannot get it from `stampede migrate`.
+   `CREATE EXTENSION`. A self-hoster cannot get it from `stampeded migrate`.
 2. **Metadata lives in exactly one database per cluster.** `cron.database_name`
    defaults to `postgres`; the extension may only be installed once, and
-   `cron.schedule_in_database()` is how you reach the others. So Stampede's
+   `cron.schedule_in_database()` is how you reach the others. So Stampeded's
    schema would live in `myapp` while its schedule rows live in `postgres` —
    split across backup, restore, migration and `pg_dump` boundaries. For a
    product whose pitch is "Postgres is the protocol" (`00-vision.md`), that is a
@@ -321,7 +321,7 @@ trade when self-hosting is a goal.
 
 ---
 
-## What Stampede should do
+## What Stampeded should do
 
 ### Delayed jobs — staging, with River's look-ahead and a claim-side fence
 
@@ -348,7 +348,7 @@ trade when self-hosting is a goal.
 Two mechanisms, each doing one job.
 
 **Primary — db-scheduler's model.** One row per schedule in
-`stampede_schedules` carrying `next_run_at`, claimed with the same
+`stampeded_schedules` carrying `next_run_at`, claimed with the same
 `FOR UPDATE SKIP LOCKED` used for jobs. The claimer enqueues the job and advances
 `next_run_at` **in the same transaction**. This buys, for free:
 
@@ -360,7 +360,7 @@ Two mechanisms, each doing one job.
   config-only schedules cannot offer.
 
 **Secondary — an occurrence ledger as an idempotency backstop and audit trail.**
-`stampede_cron_occurrences (cron_key, occurrence_token, job_id)` with
+`stampeded_cron_occurrences (cron_key, occurrence_token, job_id)` with
 `UNIQUE (cron_key, occurrence_token)`, inserted `ON CONFLICT DO NOTHING
 RETURNING id` in the same transaction. Verified on 18.6: the winner gets one row,
 the loser gets zero.
@@ -376,7 +376,7 @@ horizon.
 
 ### DST — make the occurrence token the policy
 
-This is where Stampede can be straightforwardly better than all nine, because the
+This is where Stampeded can be straightforwardly better than all nine, because the
 fix is a column, not an algorithm.
 
 `occurrence_token` is **text**, and what goes in it is a per-schedule policy:
@@ -431,15 +431,15 @@ why its backfill is safe (`cron_manager.rb:115-116`).
 
 Default `once`. pg-boss's rationale is right and its warning matters: a
 per-occurrence backfill is only meaningful if the job can tell *which* occurrence
-it is, so Stampede must pass `occurrence_at` in the job args — procrastinate does
+it is, so Stampeded must pass `occurrence_at` in the job args — procrastinate does
 this (`periodic.py:213`) and pg-boss could not.
 
 ### `pg_cron` — optional ticker, never a dependency
 
 Because correctness lives in the occurrence key and the overdue row, *who ticks*
-is a deployment choice. Ship a `stampede.tick()` SQL function that performs the
+is a deployment choice. Ship a `stampeded.tick()` SQL function that performs the
 same claim-and-enqueue, and document
-`cron.schedule_in_database('stampede-tick', '* * * * *', 'SELECT stampede.tick()', 'myapp')`
+`cron.schedule_in_database('stampeded-tick', '* * * * *', 'SELECT stampeded.tick()', 'myapp')`
 as a supported alternative for operators who already run pg_cron. Never require
 it, never test only that path, and never let a schedule column exist that only
 pg_cron can populate.
@@ -494,7 +494,7 @@ contains no time term, for this reason.
 - ~~One table or two.~~ **Two.** The cron row would otherwise compete with jobs
   for the claim index, and the dashboard's extra join is cheap by comparison.
 - ~~Occurrence-ledger retention.~~ **Done, and it was a live leak**:
-  `stampede_prune_occurrences` existed from the start and was called from
+  `stampeded_prune_occurrences` existed from the start and was called from
   NOWHERE, so the ledger grew one row per firing forever — 525,600 a year for a
   schedule running every minute. Now pruned on its own 30-day horizon, separate
   from job retention, which is the entire reason it is a separate table.

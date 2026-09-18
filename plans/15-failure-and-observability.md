@@ -2,7 +2,7 @@
 
 > **IMPLEMENTATION FINDING 2026-09-17 — retry delay must be a DELAY, not an instant.**
 >
-> The first cut of `stampede_fail` took `p_retry_at timestamptz`, computed on
+> The first cut of `stampeded_fail` took `p_retry_at timestamptz`, computed on
 > the worker as `Utc::now() + backoff`. An integration test failed: the job was
 > not claimable on its next round. Cause: the worker's clock was **3 ms ahead**
 > of Postgres, so `scheduled_at <= now()` was false.
@@ -12,7 +12,7 @@
 > worker 30 s ahead delays every retry by 30 s; a fleet with mixed skew retries
 > inconsistently; and it is invisible in development, where skew is milliseconds.
 >
-> `stampede_fail` now takes `p_retry_delay_ms bigint` and the database applies
+> `stampeded_fail` now takes `p_retry_delay_ms bigint` and the database applies
 > its own clock (`now() + make_interval(...)`). `chrono-machines` already returns
 > a delay in ms, so this is also less code — the conversion to an absolute time
 > was work that introduced a bug.
@@ -336,7 +336,7 @@ Two things matter here.
 River and asynq cancel a `context`; a job that does not select on `ctx.Done()`
 runs to completion regardless. Only Oban (BEAM process kill) and celery
 (SIGKILL of the prefork child) can actually *stop* work. Rust has the same
-limitation as Go: `tokio` cannot preempt a blocking task. Any timeout Stampede
+limitation as Go: `tokio` cannot preempt a blocking task. Any timeout Stampeded
 enforces in-process is a request, not a guarantee. The guarantee has to come
 from the database sweep or from killing the OS process.
 
@@ -520,7 +520,7 @@ be designed in from the start, not bolted on.
 
 ---
 
-## What Stampede should do
+## What Stampeded should do
 
 ### Retry and backoff — `chrono-machines`
 
@@ -565,7 +565,7 @@ This maps onto weakness (6), and it is the piece no competitor has.
   River's rescuer already sleeps a random `BatchBackoffMin..Max` between
   batches (`job_rescuer.go:295`) — the primitive belongs in the crate, applied
   uniformly to claim, rescue, prune and re-drive.
-- A DLQ re-drive of 100k jobs is a self-inflicted stampede. `job_retry` over a
+- A DLQ re-drive of 100k jobs is a self-inflicted stampeded. `job_retry` over a
   matched set (`06-`) must be rate-limited by construction, not by operator
   discipline.
 
@@ -646,7 +646,7 @@ Three layers, because the first two cannot fire when the worker is dead.
    liveness, routes through the **normal** fail path so it consumes a retry,
    backs off and dead-letters. Set `failure_kind = timed_out`.
 3. **Heartbeat** — pg-boss's `touchJobs`/`failJobsByHeartbeat`
-   (`plans.ts:2322-2345`) for long jobs, plus the `stampede_workers` process
+   (`plans.ts:2322-2345`) for long jobs, plus the `stampeded_workers` process
    heartbeat from `04-` for the worker itself (solid_queue:
    `process_heartbeat_interval` 60 s, `process_alive_threshold` 5 min,
    `lib/solid_queue.rb:31-32`). Set `failure_kind = heartbeat_lost`.
@@ -670,21 +670,21 @@ highest-signal artefact in the entire survey.
   set, merging asynq's gauges with Oban's per-job measures:
 
   ```
-  stampede.queue.depth              {queue,state}
-  stampede.queue.oldest_age_seconds {queue}        <- asynq's queue_latency; the one that matters
-  stampede.job.queue_time_seconds   {queue,task}   <- Oban's :queue_time
-  stampede.job.duration_seconds     {queue,task}
-  stampede.jobs.completed           {queue,task}
-  stampede.jobs.failed              {queue,task,failure_kind}
-  stampede.jobs.retried             {queue,task}
-  stampede.jobs.discarded           {queue,task}
-  stampede.jobs.interrupted         {queue,task,failure_kind}   <- nobody has this
-  stampede.worker.heartbeat_age_seconds {worker}
-  stampede.worker.replaced          {reason}       <- solid_queue's replace_fork
-  stampede.claim.duration_seconds   {queue}        <- control-plane, Oban-style
-  stampede.rescuer.jobs             {outcome}
-  stampede.breaker.state            {destination}  <- ours alone
-  stampede.throttle.headroom        {queue,tenant} <- ours alone
+  stampeded.queue.depth              {queue,state}
+  stampeded.queue.oldest_age_seconds {queue}        <- asynq's queue_latency; the one that matters
+  stampeded.job.queue_time_seconds   {queue,task}   <- Oban's :queue_time
+  stampeded.job.duration_seconds     {queue,task}
+  stampeded.jobs.completed           {queue,task}
+  stampeded.jobs.failed              {queue,task,failure_kind}
+  stampeded.jobs.retried             {queue,task}
+  stampeded.jobs.discarded           {queue,task}
+  stampeded.jobs.interrupted         {queue,task,failure_kind}   <- nobody has this
+  stampeded.worker.heartbeat_age_seconds {worker}
+  stampeded.worker.replaced          {reason}       <- solid_queue's replace_fork
+  stampeded.claim.duration_seconds   {queue}        <- control-plane, Oban-style
+  stampeded.rescuer.jobs             {outcome}
+  stampeded.breaker.state            {destination}  <- ours alone
+  stampeded.throttle.headroom        {queue,tenant} <- ours alone
   ```
 
   `failure_kind` as a label on `jobs.failed` is what makes "is this an outage or
@@ -752,7 +752,7 @@ That is the heartbeat model `04-` decided on, implemented in MIT-licensed
 source we can read. It should be cited there instead of Oban.
 
 Corollary worth carrying into `04-`: the *claim* is not where orphan recovery
-lives. It lives in the relationship between `stampede_workers` and the claim
+lives. It lives in the relationship between `stampeded_workers` and the claim
 row, and solid_queue's `where.missing(:process)` is the cheapest expression of
 it — a foreign key and a `LEFT JOIN ... IS NULL`, no time arithmetic, no
 wall-clock guess.
@@ -762,7 +762,7 @@ wall-clock guess.
 ## Still open
 
 - ~~**Error fingerprinting algorithm.**~~ **In SQL**, as
-  `stampede_fingerprint` — the polyglot argument won, because a Python worker
+  `stampeded_fingerprint` — the polyglot argument won, because a Python worker
   will not run our Rust normalisation and two workers producing different
   fingerprints for one incident defeats the clustering entirely. Strips UUIDs,
   hex blobs and numbers, then hashes. IMMUTABLE, so it can move into an index
@@ -809,7 +809,7 @@ wall-clock guess.
   `maxStalledCount: 1`.
 
   The reset is now tested too. It was not, which meant deleting one line from
-  `stampede_checkpoint` would have failed nothing while producing the exact
+  `stampeded_checkpoint` would have failed nothing while producing the exact
   outcome the design exists to prevent: a long job on flaky infrastructure
   discarded while making steady progress.
 - ~~**Error-column budget.**~~ **4,000 characters, CHECK-enforced**, plus
@@ -835,7 +835,7 @@ wall-clock guess.
   **Neither: a `Recorder` trait.** A queue library that hard-depends on one
   telemetry vendor forces it on every application and takes a major version
   every time the vendor breaks its API. A `TracingRecorder` ships as the
-  reference impl, so `RUST_LOG=stampede::metrics=debug` is a working feed with
+  reference impl, so `RUST_LOG=stampeded::metrics=debug` is a working feed with
   no backend at all. Original note follows. asynq ships
   a separate `x/metrics` module rather than baking it in
   (`redis/asynq/x/metrics/metrics.go`) — a good pattern for keeping the core

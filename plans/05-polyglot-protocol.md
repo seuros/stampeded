@@ -1,6 +1,6 @@
 # The polyglot boundary
 
-The thing that makes Stampede different. Also the thing most likely to sink it
+The thing that makes Stampeded different. Also the thing most likely to sink it
 if designed badly.
 
 ## The lesson from Faktory
@@ -21,7 +21,7 @@ fine.
 Enqueue is an `INSERT`. That is the whole client library.
 
 ```sql
-INSERT INTO stampede_jobs (id, queue, task, args, scheduled_at)
+INSERT INTO stampeded_jobs (id, queue, task, args, scheduled_at)
 VALUES (uuidv7(), 'default', 'send_email', '{"to":"x@y.z"}'::jsonb, now());
 ```
 
@@ -46,8 +46,8 @@ Consequences:
 - **No wire format to version, document or evangelise.**
 - Inspection, admin, and migration are just SQL.
 
-Thin idiomatic wrappers per language remain nice-to-have (`stampede-rb`,
-`stampede-py`) but they are sugar over one INSERT, not protocol implementations.
+Thin idiomatic wrappers per language remain nice-to-have (`stampeded-rb`,
+`stampeded-py`) but they are sugar over one INSERT, not protocol implementations.
 If they rot, nothing breaks.
 
 ## Where raw SQL is not enough
@@ -73,9 +73,9 @@ correctness bugs live, and it must not be reimplemented per language.
 
 Two options for polyglot *workers* (as opposed to polyglot enqueuers):
 
-1. **`stampede_claim()` SQL function.** One round trip, atomic, callable from
+1. **`stampeded_claim()` SQL function.** One round trip, atomic, callable from
    any language. All the tricky logic stays in one place. A Python worker does
-   `SELECT * FROM stampede_claim('default', 5, 'worker-id')`.
+   `SELECT * FROM stampeded_claim('default', 5, 'worker-id')`.
 2. **Daemon-mediated**: the Rust daemon claims and hands work out over HTTP/SSE.
    Workers never touch the claim logic at all.
 
@@ -85,15 +85,15 @@ rather than in daemon-side Rust.
 
 ## Consequence for positioning
 
-If this works, Stampede's pitch is not "our protocol is better than Faktory's".
+If this works, Stampeded's pitch is not "our protocol is better than Faktory's".
 It is **"there is no protocol"** — you already know how to talk to it.
 
 ## Resolved by building
 
 - ~~Job argument encoding.~~ **`jsonb`.** Inspectable in psql and searchable
   from `job_search`; `bytea` would have gutted the MCP surface.
-- ~~Does `stampede_claim()` register the heartbeat?~~ **No, separate.**
-  Registration is an `INSERT` into `stampede_workers` and the heartbeat is its
+- ~~Does `stampeded_claim()` register the heartbeat?~~ **No, separate.**
+  Registration is an `INSERT` into `stampeded_workers` and the heartbeat is its
   own function, so a worker's liveness is independent of whether it currently
   holds a job — which is what lets the reaper distinguish "worker died" from
   "worker idle".
@@ -115,7 +115,7 @@ It is **"there is no protocol"** — you already know how to talk to it.
 
   The limitation it leaves is real and should be said plainly rather than left
   implicit: **every worker needs database credentials.** A worker you do not
-  trust with the jobs table cannot be a Stampede worker. That rules out
+  trust with the jobs table cannot be a Stampeded worker. That rules out
   browser-side or customer-hosted workers, and it is a design consequence of
   "the tables ARE the protocol", not an oversight.
 

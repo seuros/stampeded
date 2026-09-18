@@ -2,24 +2,45 @@
 
 ## Naming status (verified 2026-09-16)
 
-`stampede` is squatted on both registries. Neither is a live project.
+`stampede` is unavailable on both registries. The research below was done on
+2026-09-16, when both looked like dormant squats; the crates.io name has since
+been transferred to a new owner, which is what settled the question.
 
-**DECIDED 2026-09-18: hold out for `stampede`.** Owners contacted directly on
-both registries. Both squats are dormant by any measure — a 0.0.0 placeholder
-with no repo from 2023, and a single-version gem from 2013 for an unrelated
-problem — which is exactly what the adoption processes exist for.
+~~**DECIDED 2026-09-18: hold out for `stampede`.**~~ **SUPERSEDED the same
+day — the project is `stampeded`.** The crates.io `stampede` name had just been
+transferred to its current owner, so it is not a dormant squat any more and
+there is nothing to adopt. Holding out for a name that has just changed hands
+is waiting for something that is not going to happen.
 
-**Verified fallback if neither replies: `stampeded`.** Free on both registries
-as of 2026-09-18 (checked, not assumed), and the `d` suffix is the daemon
-convention — `httpd`, `sshd`, `systemd` — so it reads as deliberate rather than
-as a consolation prize. `stampede-rs` / `stampede-rb` and `stampedeq` are also
-free, but two names for one project is worse than one slightly odd one.
+**`stampeded` it is**, and it was the prepared fallback: free on both
+registries as of 2026-09-18 (checked, not assumed), with the `d` suffix as the
+daemon convention — `httpd`, `sshd`, `systemd` — so it reads as deliberate
+rather than as a consolation prize. `stampede-rs` / `stampede-rb` and
+`stampedeq` were also free, but two names for one project is worse than one
+slightly odd one.
 
-If the rename ever happens it should cover the **crate, gem and binary only**.
-The SQL identifiers stay `stampede_jobs` / `stampede_claim`, as do the metric
-names and the notify channel: a table prefix is not a package name, Postgres
-has no registry namespace to collide in, and churning them would invalidate
-every code sample in these notes and every polyglot snippet people copy.
+### The rename went further than this file recommended
+
+This file argued for renaming the **crate, gem and binary only**, keeping
+`stampede_jobs` / `stampede_claim`, the metric names and the notify channel,
+on the grounds that a table prefix is not a package name and churning them
+would invalidate every code sample.
+
+**Overruled, deliberately, and the reasoning is worth keeping.** That argument
+is strong for a *published* project, where renaming SQL identifiers is a
+migration every user has to run. Nothing is published, so the cost it was
+protecting against does not exist yet — and it never gets cheaper than now.
+Against that, a package called `stampeded` whose tables are `stampede_jobs`
+is a seam every reader has to be told about, in a project whose whole claim is
+that the tables ARE the protocol. The identifiers people type are the API here;
+having the API disagree with the package name would be the confusing kind of
+consistency.
+
+So: package, binary, Rust crate, Ruby module, SQL identifiers, notify channels
+and `STAMPEDED_*` environment variables all moved together. 63 paths, ~110
+files. The one thing deliberately NOT renamed is the English word: the README
+still says the retry stampede "is what this is named for", which is the point
+of the name.
 
 ### RubyGems — `stampede`
 

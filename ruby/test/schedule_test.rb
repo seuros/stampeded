@@ -9,11 +9,11 @@ class NightlyJob < ActiveJob::Base
 end
 
 class ScheduleTest < Minitest::Test
-  include StampedeTest::Isolation
+  include StampededTest::Isolation
 
   def setup
     super
-    ActiveJob::Base.queue_adapter = ActiveJob::QueueAdapters::StampedeAdapter.new
+    ActiveJob::Base.queue_adapter = ActiveJob::QueueAdapters::StampededAdapter.new
     CRON_RAN.clear
   end
 
@@ -22,9 +22,9 @@ class ScheduleTest < Minitest::Test
     # it off the class gives "#<Proc:0x...>", which is a valid queue name that
     # no worker polls -- so the schedule fires forever into a queue nobody
     # reads, silently.
-    Stampede::Schedule.recurring(key: "n", job: NightlyJob, cron: "* * * * *")
+    Stampeded::Schedule.recurring(key: "n", job: NightlyJob, cron: "* * * * *")
 
-    queue = conn { |c| c.exec("SELECT queue FROM stampede_schedules")[0]["queue"] }
+    queue = conn { |c| c.exec("SELECT queue FROM stampeded_schedules")[0]["queue"] }
     refute_match(/Proc|lambda|0x/, queue, "queue name is a stringified lambda: #{queue}")
     assert_equal "default", queue
   end
@@ -33,9 +33,9 @@ class ScheduleTest < Minitest::Test
     # The bug this exists for: a schedule's args are copied VERBATIM onto every
     # firing, and the daemon has no idea what ActiveJob is. Storing plain args
     # made both occurrences discard as unrecoverable.
-    Stampede::Schedule.recurring(key: "nightly", job: NightlyJob, cron: "0 3 * * *", args: [42])
+    Stampeded::Schedule.recurring(key: "nightly", job: NightlyJob, cron: "0 3 * * *", args: [42])
 
-    row = conn { |c| c.exec("SELECT * FROM stampede_schedules WHERE key='nightly'")[0] }
+    row = conn { |c| c.exec("SELECT * FROM stampeded_schedules WHERE key='nightly'")[0] }
     payload = JSON.parse(row["args"])
 
     assert_equal "NightlyJob", payload["job_class"]
@@ -47,27 +47,27 @@ class ScheduleTest < Minitest::Test
   def test_the_payload_carries_no_job_id
     # Every occurrence would otherwise share one ActiveJob id, which makes logs
     # and any tracing built on job_id useless.
-    Stampede::Schedule.recurring(key: "n", job: NightlyJob, cron: "* * * * *")
+    Stampeded::Schedule.recurring(key: "n", job: NightlyJob, cron: "* * * * *")
 
-    payload = conn { |c| JSON.parse(c.exec("SELECT args FROM stampede_schedules")[0]["args"]) }
+    payload = conn { |c| JSON.parse(c.exec("SELECT args FROM stampeded_schedules")[0]["args"]) }
     assert_nil payload["job_id"]
   end
 
   def test_a_fired_occurrence_is_executed_by_the_worker
     # The end-to-end property: the scheduler (Rust, in production) enqueues from
     # the schedule row, and the Ruby worker must be able to run what comes out.
-    Stampede::Schedule.recurring(key: "n", job: NightlyJob, cron: "* * * * *", args: ["cron"])
-    conn { |c| c.exec("UPDATE stampede_schedules SET next_run_at = now() - interval '1 minute'") }
+    Stampeded::Schedule.recurring(key: "n", job: NightlyJob, cron: "* * * * *", args: ["cron"])
+    conn { |c| c.exec("UPDATE stampeded_schedules SET next_run_at = now() - interval '1 minute'") }
 
     # Fire it the way the daemon does.
     fired = conn do |c|
-      rows = c.exec("SELECT * FROM stampede_claim_due_schedules(10)")
-      rows.map { |r| c.exec_params("SELECT stampede_fire_schedule($1, now() + interval '1 hour')", [r["key"]]) }
+      rows = c.exec("SELECT * FROM stampeded_claim_due_schedules(10)")
+      rows.map { |r| c.exec_params("SELECT stampeded_fire_schedule($1, now() + interval '1 hour')", [r["key"]]) }
       rows.ntuples
     end
     assert_equal 1, fired
 
-    worker = Stampede::ActiveJobWorker.new(queue: "default", poll_interval: 0.05)
+    worker = Stampeded::ActiveJobWorker.new(queue: "default", poll_interval: 0.05)
     t = Thread.new { worker.run }
     deadline = Time.now + 10
     sleep 0.05 until !CRON_RAN.empty? || Time.now > deadline
@@ -81,34 +81,34 @@ class ScheduleTest < Minitest::Test
   end
 
   def test_the_job_id_is_filled_from_the_row_so_it_is_unique_per_occurrence
-    Stampede::Schedule.recurring(key: "n", job: NightlyJob, cron: "* * * * *")
-    conn { |c| c.exec("UPDATE stampede_schedules SET next_run_at = now() - interval '1 minute'") }
+    Stampeded::Schedule.recurring(key: "n", job: NightlyJob, cron: "* * * * *")
+    conn { |c| c.exec("UPDATE stampeded_schedules SET next_run_at = now() - interval '1 minute'") }
     conn do |c|
-      c.exec("SELECT * FROM stampede_claim_due_schedules(10)").each do |r|
-        c.exec_params("SELECT stampede_fire_schedule($1, now() + interval '1 hour')", [r["key"]])
+      c.exec("SELECT * FROM stampeded_claim_due_schedules(10)").each do |r|
+        c.exec_params("SELECT stampeded_fire_schedule($1, now() + interval '1 hour')", [r["key"]])
       end
     end
 
-    row = conn { |c| c.exec("SELECT id, args FROM stampede_jobs")[0] }
+    row = conn { |c| c.exec("SELECT id, args FROM stampeded_jobs")[0] }
     assert_nil JSON.parse(row["args"])["job_id"], "stored payload has none"
 
     # The worker fills it in, which also ties the ActiveJob id to the row id.
-    job = Stampede::Job.new(row)
+    job = Stampeded::Job.new(row)
     assert_equal row["id"], job.id
   end
 
   def test_pause_and_remove
-    Stampede::Schedule.recurring(key: "n", job: NightlyJob, cron: "* * * * *")
-    Stampede::Schedule.pause("n")
-    assert_equal "t", conn { |c| c.exec("SELECT paused FROM stampede_schedules")[0]["paused"] }
+    Stampeded::Schedule.recurring(key: "n", job: NightlyJob, cron: "* * * * *")
+    Stampeded::Schedule.pause("n")
+    assert_equal "t", conn { |c| c.exec("SELECT paused FROM stampeded_schedules")[0]["paused"] }
 
-    Stampede::Schedule.remove("n")
-    assert_empty Stampede::Schedule.all
+    Stampeded::Schedule.remove("n")
+    assert_empty Stampeded::Schedule.all
   end
 end
 
 class ScheduleValidationTest < Minitest::Test
-  include StampedeTest::Isolation
+  include StampededTest::Isolation
 
   def test_an_unparseable_cron_expression_is_refused_at_write_time
     # The Rust side validated on write; Ruby did not. So `cron: "garbage"` was
@@ -116,32 +116,32 @@ class ScheduleValidationTest < Minitest::Test
     # warning, leaves the row due, and repeats that every tick FOREVER. A
     # schedule that never runs plus a log line every five seconds, and nothing
     # pointing at the typo that caused it.
-    error = assert_raises(Stampede::Error) do
-      Stampede::Schedule.recurring(key: "bad", job: NightlyJob, cron: "garbage")
+    error = assert_raises(Stampeded::Error) do
+      Stampeded::Schedule.recurring(key: "bad", job: NightlyJob, cron: "garbage")
     end
     assert_match(/Five fields are required/, error.message)
 
-    assert_raises(Stampede::Error) do
-      Stampede::Schedule.recurring(key: "bad", job: NightlyJob, cron: "0 3 * *")
+    assert_raises(Stampeded::Error) do
+      Stampeded::Schedule.recurring(key: "bad", job: NightlyJob, cron: "0 3 * *")
     end
 
-    assert_empty Stampede::Schedule.all, "nothing may be created"
+    assert_empty Stampeded::Schedule.all, "nothing may be created"
   end
 
   def test_real_expressions_still_work
     # A shape check that rejected valid cron would be worse than none.
     ["0 3 * * *", "*/15 * * * *", "0 9-17 * * mon-fri", "0 0 1,15 * *", "* * * * *"].each do |expr|
-      Stampede::Schedule.remove("ok")
-      Stampede::Schedule.recurring(key: "ok", job: NightlyJob, cron: expr)
+      Stampeded::Schedule.remove("ok")
+      Stampeded::Schedule.recurring(key: "ok", job: NightlyJob, cron: expr)
     end
   end
 
   def test_a_schedule_needs_a_key
-    assert_raises(Stampede::Error) do
-      Stampede::Schedule.recurring(key: "", job: NightlyJob, cron: "* * * * *")
+    assert_raises(Stampeded::Error) do
+      Stampeded::Schedule.recurring(key: "", job: NightlyJob, cron: "* * * * *")
     end
-    assert_raises(Stampede::Error) do
-      Stampede::Schedule.recurring(key: "  ", job: NightlyJob, cron: "* * * * *")
+    assert_raises(Stampeded::Error) do
+      Stampeded::Schedule.recurring(key: "  ", job: NightlyJob, cron: "* * * * *")
     end
   end
 end

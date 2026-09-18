@@ -1,27 +1,27 @@
-# stampede (Ruby)
+# stampeded (Ruby)
 
-Rails integration for [Stampede](https://github.com/seuros/stampede): an
+Rails integration for [Stampeded](https://github.com/seuros/stampeded): an
 ActiveJob adapter, a worker, and a launcher for the precompiled daemon.
 
 ```ruby
-gem "stampede"
-gem "stampede-daemon"   # optional: the precompiled binary
+gem "stampeded"
+gem "stampeded-daemon"   # optional: the precompiled binary
 ```
 
 ```ruby
 # config/application.rb
-config.active_job.queue_adapter = :stampede
+config.active_job.queue_adapter = :stampeded
 ```
 
 ```bash
-bin/rails stampede:install   # apply the schema (Postgres 18+)
-bin/rails stampede:work      # run a worker
-bin/rails stampede:daemon    # scheduler, reaper, pruner, dashboard
+bin/rails stampeded:install   # apply the schema (Postgres 18+)
+bin/rails stampeded:work      # run a worker
+bin/rails stampeded:daemon    # scheduler, reaper, pruner, dashboard
 ```
 
 ## Two processes, and why
 
-`bin/rails stampede:work` runs your jobs. `bin/rails stampede:daemon` runs
+`bin/rails stampeded:work` runs your jobs. `bin/rails stampeded:daemon` runs
 everything else — scheduler, reaper, pruner, expirer, health checks, HTTP API,
 dashboard.
 
@@ -68,22 +68,22 @@ do.
 
 ```ruby
 class ChargeCard < ApplicationJob
-  retry_on Net::OpenTimeout   # => Stampede::RetryConflict
+  retry_on Net::OpenTimeout   # => Stampeded::RetryConflict
 end
 ```
 
-ActiveJob's `retry_on` re-enqueues the job as a **new row**. Stampede counts
+ActiveJob's `retry_on` re-enqueues the job as a **new row**. Stampeded counts
 attempts **at claim** — that is what stops a job which kills its worker from
 retrying forever. With both active, `retry_on attempts: 5` inside a job with
 `max_attempts: 25` can run 125 times, and every row reports `attempt 1`, so the
 dashboard, the metrics and `failure_summary` all lie.
 
 It raises at class-load rather than warning, because a warning gets filtered
-out of production logs. Let Stampede own retries instead:
+out of production logs. Let Stampeded own retries instead:
 
 ```ruby
 class ChargeCard < ApplicationJob
-  stampede max_attempts: 5,
+  stampeded max_attempts: 5,
            destination: "stripe.com",        # keys the circuit breaker
            dead_letter_queue: "payments_dlq",
            expire_seconds: 120                # enforced by the database
@@ -96,7 +96,7 @@ us, so the job simply completes.
 ## Recurring jobs
 
 ```ruby
-Stampede::Schedule.recurring(
+Stampeded::Schedule.recurring(
   key:  "nightly-report",
   job:  ReportJob,
   cron: "0 3 * * *",
@@ -124,7 +124,7 @@ smaller pool each — the same advice Sidekiq gives. solid_queue forks instead
 and pays for a supervisor process.
 
 ```bash
-QUEUE=mail CONCURRENCY=10 bin/rails stampede:work
+QUEUE=mail CONCURRENCY=10 bin/rails stampeded:work
 ```
 
 A `SIGTERM` drains: in-flight jobs are allowed to finish and report their own
@@ -135,30 +135,30 @@ which is correct — from the queue's point of view the process did die on them.
 ## Without Rails
 
 ```ruby
-Stampede.config.database_url = ENV["DATABASE_URL"]
+Stampeded.config.database_url = ENV["DATABASE_URL"]
 
-Stampede.enqueue(queue: "mail", task: "welcome", args: { user_id: 42 })
+Stampeded.enqueue(queue: "mail", task: "welcome", args: { user_id: 42 })
 
-worker = Stampede::Worker.new(queue: "mail")
+worker = Stampeded::Worker.new(queue: "mail")
 worker.register("welcome") { |job| Mailer.welcome(job.args["user_id"]).deliver_now }
 worker.run
 ```
 
 ## The daemon binary
 
-`stampede-daemon` ships one precompiled binary per platform. For a platform
+`stampeded-daemon` ships one precompiled binary per platform. For a platform
 that has no gem, build it and point at it:
 
 ```bash
 cargo build --release
-export STAMPEDE_INSTALL_DIR=/path/to/stampede/target/release
+export STAMPEDED_INSTALL_DIR=/path/to/stampeded/target/release
 ```
 
 ## Tests
 
 ```bash
-createdb stampede_test
-STAMPEDE_TEST_DATABASE_URL=postgres://localhost/stampede_test bundle exec rake test
+createdb stampeded_test
+STAMPEDED_TEST_DATABASE_URL=postgres://localhost/stampeded_test bundle exec rake test
 ```
 
 Each test class gets its own Postgres schema, so these run alongside the Rust
