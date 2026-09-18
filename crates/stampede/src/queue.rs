@@ -571,6 +571,26 @@ impl Queue {
         Ok(rows)
     }
 
+    /// Partitions that would enqueue silently.
+    ///
+    /// The wakeup trigger is statement-level with a transition table, and
+    /// Postgres does not clone those to partitions -- so a partition created
+    /// with a raw `CREATE TABLE ... PARTITION OF` instead of
+    /// `stampede_create_queue` has no trigger and notifies nobody.
+    ///
+    /// Worth surfacing because the symptom is silence rather than failure:
+    /// jobs in that queue are still claimed correctly, just on the poll
+    /// interval, so latency quietly becomes seconds for one queue and nothing
+    /// anywhere says why.
+    pub async fn partitions_without_wakeup(&self) -> Result<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT partition FROM stampede_partition_health() WHERE NOT has_notify",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|(n,)| n).collect())
+    }
+
     /// Indexes sparse enough to be worth rebuilding.
     ///
     /// Measured, not scheduled. River rebuilds everything at midnight; this

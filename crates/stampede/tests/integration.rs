@@ -2494,3 +2494,39 @@ async fn backoff_can_be_set_when_enqueuing() {
             .unwrap();
     assert_eq!(base, i16::MAX, "an over-range base must clamp, not explode");
 }
+
+/// A partition created outside `stampede_create_queue` cannot wake anybody,
+/// and that must be detectable.
+///
+/// The wakeup trigger is `FOR EACH STATEMENT` with a transition table.
+/// Postgres does NOT clone statement-level triggers to partitions -- verified
+/// on 18.6, a raw `CREATE TABLE ... PARTITION OF` gets zero triggers and an
+/// INSERT into it notifies nobody. (Row-level triggers ARE cloned, including
+/// to partitions created later, but a row-level wakeup costs +3.5% per row
+/// against +1.2% for the statement form, which is why the statement form was
+/// chosen.)
+///
+/// So the hole is structural and cannot be closed by inheritance. What makes
+/// it dangerous is that it is SILENT: jobs in that queue are still claimed
+/// correctly, just on the poll interval. Nothing fails; one queue is simply
+/// slow, for ever.
+#[tokio::test]
+async fn a_partition_without_the_wakeup_trigger_is_detected() {
+    let q = q!();
+
+    // Every partition made the supported way is covered.
+    assert!(
+        q.partitions_without_wakeup().await.unwrap().is_empty(),
+        "stampede_create_queue must always attach the trigger"
+    );
+
+    // The unsupported way.
+    sqlx::query("CREATE TABLE stampede_jobs_silent PARTITION OF stampede_jobs FOR VALUES IN ('silent')")
+        .execute(q.pool())
+        .await
+        .unwrap();
+
+    let silent = q.partitions_without_wakeup().await.unwrap();
+
+    assert_eq!(silent, vec!["stampede_jobs_silent".to_string()]);
+}

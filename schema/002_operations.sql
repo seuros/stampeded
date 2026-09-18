@@ -677,3 +677,62 @@ CREATE FUNCTION stampede_heartbeat(p_worker_id uuid) RETURNS void
 LANGUAGE sql AS $$
     UPDATE stampede_workers SET last_heartbeat = now() WHERE id = p_worker_id;
 $$;
+
+-- ---------------------------------------------------------------------------
+-- Partitions that would enqueue silently.
+--
+-- The wakeup trigger is FOR EACH STATEMENT with a transition table, and
+-- Postgres does NOT clone statement-level triggers to partitions -- verified
+-- on 18.6: a `CREATE TABLE ... PARTITION OF stampede_jobs` gets zero triggers,
+-- and an INSERT straight into it notifies nobody. (Row-level triggers ARE
+-- cloned, including to partitions created later, but a row-level wakeup costs
+-- +3.5% per row against +1.2% for the statement form -- measured in plans/12 --
+-- which is why the statement trigger was chosen.)
+--
+-- `stampede_create_queue` attaches the trigger, so every partition made the
+-- supported way is covered. This catches the unsupported way. The symptom it
+-- prevents is nasty and quiet: jobs enqueued into that queue are CORRECT and
+-- claimed on the poll interval, so nothing breaks -- latency just silently
+-- becomes seconds instead of milliseconds, for one queue, for ever.
+--
+-- Detection rather than prevention, deliberately. An event trigger could
+-- enforce it, at the cost of more plpgsql running on every DDL statement in
+-- the database (03-postgres18 resists exactly that), to stop a mistake this
+-- reports in one query.
+CREATE FUNCTION stampede_partition_health()
+RETURNS TABLE (
+    partition      text,
+    queue          text,
+    has_notify     boolean,
+    has_counts     boolean
+)
+LANGUAGE sql STABLE AS $$
+    SELECT c.relname::text,
+           -- The bound is `FOR VALUES IN ('name')`; pull the queue name back
+           -- out rather than assuming the table is named for its queue.
+           --
+           -- stampede_jobs_default is the DEFAULT partition, not a partition
+           -- for a queue called "default" -- it catches every queue that has
+           -- none of its own. Labelling it "default" would be wrong in the
+           -- confusing direction: it would read as one queue among many when
+           -- it is the fallback for all of them.
+           coalesce(
+               substring(pg_get_expr(c.relpartbound, c.oid) from $re$FOR VALUES IN \('(.*)'\)$re$),
+               CASE WHEN pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT'
+                    THEN '(catch-all for queues with no partition)'
+                    ELSE c.relname::text END
+           ),
+           EXISTS (SELECT 1 FROM pg_trigger t
+                    WHERE t.tgrelid = c.oid AND NOT t.tgisinternal
+                      AND t.tgname = 'stampede_notify_insert_trg'),
+           EXISTS (SELECT 1 FROM pg_trigger t
+                    WHERE t.tgrelid = c.oid AND NOT t.tgisinternal
+                      AND t.tgname = 'stampede_count_ins_trg')
+      FROM pg_class c
+      JOIN pg_inherits i ON i.inhrelid = c.oid
+      JOIN pg_class p ON p.oid = i.inhparent
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE p.relname = 'stampede_jobs'
+       AND n.nspname = current_schema()
+     ORDER BY 1;
+$$;

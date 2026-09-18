@@ -666,6 +666,22 @@ async fn render_health(state: &ApiState) -> Option<String> {
         html.push_str("</table>");
     }
 
+    // Partitions that cannot wake anybody. Not an error -- those queues still
+    // work -- but the symptom is silence: latency quietly becomes the poll
+    // interval for one queue, and nothing else would ever say why.
+    if let Ok(silent) = state.queue.partitions_without_wakeup().await {
+        if !silent.is_empty() {
+            html.push_str(r#"<h2 class="warn">partitions without a wakeup trigger</h2><table>"#);
+            for p in &silent {
+                html.push_str(&format!(
+                    r#"<tr><td>{}</td><td class="dim">created outside stampede_create_queue; jobs here are polled, not woken</td></tr>"#,
+                    esc(p)
+                ));
+            }
+            html.push_str("</table>");
+        }
+    }
+
     html.push_str(r#"<h2>workers</h2><table><tr><th>worker</th><th class="n">heartbeat</th></tr>"#);
     if workers.is_empty() {
         html.push_str(r#"<tr><td colspan="2" class="dim">none registered</td></tr>"#);

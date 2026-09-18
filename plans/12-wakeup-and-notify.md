@@ -1206,12 +1206,34 @@ worker-side code is identical. Record it so the option is not forgotten.
   taking seriously" above. Needs a herd measurement at realistic worker counts
   before it can be closed either way, and that measurement does not exist because
   nothing is built.
-- **Direct-to-partition inserts are unenforceable.** Trigger-on-every-partition
-  closes today's hole, but a partition added later without the trigger reopens it
-  silently. Options: a `CREATE TABLE ... PARTITION OF` convention enforced by a
-  migration test, an event trigger (more plpgsql, which `03-postgres18.md:88-90`
-  resists), or accept it and rely on the poll floor. Unresolved, and it belongs
-  in `13-retention-and-bloat.md` as much as here.
+- ~~**Direct-to-partition inserts are unenforceable.**~~ **Confirmed
+  unenforceable-by-inheritance, and now DETECTED.** Verified on 18.6, which
+  also settles the mechanism the entry left implicit:
+
+  | trigger kind | cloned to partitions? |
+  |---|---|
+  | `FOR EACH STATEMENT` + `REFERENCING NEW TABLE` (ours) | **no** |
+  | `FOR EACH ROW` | **yes**, including partitions created later |
+
+  A raw `CREATE TABLE ... PARTITION OF stampede_jobs` gets **zero** triggers,
+  and an INSERT straight into it notifies nobody — tested with a real listener.
+  So the hole is structural: it cannot be closed by inheritance without moving
+  to a row-level trigger, which costs +3.5% per row against +1.2% for the
+  statement form (measured above) — paying a permanent throughput tax to
+  prevent a mistake that has to be made by hand.
+
+  The third option in the entry ("accept it and rely on the poll floor") was
+  closest, but incomplete: accepting it silently is what makes it dangerous.
+  The symptom is not failure, it is **silence** — jobs in that queue are still
+  claimed correctly, just on the poll interval, so one queue is quietly slow
+  for ever and nothing says why.
+
+  `stampede_partition_health()` reports every partition and whether it carries
+  the notify and counter triggers; the dashboard health panel shows any that do
+  not, saying what it means. Detection rather than the event trigger, because
+  an event trigger runs plpgsql on every DDL statement in the database
+  (`03-postgres18.md:88-90` resists exactly that) to prevent something one
+  query reports.
 - **Channel-per-queue vs payload-per-queue.** procrastinate puts the queue name
   in the channel (`schema.sql:411`), so uninterested workers are never woken at
   the OS level; we put it in the payload, so they wake and discard. Channel-per-
