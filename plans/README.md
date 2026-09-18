@@ -122,8 +122,32 @@ settled by whichever migration gets written first.
 
 ## Status
 
-Design only. No code written. Nothing in `~/Projects/ecosystem/stampede/`
-except these notes.
+**Built.** These notes are now design RATIONALE rather than a plan: every
+recommendation in them is implemented, and where implementation contradicted a
+note the note says so inline. The code is the source of truth; this directory
+explains why it is shaped that way, which is the part that does not survive in
+a diff.
+
+Things that changed once they met a real database, all corrected in place:
+
+- `13-retention-and-bloat.md` recommends `PARTITION BY LIST (state)`. It is
+  partitioned by QUEUE — see §1 of the RESOLVED section above, which supersedes
+  it. The consequence that file warns about (no state-based pruning, so the
+  pruner and autovacuum carry the whole load) is real and is why the vacuum
+  detector shipped.
+- `11-scheduling-and-cron.md` said a spring-forward job should be skipped under
+  `wall_clock`. It fires at the end of the gap instead — jiff's `Compatible`,
+  and Vixie cron's behaviour. Skipping silently loses one run a year.
+- The `sha256(convert_to(...))` expression in `10-unique-jobs.md` cannot be used
+  at all (`convert_to` is STABLE). Noted there; the schema uses `::bytea`.
+- The dedup time bucket needed three separate immutability facts that none of
+  the notes had: two-argument `date_trunc` is STABLE, the three-argument form is
+  IMMUTABLE, and `timestamptz::text` is STABLE again. See the comment on
+  `dedup_key`.
 
 Reference implementations: `~/Projects/ecosystem/reference/`
+
 Our crates: `~/Projects/ecosystem/{state-machines-rs,chrono_machines,breaker_machines,throttle_machines}`
+— all four are now used: `state-machines` for the lifecycle transition table,
+`chrono-machines` for backoff, `breaker-machines` per destination, and
+`throttle-machines` for both tenant fairness and wakeup pacing.

@@ -391,7 +391,14 @@ Default: `wall_clock` when the cron expression constrains the hours field,
 `instant` otherwise. One column, one index, no branching in the firing path.
 
 Spring-forward is the easier half: fire once, at the instant the gap ends, and
-record that real instant. This is what `java.time` does for db-scheduler
+record that real instant.
+
+> **CORRECTED IN IMPLEMENTATION.** An earlier line in this file, and the first
+> draft of the schema comment, said `wall_clock` should SKIP a spring-forward
+> occurrence. It does not: skipping silently loses one run a year, and a daily
+> report that does not happen on one day in March is worse than one that happens
+> an hour late. This paragraph is what shipped, and it is exactly jiff's
+> `Compatible` disambiguation, which is also Vixie cron's behaviour. This is what `java.time` does for db-scheduler
 (`Daily.java:67`) and what jiff's `Compatible` disambiguation does for underway.
 Oban skips the day entirely (`expression.ex:91-99`); that is worse and avoidable.
 

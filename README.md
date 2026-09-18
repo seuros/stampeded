@@ -3,9 +3,10 @@
 A polyglot job processor. Rust core, Postgres 18+ substrate, Datastar dashboard,
 MCP control plane. BSD-3.
 
-**Status: working end to end.** Schema, worker, daemon, HTTP edge, live
-dashboard and MCP control plane are built and verified against Postgres 18.
-Not yet production-hardened — see *Not done yet* below.
+**Status: working end to end, and every design decision in `plans/` is
+implemented.** Verified against Postgres 18 with 141 tests, including
+integration tests against a real database and wire-level tests against a real
+server. Not yet load-tested at scale — see *Not done yet* below.
 
 ## Why
 
@@ -70,6 +71,18 @@ measured in one of them:
   thirteen make that distinction, and it is what makes a poison job diagnosable.
 - **Retry delays are delays, not timestamps**, so retry timing does not depend on
   the app server's clock agreeing with the database's. (`plans/15`)
+- **Our own backpressure does not burn retries.** When a circuit is open or a
+  tenant is throttled, the attempt spent at claim is *refunded*. Without that, a
+  long enough downstream outage walks every queued job's budget down and
+  discards the whole backlog instead of replaying it. (`plans/15`)
+- **Two budgets, not one.** `attempt` counts raises; `interruptions` counts
+  worker deaths, defaulting to one free. A job that segfaults its worker stops
+  after the second claim instead of walking twenty-five workers down.
+- **Failures cluster by fingerprint**, with numbers, UUIDs and hex stripped
+  before hashing — so "timed out after 30012ms" and "timed out after 29998ms"
+  are one incident rather than two. Nobody else does this, and it is the
+  difference between a failure summary being useful during an incident and
+  being a list. (`plans/15`)
 
 ## Running it
 
@@ -83,7 +96,10 @@ That single process runs the worker, the reaper, the pruner, the HTTP API and
 the dashboard. Split them later by running the same binary with different flags
 (`--no-worker`, `--no-maintenance`) — there is no second binary to deploy.
 
-- **dashboard** — <http://127.0.0.1:7878/dashboard>, live over SSE
+- **dashboard** — <http://127.0.0.1:7878/dashboard>, live over SSE.
+  **Off unless you pass `--dashboard-token`**, deliberately: a job dashboard
+  exposes customer data in job args and offers a retry button, and opt-in auth
+  is how dashboards end up open on production.
 - **MCP** — `stampede-mcp` over stdio; point any MCP client at it
 - **API** — for callers that cannot hold a Postgres connection (browsers, edge
   functions, third parties). Everyone else should just `INSERT`.
@@ -106,11 +122,16 @@ Rust handlers are registered in-process
 plans/     design notes — what was measured, and why each decision was made
 schema/    001_initial, 002_operations, 003_schedules  (PG18+ only)
 crates/
-  stampede-core     worker, queue, job types, maintenance loops
+  stampede-core     worker, queue, lifecycle, cron, wakeup, maintenance, metrics
   stampede-daemon   the `stampede` binary
   stampede-http     enqueue API + Datastar dashboard, on rama
   stampede-mcp      MCP control plane, on mcp-host
 ```
+
+All four `*-machines` crates are load-bearing: `state-machines` holds the
+lifecycle transition table, `chrono-machines` the backoff, `breaker-machines` a
+circuit per destination, and `throttle-machines` both tenant fairness and
+wakeup pacing.
 
 ## MCP control plane
 
@@ -192,14 +213,45 @@ the handler, and the job is recorded `interrupted` rather than `raised` — a si
 dependency is not a defect in the job, and conflating them would make one outage
 look like a thousand broken jobs.
 
+## Operational visibility
+
+Three things degrade a Postgres queue without ever raising an error, and all
+three are surfaced on the dashboard and through the `system_health` MCP tool:
+
+- **Autovacuum falling behind.** A queue table is the pathological case —
+  constant `UPDATE`s over a small hot set. When vacuum falls behind, nothing
+  fails; things just get slower, which presents as "the queue is mysteriously
+  slow" and sends people reading their job code. Stampede compares dead tuples
+  against the threshold autovacuum will *actually* use for that table, from its
+  own reloptions. (pg-boss's `#checkVacuum`, which `plans/13` rates the most
+  valuable operational feature in the survey.)
+- **Notifications being eaten.** PgBouncer in transaction mode silently drops
+  `LISTEN`, and the queue then runs one poll interval late, forever. A sonar
+  probe notifies our own daemon and checks it comes back.
+- **Backlog age.** Depth says how much work there is; age says whether it is
+  being *done*. 10,000 jobs with an oldest age of two seconds is healthy; three
+  jobs aged an hour is broken, and depth alone makes the second look quieter.
+
+**No unbounded aggregates.** `SELECT count(*) … GROUP BY state` over the job
+table looks harmless and is pg-boss's documented death spiral: the aggregate
+holds the xmin horizon, vacuum cannot reclaim below it, the table bloats, the
+aggregate slows, and it holds the horizon longer. Depth comes from a counter
+table maintained by statement-level triggers, because the dashboard runs it
+every second.
+
 ## Not done yet
 
 - Batched `UNWIND` writes — deliberately deferred, see `plans/14`
 - Daemon-mediated polyglot workers (claim handed out over HTTP/SSE, for workers
   across a trust boundary). The SQL-function path above covers in-cluster
   workers, which is the common case.
-- Not production-hardened: no load testing at scale, no TLS on the HTTP edge,
-  no auth on the API — put it behind something that has both.
+- **Not load-tested at scale.** Every design decision here is informed by
+  measurements against a real Postgres 18, but nothing has been run at
+  production volume for a sustained period. The autovacuum numbers in
+  particular are Oban's, adopted as a starting point, and `plans/13` flags them
+  as "to be measured, not a result".
+- No TLS on the HTTP edge and no auth on the enqueue API — put it behind
+  something that has both. The *dashboard* is authenticated and off by default.
 
 ## Requirements
 
@@ -214,9 +266,15 @@ createdb stampede_test
 STAMPEDE_TEST_DATABASE_URL=postgres://localhost/stampede_test cargo test
 ```
 
-With the env var set that is 88 tests: unit, integration against real Postgres,
-and wire-level tests that run a real server on an ephemeral port. Integration
-tests run in parallel, each in its own schema.
+With the env var set that is 141 tests: unit, integration against real
+Postgres, and wire-level tests that run a real server on an ephemeral port.
+Integration tests run in parallel, each in its own schema.
+
+The integration tests are worth reading as documentation of the awkward cases:
+a breaker trip refunding an attempt, a job that kills workers being discarded
+by the *interruptions* budget long before `max_attempts`, a rescheduled job not
+vacating its own dedup window, a bulk insert of 500 rows producing exactly one
+notification, and both DST transitions against `America/New_York`.
 
 ## Licence
 

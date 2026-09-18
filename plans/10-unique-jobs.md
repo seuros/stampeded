@@ -542,6 +542,16 @@ job is unique is no longer visible in the schema.** It lives in Rust. That is
 the same trade `04-job-lifecycle-and-claiming.md` already made for lifecycle
 ("lifecycle stays authoritative in Rust"), so at least it is consistent.
 
+> **IMPLEMENTATION NOTE.** The bucket is implemented, and needed three
+> immutability facts none of the analysis above had. `date_trunc(text,
+> timestamptz)` is STABLE (it reads the session TimeZone); the three-argument
+> `date_trunc(text, timestamptz, text)` with an explicit zone IS immutable; and
+> casting a `timestamptz` to text is STABLE again, via DateStyle. So the
+> truncated time cannot simply be concatenated — it is turned into a number by
+> subtracting the epoch, which yields an interval, and `extract` on an INTERVAL
+> is immutable. Postgres reports any of these as just "generation expression is
+> not immutable", with no indication of which sub-expression is at fault.
+
 **Time windows: bucket, and say so.** `dedup_scope` is text the client composes,
 so the bucket is the client's to include — but that reintroduces clock skew
 between enqueuers, which pg-boss deliberately avoids by computing the slot
