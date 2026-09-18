@@ -32,6 +32,22 @@ it with string literals scattered across the codebase. Making transitions
 type-checked, with guards, is a real advantage — illegal transitions become
 compile errors instead of a production incident.
 
+> **IMPLEMENTED, in both languages.** `crates/stampede/src/lifecycle.rs` uses
+> `state-machines` (dynamic mode — a job arrives as a database row carrying its
+> state as text, so the state is not known at compile time and cannot be a type
+> parameter). `ruby/lib/stampede/lifecycle.rb` uses the `state_machines` gem to
+> declare the same table.
+>
+> The Ruby side spent a while as exactly the thing this paragraph criticises —
+> `def state = row["state"]` and string comparisons — which is worth recording,
+> because writing the criticism did not stop me doing it.
+>
+> SQL remains authoritative: a polyglot worker calls the functions directly and
+> loads neither file. Both machines are used to VERIFY what the database
+> reported, so drift between `002_operations.sql` and the declared table is
+> logged rather than discovered from a customer. A test parses the Rust
+> declaration and asserts the Ruby one matches it, event by event.
+
 Pairs with PG18 `RETURNING OLD./NEW.`, which hands the guard the before and
 after state atomically in one statement. See `03-postgres18.md`.
 

@@ -137,23 +137,47 @@ module Stampede
       Connection.own do |c|
         case outcome
         when :complete
-          c.exec_params("SELECT * FROM stampede_complete($1, $2, $3)", [job.queue, job.id, worker_id])
+          r = c.exec_params("SELECT * FROM stampede_complete($1, $2, $3)",
+                            [job.queue, job.id, worker_id])
+          verify_transition(r, :complete)
         when :fail
           kind = failure_kind_for(error)
           # The retry DELAY is computed by the database, not here: passing an
           # absolute timestamp would make retry timing depend on this box's
           # clock agreeing with the database's.
           delay = kind == "unrecoverable" ? nil : backoff_ms(job)
-          c.exec_params(
+          r = c.exec_params(
             "SELECT * FROM stampede_fail($1, $2, $3, $4, $5, $6, $7)",
             [job.queue, job.id, worker_id, kind, error.message.to_s[0, 4000], delay, nil]
           )
+          # Which transition SQL should have made depends on whether there was
+          # budget left, and SQL decides that -- so check against what it
+          # reported rather than against what we guessed.
+          verify_transition(r, r.ntuples.positive? && r[0]["now_state"] == "discarded" ? :discard : :retry)
         end
       end
     rescue PG::Error => e
       # Losing the report is survivable: the reaper reclaims the job once this
       # worker stops heartbeating. Losing the WORKER over it is not.
       log "could not report #{outcome} for #{job.id}: #{e.message}"
+    end
+
+    # Check what SQL actually did against the declared lifecycle.
+    #
+    # It cannot prevent anything -- SQL is authoritative and a polyglot worker
+    # never runs this code. It exists to make drift LOUD: if a WHERE clause is
+    # edited and starts permitting a transition Lifecycle forbids, the
+    # alternative to this warning is finding out from a customer.
+    def verify_transition(result, event)
+      return if result.ntuples.zero?
+
+      was = result[0]["was"]
+      now = result[0]["now_state"]
+      return if was.nil? || now.nil?
+      return if Lifecycle.verify(was, now, event)
+
+      log "DRIFT: the database did #{was} -> #{now} on #{event}, which lifecycle.rb " \
+          "does not declare. schema/002_operations.sql and the state machine disagree."
     end
 
     def failure_kind_for(error)

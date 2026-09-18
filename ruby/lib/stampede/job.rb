@@ -27,6 +27,21 @@ module Stampede
     def queue    = row["queue"]
     def task     = row["task"]
     def state    = row["state"]
+
+    # State questions go through the declared lifecycle rather than comparing
+    # strings. `job.retryable?`, `job.terminal?`, `job.claimable?` and friends
+    # all come from one declaration that mirrors the Rust worker's.
+    def lifecycle = @lifecycle ||= Lifecycle.new(state)
+
+    def terminal?  = lifecycle.terminal?
+    def claimable? = lifecycle.claimable?
+
+    Lifecycle::STATES.each do |s|
+      define_method(:"#{s}?") { state.to_s == s.to_s }
+    end
+
+    # What this job may legally do next.
+    def available_events = Lifecycle.events_from(state)
     def attempt  = row["attempt"].to_i
     def max_attempts = row["max_attempts"].to_i
     def interruptions = row["interruptions"].to_i

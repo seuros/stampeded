@@ -27,6 +27,9 @@ Gem::Specification.new do |spec|
   spec.require_paths = ["lib"]
 
   spec.add_dependency "pg", ">= 1.4"
+  # The lifecycle is declared, not compared against string literals. Mirrors
+  # crates/stampede/src/lifecycle.rs so the two workers cannot disagree.
+  spec.add_dependency "state_machines", ">= 0.100"
 
   spec.metadata["source_code_uri"] = spec.homepage
   spec.metadata["rubygems_mfa_required"] = "true"
