@@ -193,6 +193,23 @@ async fn enqueue(
     State(state): State<ApiState>,
     JsonBody(body): JsonBody<EnqueueRequest>,
 ) -> impl IntoResponse {
+    // Refused here as well as by the CHECK, so the caller gets an explanation
+    // rather than a constraint-violation string.
+    if let Some(m) = body.max_attempts
+        && m < 1
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "max_attempts must be at least 1: the claim predicate is \
+                        `attempt < max_attempts`, so 0 would make the job \
+                        permanently unclaimable"
+                    .into(),
+            }),
+        )
+            .into_response();
+    }
+
     let mut job = NewJob::new(body.queue, body.task).args(body.args);
     if let Some(t) = body.tenant_id {
         job = job.tenant(t);

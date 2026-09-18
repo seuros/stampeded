@@ -49,7 +49,20 @@ CREATE TABLE stampede_jobs (
     task            text        NOT NULL,
     -- jsonb not bytea: inspectable in psql and searchable from the MCP control
     -- plane (plans/06). An opaque payload would gut `job_search`.
-    args            jsonb       NOT NULL DEFAULT '{}'::jsonb,
+    --
+    -- BOUNDED AT 1 MB, generously. Postgres will happily TOAST a huge value
+    -- out of line, so the row stays small -- but `stampede_claim` returns
+    -- `stampede_jobs.*`, which detoasts it on every single claim. Someone
+    -- stuffing a PDF in here would move megabytes per claim through a query
+    -- that is otherwise a few hundred bytes, on the hot path this whole schema
+    -- is shaped around (plans/13).
+    --
+    -- 1 MB is far above any sane payload and far below a file. The guidance is
+    -- the usual one: pass an id, not an object. Enforced in SQL rather than in
+    -- the client because it is the only bound that survives a polyglot
+    -- enqueuer.
+    args            jsonb       NOT NULL DEFAULT '{}'::jsonb
+                                CHECK (pg_column_size(args) <= 1048576),
 
     state           text        NOT NULL DEFAULT 'available',
     priority        smallint    NOT NULL DEFAULT 0,
@@ -79,7 +92,12 @@ CREATE TABLE stampede_jobs (
     -- advances when the worker survives to report, a job that segfaults its
     -- worker is re-claimed forever and max_attempts is never reached.
     attempt         smallint    NOT NULL DEFAULT 0,
-    max_attempts    smallint    NOT NULL DEFAULT 25,
+    -- MUST BE AT LEAST 1. The claim predicate is `attempt < max_attempts`, so
+    -- a job with max_attempts = 0 can never be claimed: it sits in `available`
+    -- forever, counts toward depth, and nothing ever runs it or reports why.
+    -- The API accepted it happily until a fuzz of the enqueue endpoint found
+    -- the black hole.
+    max_attempts    smallint    NOT NULL DEFAULT 25 CHECK (max_attempts >= 1),
     -- Bounded ring, trimmed on write (River's trick). Unbounded attempt history
     -- is a slow leak on heavily-retried jobs.
     attempted_by    text[]      NOT NULL DEFAULT '{}',

@@ -2122,3 +2122,50 @@ async fn concurrent_schedulers_fire_an_occurrence_exactly_once() {
         .unwrap();
     assert_eq!(jobs, 1);
 }
+
+#[tokio::test]
+async fn a_job_that_could_never_run_is_refused() {
+    // THE BLACK HOLE, found by fuzzing the enqueue endpoint. The claim
+    // predicate is `attempt < max_attempts`, so max_attempts = 0 makes a job
+    // permanently unclaimable: it sits in `available` forever, counts toward
+    // depth, and nothing ever runs it or reports why. The API accepted it
+    // happily.
+    let q = q!();
+
+    let err = q
+        .enqueue(NewJob::new("default", "doomed").max_attempts(0))
+        .await;
+    assert!(err.is_err(), "a job that can never be claimed must not be creatable");
+
+    // One is fine: it gets exactly one shot.
+    let id = q
+        .enqueue(NewJob::new("default", "one_shot").max_attempts(1))
+        .await
+        .unwrap()
+        .unwrap();
+    let w = q.register_worker("h", 1, &["default".into()]).await.unwrap();
+    assert_eq!(q.claim("default", w, 5).await.unwrap().len(), 1);
+    let _ = id;
+}
+
+#[tokio::test]
+async fn an_absurdly_large_payload_is_refused() {
+    // Postgres TOASTs a huge value out of line so the row stays small -- but
+    // `stampede_claim` returns `stampede_jobs.*`, which detoasts it on EVERY
+    // CLAIM. Someone storing a file here would move megabytes through the
+    // hot path this entire schema is shaped around (plans/13).
+    let q = q!();
+
+    let huge = serde_json::json!({ "blob": "x".repeat(2_000_000) });
+    assert!(
+        q.enqueue(NewJob::new("default", "big").args(huge)).await.is_err(),
+        "a 2 MB payload must be refused"
+    );
+
+    // The bound is generous: anything a sane caller sends still works.
+    let normal = serde_json::json!({
+        "user_id": 42,
+        "note": "x".repeat(10_000),
+    });
+    assert!(q.enqueue(NewJob::new("default", "ok").args(normal)).await.is_ok());
+}
