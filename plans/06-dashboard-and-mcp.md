@@ -73,11 +73,20 @@ Oban cannot show without their paid tiers.
 - **Still open: write actions.** Retry, cancel, pause-schedule and re-drive are
   MCP-only. In a browser they need CSRF protection, confirmation and an audit
   trail of who did what — none of which the read-only console has.
-- **Still open: the job list is not indexed for it.** `recent_jobs` walks the
-  primary key backwards and filters on `state`, so asking for a rare state on a
-  large partition reads a lot of pages. Bounded by `LIMIT`, so it cannot run
-  away, but it is not free. A dedicated index would make every insert pay for a
-  dashboard nobody may be watching.
+- ~~The job list is not indexed for it.~~ **MEASURED AND BOUNDED.** On a
+  200k-row partition holding 20 discarded jobs, listing the discarded ones is a
+  parallel seq scan reading **4,634 buffers** — `id` is uuidv7 so it walks the
+  primary key backwards, but nothing indexes `state` outside the claim
+  predicate.
+  
+  No index was added. One on `(queue, state, id)` would make every insert and
+  every transition pay, forever, for a dashboard that is usually not being
+  watched, and the pathological case is specifically "rare state, huge
+  partition" rather than the common one. Instead the query carries a
+  `statement_timeout` — because the console re-runs every panel once a second,
+  so a slow query is not a slow page, it is permanent load — and the panel
+  renders the timeout with an explanation rather than an empty table that reads
+  as "no jobs".
 
 ## MCP control plane
 

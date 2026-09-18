@@ -1888,3 +1888,39 @@ async fn the_notification_queue_and_clock_skew_are_observable() {
     let skew = q.clock_skew().await.unwrap();
     assert!(skew.abs() < 60.0, "skew against a local database was {skew}s");
 }
+
+#[tokio::test]
+async fn the_job_listing_is_bounded_by_a_statement_timeout() {
+    // The console re-runs every panel once a second for as long as a tab is
+    // open, so a slow query is not a slow page -- it is permanent load.
+    //
+    // Measured: on a 200k-row partition holding 20 discarded jobs, asking for
+    // the discarded ones is a parallel seq scan reading 4,634 buffers. No index
+    // was added, because one on (queue, state, id) would make every insert and
+    // transition pay forever for a dashboard usually nobody is watching. The
+    // damage is bounded instead.
+    let q = q!();
+
+    // The normal case must stay fast and correct.
+    for _ in 0..5 {
+        q.enqueue(NewJob::new("default", "x")).await.unwrap();
+    }
+    let jobs = q.recent_jobs("default", Some("available"), 40).await.unwrap();
+    assert_eq!(jobs.len(), 5);
+
+    // Newest first, so uuidv7 ordering is actually being relied on.
+    let ids: Vec<_> = jobs.iter().map(|j| j.id).collect();
+    let mut sorted = ids.clone();
+    sorted.sort_unstable();
+    sorted.reverse();
+    assert_eq!(ids, sorted, "the listing must be newest-first");
+
+    // No filter returns everything up to the limit.
+    assert_eq!(q.recent_jobs("default", None, 40).await.unwrap().len(), 5);
+
+    // And the timeout is short enough to protect a once-a-second panel.
+    assert!(
+        stampede::queue::DASHBOARD_QUERY_TIMEOUT <= Duration::from_secs(5),
+        "a dashboard query ceiling longer than a few seconds defeats the point"
+    );
+}

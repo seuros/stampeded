@@ -357,11 +357,18 @@ async fn render_schedules(state: &ApiState) -> Option<Event<PatchElements>> {
 }
 
 async fn render_jobs(state: &ApiState, p: &Params) -> Option<Event<PatchElements>> {
-    let jobs = state
-        .queue
-        .recent_jobs(p.queue(), p.state(), JOB_LIMIT)
-        .await
-        .ok()?;
+    let jobs = match state.queue.recent_jobs(p.queue(), p.state(), JOB_LIMIT).await {
+        Ok(jobs) => jobs,
+        Err(e) => {
+            // Almost certainly the statement timeout: a rare state on a large
+            // partition is a seq scan (measured at 4,634 buffers for 20 rows in
+            // 200k). Saying so beats an empty table that looks like "no jobs".
+            return patch(format!(
+                r#"<div id="jobs"><h2>jobs</h2><p class="warn">this listing timed out — a rare state on a large queue has no index to use, so it reads most of the partition. Narrow the filter, or query it directly.</p><p class="dim">{}</p></div>"#,
+                esc(&e.to_string())
+            ));
+        }
+    };
 
     let mut html = format!(
         r#"<div id="jobs"><h2>jobs <span class="dim">— {q}, newest first</span></h2><nav>"#,

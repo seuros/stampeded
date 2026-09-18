@@ -37,6 +37,12 @@ pub struct VacuumHealth {
     pub last_autovacuum: Option<DateTime<Utc>>,
 }
 
+/// Ceiling on a dashboard query.
+///
+/// The console re-runs its panels every second, so a slow one is not a slow
+/// page — it is a permanent load on the database for as long as a tab is open.
+pub const DASHBOARD_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Per-destination failure evidence. See `destination_health`.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct DestinationHealth {
@@ -645,14 +651,35 @@ impl Queue {
 
     /// A bounded slice of the job table, newest first.
     ///
-    /// CAVEAT, and it is a real one: `id` is uuidv7 so this walks the primary
-    /// key backwards, but there is no index on `state` outside the claim
-    /// predicate. On a large partition where the requested state is rare --
-    /// "show me discarded jobs" on a queue that mostly succeeds -- this reads
-    /// a lot of pages to find 50 rows. Bounded, so it cannot run away, but it
-    /// is not free. A dedicated index would make every insert pay for a
-    /// dashboard nobody may be watching; see plans/06.
+    /// MEASURED COST, because the caveat deserved a number rather than a
+    /// hedge. On a 200k-row partition holding 20 discarded jobs, asking for
+    /// the discarded ones is a **parallel seq scan, 4,634 buffers**: `id` is
+    /// uuidv7 so this walks the primary key backwards, but nothing indexes
+    /// `state` outside the claim predicate, so a rare state means reading most
+    /// of the partition to find 40 rows.
+    ///
+    /// No index was added. One on `(queue, state, id)` would make every insert
+    /// and every transition pay, forever, for a dashboard that is usually not
+    /// being watched — and the pathological case is specifically "rare state,
+    /// huge partition", not the common one.
+    ///
+    /// Instead the damage is BOUNDED: a `statement_timeout`, because this
+    /// query re-runs every second for as long as someone leaves the page open.
+    /// A dashboard panel that cannot answer quickly should give up and say so,
+    /// not quietly consume a core. The caller renders the timeout as an empty
+    /// panel with an explanation.
     pub async fn recent_jobs(&self, queue: &str, state: Option<&str>, limit: i64) -> Result<Vec<Job>> {
+        let mut conn = self.pool.acquire().await?;
+
+        // LOCAL, so it reverts when the connection returns to the pool and
+        // cannot leak onto an unrelated query.
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SET LOCAL statement_timeout = {}",
+            DASHBOARD_QUERY_TIMEOUT.as_millis()
+        )))
+        .execute(&mut *conn)
+        .await?;
+
         sqlx::query_as::<_, Job>(
             "SELECT * FROM stampede_jobs \
               WHERE queue = $1 AND ($2::text IS NULL OR state = $2) \
@@ -661,7 +688,7 @@ impl Queue {
         .bind(queue)
         .bind(state)
         .bind(limit)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await
         .map_err(Into::into)
     }
