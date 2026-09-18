@@ -2011,3 +2011,114 @@ async fn counters_survive_a_rolled_back_enqueue() {
 
     assert_eq!(depth_of(&q, "available").await, 1, "the rollback must uncount");
 }
+
+#[tokio::test]
+async fn a_thundering_herd_of_identical_jobs_enqueues_exactly_one() {
+    // The realistic shape: a cache expires and forty web requests all decide to
+    // enqueue the same refresh job in the same instant. Uniqueness has to hold
+    // under genuine concurrency, not just when called twice in sequence --
+    // which is the whole reason it is a UNIQUE INDEX rather than a SELECT
+    // followed by an INSERT (plans/10). Oban's advisory-lock model cannot be
+    // used here at all, because a polyglot enqueuer does not take the lock.
+    let q = q!();
+
+    let mut racers = Vec::new();
+    for _ in 0..40 {
+        let q = q.clone();
+        racers.push(tokio::spawn(async move {
+            q.enqueue(NewJob::new("default", "refresh").unique("cache:products"))
+                .await
+                .unwrap()
+        }));
+    }
+
+    let mut created = 0;
+    for r in racers {
+        if r.await.unwrap().is_some() {
+            created += 1;
+        }
+    }
+
+    assert_eq!(created, 1, "exactly one enqueue may win");
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM stampede_jobs")
+        .fetch_one(q.pool())
+        .await
+        .unwrap();
+    assert_eq!(rows, 1, "and exactly one row may exist");
+}
+
+#[tokio::test]
+async fn the_reaper_racing_a_finishing_worker_does_not_double_run_the_job() {
+    // The race that makes lease-based queues run jobs twice: the reaper decides
+    // a worker is dead at the same moment that worker finishes. Heartbeats make
+    // this rare rather than routine (plans/04), but rare is not never, and the
+    // outcome must still be exactly one execution.
+    //
+    // `stampede_complete` carries `claimed_by = p_worker_id`, so whichever
+    // side loses learns it lost instead of writing over the winner.
+    let q = q!();
+    let id = q.enqueue(NewJob::new("default", "once")).await.unwrap().unwrap();
+    let w = q.register_worker("h", 1, &["default".into()]).await.unwrap();
+    let job = q.claim("default", w, 1).await.unwrap().remove(0);
+
+    // Make the worker look dead, then have both act at once.
+    sqlx::query("UPDATE stampede_workers SET last_heartbeat = now() - interval '1 hour'")
+        .execute(q.pool())
+        .await
+        .unwrap();
+
+    let (reap, complete) = tokio::join!(
+        { let q = q.clone(); async move { q.reap(Duration::from_secs(300)).await.unwrap() } },
+        { let q = q.clone(); let job = job.clone(); async move { q.complete(&job, w).await.unwrap() } },
+    );
+
+    let final_job = q.fetch("default", id).await.unwrap().unwrap();
+
+    // Exactly one side won, and the loser knows.
+    if complete.owned {
+        assert_eq!(final_job.state, JobState::Completed, "the worker won");
+    } else {
+        assert_eq!(reap, 1, "then the reaper must have won");
+        assert_eq!(final_job.state, JobState::Retryable);
+    }
+
+    // What must never happen: the job reported completed AND queued for retry.
+    assert!(
+        !(final_job.state == JobState::Completed && final_job.claimed_by.is_some()),
+        "a completed job must not still be claimed"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_schedulers_fire_an_occurrence_exactly_once() {
+    // Already covered for interval schedules; this is the cron path, where the
+    // occurrence ledger is the backstop behind the row lock. Two daemons
+    // ticking at the same instant is the normal case, not an edge one -- there
+    // is no leader election by design.
+    let q = q!();
+    q.upsert_cron_schedule("tick", "default", "report", "* * * * *", "UTC", None)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE stampede_schedules SET next_run_at = now() - interval '1 minute'")
+        .execute(q.pool())
+        .await
+        .unwrap();
+
+    let mut ticks = Vec::new();
+    for _ in 0..6 {
+        let q = q.clone();
+        ticks.push(tokio::spawn(async move { q.run_due_schedules(10).await.unwrap() }));
+    }
+
+    let mut fired = 0;
+    for t in ticks {
+        fired += t.await.unwrap();
+    }
+
+    assert_eq!(fired, 1, "six daemons, one firing");
+    let jobs: i64 = sqlx::query_scalar("SELECT count(*) FROM stampede_jobs WHERE task = 'report'")
+        .fetch_one(q.pool())
+        .await
+        .unwrap();
+    assert_eq!(jobs, 1);
+}
