@@ -79,9 +79,9 @@ measured in one of them:
   worker deaths, defaulting to one free. A job that segfaults its worker stops
   after the second claim instead of walking twenty-five workers down.
 - **Jobs resume.** A job that dies at row 50,000 of 100,000 gets its cursor
-  back instead of starting again at row 1. **Nobody in the Postgres cohort has
-  this** — not Oban, River, good_job, solid_queue, que, graphile, pg-boss,
-  procrastinate, underway, neoq or db-scheduler. (`plans/17`)
+  back instead of starting again at row 1. Of the Postgres cohort only River
+  has this, and [River's version is richer](plans/17-job-resume.md) — named
+  steps, fast-forwarded on resume. Ours is a single cursor. (`plans/17`)
 - **Failures cluster by fingerprint**, with numbers, UUIDs and hex stripped
   before hashing — so "timed out after 30012ms" and "timed out after 29998ms"
   are one incident rather than two. Nobody else does this, and it is the
@@ -285,10 +285,20 @@ Two things worth knowing:
   progresses one unit and then dies forever is still discarded. Progress buys
   tolerance of infrastructure failure and buys nothing against a broken job.
 
-**Commit your chunk before you checkpoint.** The other order replays that chunk
-on resume, which for a job that is not idempotent is silent duplication. This
-is the one way to use the feature and get wrong answers, and nothing can
-enforce it from our side.
+**Checkpoint inside your transaction** and the cursor can never claim work that
+was rolled back:
+
+```ruby
+ActiveRecord::Base.transaction do
+  import(chunk)
+  stampede_checkpoint!(cursor: n)   # commits with the work, or not at all
+end
+```
+
+Under Rails this is automatic, because the checkpoint runs on ActiveRecord's
+connection. In Rust, pass the transaction to `checkpoint_on`. Outside both, pass
+the connection explicitly — River's `ResumableSetStepCursorTx` exists for the
+same reason and got there first.
 
 ## Operational visibility
 

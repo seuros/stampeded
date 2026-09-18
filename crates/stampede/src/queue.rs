@@ -285,6 +285,38 @@ impl Queue {
         worker_id: Uuid,
         state: &T,
     ) -> Result<Option<i32>> {
+        self.checkpoint_on(&self.pool, job, worker_id, state).await
+    }
+
+    /// `checkpoint`, on a caller-supplied executor — normally a transaction.
+    ///
+    /// THIS IS THE ONE THAT CLOSES THE HAZARD. Saving the cursor as a separate
+    /// write means a crash between the work and the cursor replays that chunk
+    /// on resume, which for a job that is not idempotent is silent
+    /// duplication. Run both in one transaction and the cursor can never claim
+    /// work that was rolled back:
+    ///
+    /// ```ignore
+    /// let mut tx = pool.begin().await?;
+    /// import_chunk(&mut *tx, &rows).await?;
+    /// queue.checkpoint_on(&mut *tx, &job, worker_id, &Cursor { at: n }).await?;
+    /// tx.commit().await?;
+    /// ```
+    ///
+    /// River offers `ResumableSetStepCursorTx` for exactly this reason, and
+    /// arrived there first — this API exists because reading their
+    /// implementation showed the plain version could not be made atomic.
+    pub async fn checkpoint_on<'e, E, T>(
+        &self,
+        executor: E,
+        job: &Job,
+        worker_id: Uuid,
+        state: &T,
+    ) -> Result<Option<i32>>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+        T: serde::Serialize,
+    {
         let value = serde_json::to_value(state)?;
         let seq: Option<Option<i32>> =
             sqlx::query_scalar("SELECT stampede_checkpoint($1, $2, $3, $4)")
@@ -292,7 +324,7 @@ impl Queue {
                 .bind(job.id)
                 .bind(worker_id)
                 .bind(&value)
-                .fetch_optional(&self.pool)
+                .fetch_optional(executor)
                 .await?;
         Ok(seq.flatten())
     }

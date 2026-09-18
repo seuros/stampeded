@@ -29,11 +29,11 @@ module Stampede
     # COMMIT YOUR CHUNK FIRST. Checkpointing before the work is durable means a
     # crash between the two replays that chunk on resume, which for a job that
     # is not idempotent is silent duplication.
-    def stampede_checkpoint!(state)
+    def stampede_checkpoint!(state = nil, conn: nil, **rest)
       ctx = Stampede::Current.context
       raise Stampede::Error, "no Stampede job context: is this running under a Stampede worker?" if ctx.nil?
 
-      ctx.checkpoint!(state)
+      ctx.checkpoint!(state || rest, conn: conn)
     end
 
     # True when this attempt picked up where a previous one left off.

@@ -34,21 +34,43 @@ language, and it composes with the polyglot claim instead of fighting it.
 
 ## 2. What the survey actually has
 
-| | what | survives a retry? |
+> **CORRECTION, and it matters.** The first draft of this file claimed nobody
+> in the Postgres cohort had resumable jobs. **River has, and its design is
+> better than the one below.** The error came from a search that silently
+> matched nothing, followed by targeted greps for the features I already
+> expected to find — confirmation bias with a broken tool. The corrected survey:
+
+| | what | notes |
 |---|---|---|
-| **BullMQ** | `updateProgress(json)` — `HSET` on the job hash (`job.ts:543`, `updateProgress-3.lua:27`) **[V]** | **yes**, nothing clears it — but it is documented as "Updates a job's progress" and emits a UI event. Accidentally a checkpoint |
+| **River** | `ResumableStep(ctx, name, fn)`, `ResumableStepCursor[T]`, `ResumableSetCursor[T]` (`resumable.go`) **[V]** | **the real prior art.** Named steps, fast-forwarded on resume; per-step typed cursors; state in the job's `metadata` jsonb |
+| **Temporal** | event-sourced replay **[V]** | the other end of the spectrum |
+| **BullMQ** | `updateProgress(json)` — `HSET` on the job hash (`job.ts:543`, `updateProgress-3.lua:27`) **[V]** | survives retry because nothing clears it, but documented as a UI progress bar |
 | **JobRunr** | `JobDashboardProgressBar` **[V]** | dashboard only |
-| **Hangfire** | `ContinuationsSupportAttribute` **[V]** | different feature — job *chaining* (run B after A), not resuming A |
-| **Temporal** | event-sourced replay **[V]** | yes, and completely: the other end of the spectrum |
-| everyone else in `08-` | nothing | — |
+| **Hangfire** | `ContinuationsSupportAttribute` **[V]** | job *chaining* (run B after A), a different feature |
+| Oban, good_job, solid_queue, que, graphile, pg-boss, procrastinate, underway, neoq, db-scheduler | nothing | — |
 
-**Nobody in the Postgres cohort has it at all** — not Oban, River, good_job,
-solid_queue, que, graphile, pg-boss, procrastinate, underway, neoq or
-db-scheduler. BullMQ's is the closest prior art and it is a progress bar that
-happens not to be cleared.
+### What River does better
 
-That is the gap. It is also a warning: the reason nobody ships this is that the
-semantics below are genuinely awkward, not that nobody thought of it.
+Three things, and one of them is a correctness property rather than ergonomics:
+
+1. **Named steps.** `ResumableStep(ctx, "download", …)` then
+   `ResumableStep(ctx, "transform", …)`. On resume, River fast-forwards through
+   the steps already recorded as complete and re-enters the one that was
+   running. A single opaque blob — what is implemented below — makes the job
+   author reconstruct "where was I" by hand every time.
+2. **Per-step typed cursors**, rather than one shared bag.
+3. **`ResumableSetStepCursorTx(ctx, tx, job, cursor)` — the cursor is written
+   INSIDE THE CALLER'S TRANSACTION.** This is the important one. It means the
+   work and the record of the work commit together or not at all, which closes
+   the hazard §7 of the first draft described as unenforceable.
+
+(3) has been adopted: `checkpoint_on` in Rust, `checkpoint!(state, conn:)` in
+Ruby, and under Rails it happens automatically because the checkpoint runs on
+ActiveRecord's connection. (1) and (2) have not — see §8.
+
+River also buffers `ResumableSetCursor` in memory and flushes with the job's
+normal metadata write, so a tight loop costs no round trips. Ours writes
+immediately, which is simpler and more durable but more expensive.
 
 ## 3. The shape
 
@@ -146,17 +168,26 @@ an error that says to store a cursor rather than a set.
   workers were never meant to run it. The provenance columns already record
   where it came from; someone re-driving can fetch the original if they want.
 
-## 7. Still open
+## 8. Still open
 
+- **Named steps, per River.** The single opaque blob works, but it makes every
+  job author write the same "where was I" reconstruction. River's step model is
+  the better design and adopting it is a real API change, not a tweak: it needs
+  a step registry, duplicate-name detection, and the fast-forward pass. Worth
+  doing; not done.
+- **In-memory cursor buffering, also per River.** Each `checkpoint` here is a
+  round trip. A tight loop wants River's batching, at the cost of losing the
+  last few updates on a hard kill.
 - **Nothing verifies the checkpoint is a cursor rather than a result set.** The
   64 KB cap is a blunt instrument that catches the pathological case and
   nothing else.
-- **No help with idempotency.** Resuming from 50k assumes rows 1–50k were
-  committed before the checkpoint was written. If the job checkpoints *before*
-  committing its chunk, a crash between the two replays that chunk. The
-  ordering is the job author's problem and cannot be fixed from here — but it
-  should be stated loudly in the docs, because it is the one way to use this
-  feature and get silent duplicates.
+- ~~**No help with idempotency.**~~ **SOLVED, by copying River.** The cursor
+  can be written inside the caller's transaction, so the work and the record of
+  it commit together. Under Rails this is automatic — the checkpoint runs on
+  ActiveRecord's connection, so it is already inside whatever transaction the
+  job opened. Elsewhere the connection is passed explicitly. The non-atomic
+  form still exists for jobs that are idempotent anyway and would rather not
+  hold a transaction open.
 - **Interaction with `expire_seconds` is untested.** A job that checkpoints
   regularly can now never expire, since each checkpoint refreshes
   `heartbeat_at`. That is intended, but it means a job stuck in a checkpointing

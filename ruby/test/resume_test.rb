@@ -106,3 +106,58 @@ class ResumeTest < Minitest::Test
     assert_operator job_row(id)["checkpoint_seq"].to_i, :>=, 1
   end
 end
+
+class ResumeTransactionTest < Minitest::Test
+  include StampedeTest::Isolation
+
+  def test_a_checkpoint_rolls_back_with_the_work_it_describes
+    # The hazard, closed. If the cursor is written on its own connection it
+    # cannot participate in the caller's transaction, so a rollback leaves the
+    # cursor claiming work that was undone -- and the resume skips it.
+    #
+    # River offers ResumableSetStepCursorTx for exactly this reason.
+    q = Stampede
+    id = q.enqueue(queue: "default", task: "chunky")
+    worker_id = conn do |c|
+      c.exec_params("INSERT INTO stampede_workers (hostname,pid,queues) VALUES ($1,$2,$3) RETURNING id",
+                    ["h", 1, "{default}"])[0]["id"]
+    end
+
+    job = conn { |c| Stampede::Job.new(c.exec_params("SELECT * FROM stampede_claim($1,$2,$3)",
+                                                     ["default", worker_id, 1])[0]) }
+    ctx = Stampede::JobContext.new(job, worker_id)
+
+    # The connection is passed explicitly: outside Rails there is no ambient
+    # "caller's connection" to join, which is the whole reason the parameter
+    # exists.
+    Stampede::Connection.own do |c|
+      c.exec("BEGIN")
+      ctx.checkpoint!({ cursor: 500 }, conn: c)
+      c.exec("ROLLBACK")
+    end
+
+    row = job_row(id)
+    assert_nil row["checkpoint"],
+               "a rolled-back chunk must not leave a cursor claiming it was done"
+    assert_equal 0, row["checkpoint_seq"].to_i
+  end
+
+  def test_a_committed_checkpoint_survives
+    id = Stampede.enqueue(queue: "default", task: "chunky")
+    worker_id = conn do |c|
+      c.exec_params("INSERT INTO stampede_workers (hostname,pid,queues) VALUES ($1,$2,$3) RETURNING id",
+                    ["h", 1, "{default}"])[0]["id"]
+    end
+    job = conn { |c| Stampede::Job.new(c.exec_params("SELECT * FROM stampede_claim($1,$2,$3)",
+                                                    ["default", worker_id, 1])[0]) }
+    ctx = Stampede::JobContext.new(job, worker_id)
+
+    Stampede::Connection.own do |c|
+      c.exec("BEGIN")
+      ctx.checkpoint!({ cursor: 500 }, conn: c)
+      c.exec("COMMIT")
+    end
+
+    assert_equal({ "cursor" => 500 }, JSON.parse(job_row(id)["checkpoint"]))
+  end
+end

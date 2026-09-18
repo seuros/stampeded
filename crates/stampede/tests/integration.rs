@@ -1521,10 +1521,9 @@ async fn a_wedged_job_does_not_block_shutdown_forever() {
 
 #[tokio::test]
 async fn a_job_resumes_from_its_checkpoint_after_its_worker_dies() {
-    // The headline: a job that died at 50,000 of 100,000 does not start again
-    // at row 1. Nobody in the Postgres cohort has this -- not Oban, River,
-    // good_job, solid_queue, que, graphile, pg-boss, procrastinate, underway,
-    // neoq or db-scheduler.
+    // A job that died at 50,000 of 100,000 does not start again at row 1.
+    // River is the prior art here and its model is richer -- named steps,
+    // fast-forwarded on resume (plans/17 §2). This is the single-cursor form.
     let q = q!();
     q.enqueue(NewJob::new("default", "import")).await.unwrap().unwrap();
 
@@ -1664,4 +1663,44 @@ async fn an_oversized_checkpoint_is_refused_by_the_database() {
 
     // And the job is untouched.
     assert!(q.fetch("default", id).await.unwrap().unwrap().checkpoint.is_none());
+}
+
+#[tokio::test]
+async fn a_checkpoint_in_a_transaction_rolls_back_with_its_work() {
+    // The hazard, closed. As two separate writes, a crash between the work and
+    // the cursor replays that chunk on resume -- silent duplication for a job
+    // that is not idempotent. In one transaction the cursor can never claim
+    // work that was rolled back.
+    //
+    // River got here first with ResumableSetStepCursorTx; this exists because
+    // reading their implementation showed the plain version could not be made
+    // atomic at all.
+    let q = q!();
+    let id = q.enqueue(NewJob::new("default", "import")).await.unwrap().unwrap();
+    let w = q.register_worker("h", 1, &["default".into()]).await.unwrap();
+    let job = q.claim("default", w, 1).await.unwrap().remove(0);
+
+    let mut tx = q.pool().begin().await.unwrap();
+    q.checkpoint_on(&mut *tx, &job, w, &serde_json::json!({ "cursor": 500 }))
+        .await
+        .unwrap()
+        .expect("we own it");
+    tx.rollback().await.unwrap();
+
+    let after = q.fetch("default", id).await.unwrap().unwrap();
+    assert!(
+        after.checkpoint.is_none(),
+        "a rolled-back chunk must not leave a cursor claiming it was done"
+    );
+    assert_eq!(after.checkpoint_seq, 0);
+
+    // And the committed path does persist.
+    let mut tx = q.pool().begin().await.unwrap();
+    q.checkpoint_on(&mut *tx, &job, w, &serde_json::json!({ "cursor": 500 }))
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let after = q.fetch("default", id).await.unwrap().unwrap();
+    assert_eq!(after.checkpoint.unwrap()["cursor"], 500);
 }

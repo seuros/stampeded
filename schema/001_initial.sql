@@ -115,10 +115,12 @@ CREATE TABLE stampede_jobs (
     --
     -- Opaque to us: the job's own cursor, handed back verbatim on the next
     -- attempt so a job that died at row 50,000 of 100,000 does not start again
-    -- at row 1. NOBODY in the Postgres cohort has this -- not Oban, River,
-    -- good_job, solid_queue, que, graphile, pg-boss, procrastinate, underway,
-    -- neoq or db-scheduler. BullMQ's updateProgress is the closest prior art
-    -- and it is a UI progress bar that happens never to be cleared.
+    -- at row 1.
+    --
+    -- River is the prior art (resumable.go) and its model is richer: NAMED
+    -- STEPS that are fast-forwarded on resume, plus per-step typed cursors.
+    -- This is the single-cursor form; plans/17 §8 records the gap. BullMQ's
+    -- updateProgress survives a retry but is documented as a UI progress bar.
     --
     -- Deliberately NOT durable execution (Temporal, DBOS, restate): replaying a
     -- function requires intercepting every side effect, which requires a

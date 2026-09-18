@@ -76,13 +76,31 @@ impl JobContext {
     /// regularly cannot be expired by the wall-clock timeout while it is
     /// plainly working.
     ///
-    /// ORDER MATTERS AND WE CANNOT ENFORCE IT: commit the chunk, THEN
-    /// checkpoint. Checkpointing first means a crash between the two replays
-    /// that chunk on resume, which for a non-idempotent job is silent
-    /// duplication. This is the one way to use the feature and get wrong
-    /// answers (plans/17 §7).
+    /// Two separate writes, so a crash between the work and the cursor replays
+    /// that chunk on resume. For anything not idempotent, use
+    /// [`checkpoint_on`](JobContext::checkpoint_on) with your transaction
+    /// instead and the question does not arise.
     pub async fn checkpoint<T: serde::Serialize>(&self, state: &T) -> Result<bool> {
         Ok(self.queue.checkpoint(&self.job, self.worker_id, state).await?.is_some())
+    }
+
+    /// Save resume state inside the caller's transaction, so the cursor and
+    /// the work it describes commit together or not at all.
+    pub async fn checkpoint_on<'e, E, T>(&self, executor: E, state: &T) -> Result<bool>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+        T: serde::Serialize,
+    {
+        Ok(self
+            .queue
+            .checkpoint_on(executor, &self.job, self.worker_id, state)
+            .await?
+            .is_some())
+    }
+
+    /// The queue this job came from, for work that needs its own transaction.
+    pub fn queue(&self) -> &Queue {
+        &self.queue
     }
 
     /// Resume state from a previous attempt, if any.
