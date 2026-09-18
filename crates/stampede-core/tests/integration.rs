@@ -1347,3 +1347,67 @@ async fn prune_stops_at_the_batch_limit_so_the_caller_can_loop() {
     }
     assert_eq!(total, 5, "looping until a short batch must drain everything");
 }
+
+#[tokio::test]
+async fn a_permanently_open_circuit_eventually_gives_up() {
+    // The floor under the refund rule, and a defect that shipped without it.
+    //
+    // breaker_open and throttled REFUND the attempt, which is what stops a
+    // downstream outage discarding the backlog. But if they count toward
+    // nothing at all, a permanently open circuit re-claims and re-defers the
+    // same job forever: verified at 12 cycles against a max_attempts of 3 with
+    // `attempt` still 0. The queue grows and nothing ever reports a failure.
+    //
+    // So deferrals are counted separately, with a cap generous enough that a
+    // real outage never reaches it.
+    let q = q!();
+    let w = q.register_worker("h", 1, &["default".into()]).await.unwrap();
+
+    let id = q.enqueue(NewJob::new("default", "calls_dead_api")).await.unwrap().unwrap();
+    sqlx::query("UPDATE stampede_jobs SET max_deferrals = 3 WHERE id = $1")
+        .bind(id)
+        .execute(q.pool())
+        .await
+        .unwrap();
+
+    let mut cycles = 0;
+    for _ in 0..20 {
+        let claimed = q.claim("default", w, 1).await.unwrap();
+        let Some(job) = claimed.into_iter().next() else { break };
+        cycles += 1;
+        q.fail(&job, w, FailureKind::BreakerOpen, "circuit open", None)
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(cycles, 4, "should defer max_deferrals times, then stop");
+
+    let job = q.fetch("default", id).await.unwrap().unwrap();
+    assert_eq!(job.state, JobState::Discarded);
+    assert_eq!(job.deferrals, 4);
+    // The refund still held the whole way: this job was never charged for a
+    // dependency being down, it just stopped waiting.
+    assert_eq!(job.attempt, 0, "deferrals must not become a retry budget");
+    assert_eq!(
+        job.failure_kind,
+        Some(FailureKind::BreakerOpen),
+        "the recorded cause must still say it was our backpressure"
+    );
+}
+
+#[tokio::test]
+async fn an_ordinary_outage_does_not_exhaust_the_deferral_budget() {
+    // The cap must be generous enough to be unreachable in practice. At the
+    // capped backoff of an hour, the default of 100 is days of downtime --
+    // if this default ever shrinks toward a retry-budget-sized number, the
+    // refund rule stops meaning anything.
+    let q = q!();
+    let id = q.enqueue(NewJob::new("default", "x")).await.unwrap().unwrap();
+    let job = q.fetch("default", id).await.unwrap().unwrap();
+    assert!(
+        job.max_deferrals >= 100,
+        "default deferral cap is {}, which is small enough to discard work \
+         during a normal outage",
+        job.max_deferrals
+    );
+}

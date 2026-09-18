@@ -34,6 +34,7 @@ type JobRow = (
     i16,                 // interruptions
     i16,                 // max_interruptions
     Option<String>,      // destination
+    i16,                 // deferrals
     Option<String>,      // dead_letter_queue
     Option<String>,      // source_queue
     serde_json::Value,   // errors
@@ -80,7 +81,7 @@ impl StampedeServer {
         let row: Option<JobRow> = sqlx::query_as(
                 "SELECT task, state::text, attempt, max_attempts, failure_kind::text, \
                         last_error, attempted_by, args, interruptions, max_interruptions, \
-                        destination, dead_letter_queue, source_queue, errors \
+                        destination, deferrals, dead_letter_queue, source_queue, errors \
                    FROM stampede_jobs WHERE queue = $1 AND id = $2",
             )
             .bind(&params.0.queue)
@@ -101,6 +102,7 @@ impl StampedeServer {
             interruptions,
             max_interruptions,
             destination,
+            deferrals,
             dlq,
             source_queue,
             errors,
@@ -126,6 +128,14 @@ impl StampedeServer {
         }
         if let Some(d) = destination {
             out.push_str(&format!("  destination {d}\n"));
+        }
+        // Deferrals are neither attempts nor interruptions: they are how many
+        // times WE declined to run it. A job with a high count is waiting on a
+        // sick dependency, not failing.
+        if deferrals > 0 {
+            out.push_str(&format!(
+                "  deferred    {deferrals}x (we declined to run it; no attempt charged)\n"
+            ));
         }
         if let Some(src) = source_queue {
             out.push_str(&format!("  dead letter from queue {src}\n"));

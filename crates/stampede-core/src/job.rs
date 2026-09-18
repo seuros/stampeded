@@ -170,6 +170,8 @@ pub struct Job {
     pub destination: Option<String>,
     pub interruptions: i16,
     pub max_interruptions: i16,
+    pub deferrals: i16,
+    pub max_deferrals: i16,
     pub expire_seconds: i32,
     pub heartbeat_at: Option<DateTime<Utc>>,
     pub backoff_base_ms: i16,

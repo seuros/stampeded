@@ -223,7 +223,11 @@ BEGIN
     -- `snooze` (which decrements) and River's EventKindJobInterrupted (which
     -- "does not consume an attempt or add an attempt error").
     v_terminal := CASE
-        WHEN v_refund    THEN false
+        -- A deferral is terminal only when the job has been waiting on a
+        -- dependency for so long that the dependency is evidently not coming
+        -- back. Everything else about the refund still applies: the attempt is
+        -- returned, because none of this was the job's doing.
+        WHEN v_refund    THEN j.deferrals + 1 > j.max_deferrals
         WHEN p_kind = 'unrecoverable' THEN true
         WHEN v_interrupt THEN j.interruptions + 1 > j.max_interruptions
         ELSE j.attempt >= j.max_attempts
@@ -236,6 +240,7 @@ BEGIN
            failure_kind = p_kind,
            attempt      = CASE WHEN v_refund THEN greatest(attempt - 1, 0) ELSE attempt END,
            interruptions = CASE WHEN v_interrupt THEN interruptions + 1 ELSE interruptions END,
+           deferrals    = CASE WHEN v_refund THEN deferrals + 1 ELSE deferrals END,
            -- Truncated in SQL, not in client code: que is the only surveyed
            -- implementation that bounds error text database-side, and it is the
            -- only bound that survives a polyglot worker (plans/15).

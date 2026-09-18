@@ -96,6 +96,21 @@ CREATE TABLE stampede_jobs (
     interruptions       smallint NOT NULL DEFAULT 0,
     max_interruptions   smallint NOT NULL DEFAULT 1,
 
+    -- A THIRD counter, and plans/15 asks whether that is one too many. It is
+    -- not, because without it the refund rule above has no floor:
+    -- `breaker_open` and `throttled` give the attempt back, so a permanently
+    -- open circuit re-claims and re-defers the same job forever. Verified: 12
+    -- cycles against a max_attempts of 3 left attempt at 0. The queue grows
+    -- silently and nothing ever reports a failure.
+    --
+    -- So deferrals are counted, with a DELIBERATELY GENEROUS cap. This is not
+    -- a retry budget and must not behave like one: at the capped backoff of an
+    -- hour, 100 deferrals is days of downstream outage before anything is
+    -- given up on. A real outage must never reach it; a destination that is
+    -- permanently gone must.
+    deferrals           smallint NOT NULL DEFAULT 0,
+    max_deferrals       smallint NOT NULL DEFAULT 100,
+
     -- Backoff policy on the ROW (underway's shape), so the dashboard and MCP
     -- can render the remaining retry schedule without re-deriving it from a
     -- Rust constant they cannot see. Cap first, then jitter.
@@ -226,6 +241,7 @@ CREATE TABLE stampede_jobs (
     ),
     CONSTRAINT stampede_jobs_attempt_sane CHECK (attempt >= 0 AND attempt <= max_attempts),
     CONSTRAINT stampede_jobs_interruptions_sane CHECK (interruptions >= 0),
+    CONSTRAINT stampede_jobs_deferrals_sane CHECK (deferrals >= 0),
     -- A job cannot dead-letter onto its own queue: that is an infinite loop
     -- wearing a feature's clothing.
     CONSTRAINT stampede_jobs_dlq_not_self CHECK (
