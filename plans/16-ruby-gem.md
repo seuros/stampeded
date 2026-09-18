@@ -258,6 +258,28 @@ meaningless, so nothing errors.
   reclaimed and charged, which is correct. This closes the plans/15 open item
   for the Ruby side, and there is a test.
 
+## 7b. A bug the Rust worker never had
+
+**The Ruby worker did not reconnect.** Its claim loop rescued `PG::Error`,
+slept, and retried on the same dead connection — forever. The thread stayed
+alive and the process stayed up, so every liveness check passed while the
+worker silently did nothing. Any failover, pooler restart, admin
+`pg_terminate_backend` or network blip wedged it permanently, and the only
+visible symptom would have been jobs quietly not running.
+
+Verified: killing the worker's backends left it running and executing zero
+further jobs. After the fix it reconnects and carries on.
+
+The Rust worker never had this, and the reason is worth noting because it
+shapes how much the two sides have to be tested separately: **sqlx's pool
+discards broken connections and opens new ones**, so recovery is free there.
+The Ruby worker holds a raw `PG::Connection` by hand — deliberately, so a long
+job does not pin an ActiveRecord connection — and therefore has to do
+explicitly what the pool does implicitly. The heartbeat thread had the same
+hole and the same fix; without it a dropped connection stops the heartbeat
+forever, the reaper reclaims this worker's jobs as orphans, and the worker
+keeps claiming more that it will also appear to abandon.
+
 ## 8. Still open
 
 - **`retry_on(wait:)`**, per §4.2. The row carries

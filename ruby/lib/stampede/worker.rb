@@ -96,9 +96,37 @@ module Stampede
       conn.exec_params("SELECT * FROM stampede_claim($1, $2, $3)", [@queue, worker_id, limit])
           .map { |row| Job.new(row) }
     rescue PG::Error => e
+      # RECONNECT, do not just retry.
+      #
+      # Without this the worker rescued the error, slept, and retried on the
+      # SAME DEAD CONNECTION -- forever. The thread stayed alive and the
+      # process stayed up, so every liveness check passed while the worker
+      # silently did nothing. Any failover, pooler restart, admin
+      # `pg_terminate_backend` or network blip wedged it permanently.
+      #
+      # Verified: killing the worker's backends left it running and it
+      # executed zero further jobs.
       log "claim failed: #{e.message}"
+      reconnect(conn)
       sleep @poll_interval
       []
+    end
+
+    # Bring a connection back after the server closed it.
+    #
+    # PG::Connection#reset re-establishes using the original parameters, which
+    # is what makes this possible without plumbing the config back through.
+    def reconnect(conn)
+      return if conn.nil?
+      return if conn.status == PG::CONNECTION_OK
+
+      log "reconnecting"
+      conn.reset
+      log "reconnected"
+    rescue PG::Error => e
+      # Still down. The next poll tries again -- this is a blip, not a reason
+      # to take the worker out of service.
+      log "reconnect failed: #{e.message}"
     end
 
     # One job, on its own connection.
@@ -221,7 +249,13 @@ module Stampede
             rescue PG::Error => e
               # Do not die: a transient blip should not take the worker down,
               # and the reaper is the backstop if it is not transient.
+              #
+              # But DO reconnect, for the same reason the claim loop does --
+              # otherwise a dropped connection stops the heartbeat forever, the
+              # reaper reclaims this worker's jobs as orphans, and the worker
+              # keeps claiming more that it will also appear to abandon.
               log "heartbeat failed: #{e.message}"
+              reconnect(c)
             end
           end
         end
