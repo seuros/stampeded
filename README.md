@@ -4,9 +4,16 @@ A polyglot job processor. Rust core, Postgres 18+ substrate, Datastar dashboard,
 MCP control plane. BSD-3.
 
 **Status: working end to end, and every design decision in `plans/` is
-implemented.** Verified against Postgres 18 with 141 tests, including
-integration tests against a real database and wire-level tests against a real
-server. Not yet load-tested at scale — see *Not done yet* below.
+implemented.** Verified against Postgres 18 with 260 tests — unit, integration
+against a real database, wire-level against a real server, a real Rails app,
+and fault injection. Not yet load-tested at scale; see *Not done yet*.
+
+The tests that found the most were the ones that did what the system is
+actually *for*, rather than what is convenient to assert: four workers
+completing 200 jobs at once found a deadlock in the counter trigger; killing a
+worker's database connection found that it never reconnected; fuzzing the
+enqueue endpoint found that `max_attempts: 0` created a job nothing could ever
+claim.
 
 ## Why
 

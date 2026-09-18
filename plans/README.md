@@ -131,6 +131,25 @@ note the note says so inline. The code is the source of truth; this directory
 explains why it is shaped that way, which is the part that does not survive in
 a diff.
 
+**The bugs that only appeared under load or fault injection** are worth listing
+separately, because none would have been found by testing the happy path:
+
+- The counter trigger **deadlocked** when several workers completed jobs
+  concurrently: one statement touched several counter rows with no ordering, so
+  transactions locked them in different orders. `ORDER BY queue, state`.
+- The Ruby worker **never reconnected** after its connection dropped. It
+  retried on the same dead socket forever, staying alive and silently doing
+  nothing. sqlx's pool gave the Rust worker this for free.
+- `max_attempts: 0` created a job that **could never be claimed** and sat in
+  `available` forever, counting toward depth.
+- `every_secs: 0` was clamped to 1, so invalid input silently produced a
+  schedule firing **every second**.
+- The cron occurrence ledger was **never pruned** — the function existed and
+  was called from nowhere.
+- `Schema.installed?` always answered "no" inside Rails, because
+  ActiveRecord's decoders return `true` where a bare `PG.connect` returns
+  `"t"`.
+
 Things that changed once they met a real database, all corrected in place:
 
 - `13-retention-and-bloat.md` recommends `PARTITION BY LIST (state)`. It is
