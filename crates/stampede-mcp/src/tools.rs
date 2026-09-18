@@ -14,6 +14,14 @@ use mcp_host::registry::router::McpToolRouter;
 ///
 /// Named rather than inlined: the tuple is wide enough that a mis-ordered
 /// column in the SELECT would be a silent type-checks-but-wrong bug.
+/// One clustered failure signature as `failure_summary` reads it.
+type FailureCluster = (
+    Option<String>, // failure_kind
+    Option<String>, // a representative error message
+    Option<String>, // destination
+    i64,            // how many
+);
+
 type JobRow = (
     String,              // task
     String,              // state
@@ -231,7 +239,7 @@ impl StampedeServer {
         // precisely when there is an incident. The fingerprint strips UUIDs,
         // hex and numbers before hashing, and it is indexed, so this is an
         // index scan rather than a seq scan over every error string.
-        let rows: Vec<(Option<String>, Option<String>, Option<String>, i64)> = sqlx::query_as(
+        let rows: Vec<FailureCluster> = sqlx::query_as(
             "SELECT failure_kind::text, min(left(last_error, 80)), destination, count(*) \
                FROM stampede_jobs \
               WHERE queue = $1 AND error_fingerprint IS NOT NULL \
