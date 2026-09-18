@@ -173,6 +173,22 @@ boots a clean interpreter, and it fails with the exact `NameError` when the
 require is removed. A test that cannot observe the bug is not a test, and
 in-process tests of what the environment provides usually cannot.
 
+One that was flaky all along and had never been caught. The vacuum detector's
+test did 500 updates and then read `n_dead_tup`, with an `ANALYZE` in between
+to settle things. But `ANALYZE` updates PLANNER statistics; `n_dead_tup` comes
+from the cumulative statistics system, which each backend accumulates locally
+and flushes on its own schedule — a different mechanism that happens to live
+nearby. So the test raced, issuing the UPDATE on one pooled connection and
+reading the counters before that backend had flushed: measured at roughly one
+failure in three. It is now pinned to a single connection with
+`pg_stat_force_next_flush()`, which is both deterministic and sixteen times
+faster.
+
+It surfaced only because a summary command I wrote summed the "passed" column
+and not the "failed" one, so a red suite reported a plausible-looking total.
+The second lesson is the same as the first: a number you did not check the
+shape of is not a result.
+
 And one that appeared from running the suite *wrong*. Measuring `fillfactor`
 meant dropping and recreating databases, which left
 `STAMPEDE_TEST_DATABASE_URL` unset for one run. The Ruby suite reported

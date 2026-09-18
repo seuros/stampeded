@@ -1149,11 +1149,28 @@ async fn a_dirty_table_is_flagged_for_vacuum() {
     for _ in 0..500 {
         q.enqueue(NewJob::new("default", "churn")).await.unwrap();
     }
+    // The UPDATE and the stats flush must happen on the SAME backend.
+    //
+    // `n_dead_tup` comes from the cumulative statistics system, which each
+    // backend accumulates locally and flushes on its own schedule -- ANALYZE
+    // does not do it, because ANALYZE updates PLANNER statistics, a different
+    // thing that happens to live nearby. So the original version raced: it
+    // issued the UPDATE on one pooled connection and read the counters before
+    // that backend had flushed, passing or failing on timing. Measured flaky
+    // at roughly one run in three.
+    //
+    // pg_stat_force_next_flush (PG15+) makes it deterministic, but only for
+    // the backend that calls it -- hence pinning one connection for both.
+    let mut conn = q.pool().acquire().await.unwrap();
     sqlx::query("UPDATE stampede_jobs SET priority = 1")
-        .execute(q.pool())
+        .execute(&mut *conn)
         .await
         .unwrap();
-    sqlx::query("ANALYZE").execute(q.pool()).await.unwrap();
+    sqlx::query("SELECT pg_stat_force_next_flush()")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    drop(conn);
 
     let rows = q.vacuum_health().await.unwrap();
     let dirty = rows
