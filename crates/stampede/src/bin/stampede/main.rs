@@ -70,14 +70,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // ("function stampede_create_queue(text) does not exist") does not
             // say so.
             if e.to_string().contains("stampede_create_queue") {
-                Fatal(format!(
+                // No interpolation here, so `format!` would be noise.
+                Fatal(
                     "the Stampede schema is not installed in this database.\n\n\
                      Run once with --migrate to create it:\n\n    \
                      stampede --database-url ... --migrate\n\n\
                      Or apply schema/*.sql by hand. Postgres 18+ is required: the \
                      schema uses uuidv7(), RETURNING OLD./NEW. and generated columns, \
                      with no compatibility shims."
-                ))
+                        .to_string(),
+                )
             } else {
                 Fatal(format!("could not provision queue {:?}: {e}", config.queue))
             }
