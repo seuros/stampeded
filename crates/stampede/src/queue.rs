@@ -37,6 +37,42 @@ pub struct VacuumHealth {
     pub last_autovacuum: Option<DateTime<Utc>>,
 }
 
+/// Per-destination failure evidence. See `destination_health`.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct DestinationHealth {
+    pub destination: Option<String>,
+    /// Jobs a worker DECLINED to run: its circuit was open.
+    pub refused: i64,
+    pub throttled: i64,
+    pub failed: i64,
+    pub waiting: i64,
+    pub last_failure: Option<DateTime<Utc>>,
+}
+
+/// One clustered failure signature.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct FailureCluster {
+    pub failure_kind: Option<String>,
+    pub sample: Option<String>,
+    pub destination: Option<String>,
+    pub n: i64,
+}
+
+/// A schedule as the dashboard reads it.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ScheduleRow {
+    pub key: String,
+    pub queue: String,
+    pub task: String,
+    pub cron_expr: Option<String>,
+    pub interval_secs: Option<i64>,
+    pub timezone: String,
+    pub dst_policy: String,
+    pub paused: bool,
+    pub next_run_at: DateTime<Utc>,
+    pub last_run_at: Option<DateTime<Utc>>,
+}
+
 /// Quote an SQL identifier for interpolation.
 ///
 /// Only ever used on names read back out of `pg_class`, never on caller input —
@@ -485,6 +521,104 @@ impl Queue {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Per-destination health, as OBSERVED FROM THE JOB ROWS.
+    ///
+    /// NOT a read of any worker's circuit breaker. `breaker-machines` state
+    /// lives in the worker process's memory, and the dashboard is normally
+    /// served by a daemon running `--no-worker` -- a different process, often
+    /// a different machine. Nothing can see another process's breaker.
+    ///
+    /// What this shows instead is the evidence the breaker would be reacting
+    /// to: how many jobs for a destination failed recently and how. A run of
+    /// `breaker_open` means some worker's circuit IS open; a run of `raised`
+    /// against one host means one is probably about to be.
+    pub async fn destination_health(&self, window: std::time::Duration) -> Result<Vec<DestinationHealth>> {
+        sqlx::query_as::<_, DestinationHealth>(
+            "SELECT destination, \
+                    count(*) FILTER (WHERE failure_kind = 'breaker_open')::bigint AS refused, \
+                    count(*) FILTER (WHERE failure_kind = 'throttled')::bigint AS throttled, \
+                    count(*) FILTER (WHERE failure_kind IN ('raised','timed_out'))::bigint AS failed, \
+                    count(*) FILTER (WHERE state = 'retryable')::bigint AS waiting, \
+                    max(finished_at) AS last_failure \
+               FROM stampede_jobs \
+              WHERE destination IS NOT NULL \
+                AND failure_kind IS NOT NULL \
+                AND coalesce(finished_at, scheduled_at) > now() - make_interval(secs => $1) \
+              GROUP BY destination \
+              ORDER BY 2 DESC, 4 DESC \
+              LIMIT 20",
+        )
+        .bind(window.as_secs_f64())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Recent failures, clustered by fingerprint.
+    ///
+    /// The same clustering `failure_summary` does over MCP: "47 jobs failed"
+    /// is noise, "47 failed the same way against the same host" is a diagnosis.
+    /// Uses the fingerprint index rather than scanning error text.
+    pub async fn failure_clusters(&self, limit: i64) -> Result<Vec<FailureCluster>> {
+        sqlx::query_as::<_, FailureCluster>(
+            "SELECT failure_kind, min(left(last_error, 90)) AS sample, destination, \
+                    count(*)::bigint AS n \
+               FROM stampede_jobs \
+              WHERE error_fingerprint IS NOT NULL \
+              GROUP BY failure_kind, error_fingerprint, destination \
+              ORDER BY 4 DESC LIMIT $1",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    /// A bounded slice of the job table, newest first.
+    ///
+    /// CAVEAT, and it is a real one: `id` is uuidv7 so this walks the primary
+    /// key backwards, but there is no index on `state` outside the claim
+    /// predicate. On a large partition where the requested state is rare --
+    /// "show me discarded jobs" on a queue that mostly succeeds -- this reads
+    /// a lot of pages to find 50 rows. Bounded, so it cannot run away, but it
+    /// is not free. A dedicated index would make every insert pay for a
+    /// dashboard nobody may be watching; see plans/06.
+    pub async fn recent_jobs(&self, queue: &str, state: Option<&str>, limit: i64) -> Result<Vec<Job>> {
+        sqlx::query_as::<_, Job>(
+            "SELECT * FROM stampede_jobs \
+              WHERE queue = $1 AND ($2::text IS NULL OR state = $2) \
+              ORDER BY id DESC LIMIT $3",
+        )
+        .bind(queue)
+        .bind(state)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Every queue that has rows, from the counters.
+    pub async fn queues(&self) -> Result<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT DISTINCT queue FROM stampede_queue_counts WHERE n <> 0 ORDER BY 1",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|(q,)| q).collect())
+    }
+
+    /// Schedules and when they next fire.
+    pub async fn schedules(&self) -> Result<Vec<ScheduleRow>> {
+        sqlx::query_as::<_, ScheduleRow>(
+            "SELECT key, queue, task, cron_expr, interval_secs, timezone, \
+                    dst_policy, paused, next_run_at, last_run_at \
+               FROM stampede_schedules ORDER BY paused, next_run_at LIMIT 50",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Into::into)
     }
 
     /// Age of the oldest job still waiting to run, per queue.

@@ -20,12 +20,39 @@ no Node toolchain in the deployment.
 
 ### Surfaces
 
-- queue depth over time, per queue
-- jobs by state, live (`available` / `executing` / `retryable` / `discarded`)
-- a job's transition history, streamed
-- worker heartbeats (from the `stampede_workers` table — see `04-`)
-- retry/backoff visualisation, since `chrono-machines` knows the schedule
-- circuit breaker and throttle state from `breaker-machines` / `throttle-machines`
+> **BUILT**, except where noted. One caveat that only became visible on
+> implementing it: **breaker state cannot be read from the dashboard.**
+> `breaker-machines` state lives in the worker process's memory, and the
+> dashboard is normally served by a `--no-worker` daemon — a different process,
+> usually a different machine. Nothing can see another process's breaker.
+>
+> So the destinations panel shows the EVIDENCE a breaker reacts to, derived from
+> the job rows: how many jobs for each destination a worker refused
+> (`breaker_open`, which is recorded when a circuit IS open), how many were
+> throttled, how many genuinely failed, how many are waiting. That answers the
+> operator's actual question — "is this destination sick?" — without pretending
+> to a liveness it does not have.
+>
+> Making it a true live read would mean workers publishing breaker state to a
+> table on each heartbeat. Worth considering; not done, and not obviously worth
+> the write.
+
+
+- ~~queue depth over time, per queue~~ — depth and oldest-waiting age, live.
+  Not *over time*: a history needs a time series and somewhere to keep it.
+- ~~jobs by state, live~~ — plus a filterable job list, and failure clusters by
+  fingerprint, which is the panel that turns "47 jobs failed" into one row.
+- **a job's transition history, streamed** — not built. The `errors` ring buffer
+  holds it per job; there is no per-job page yet.
+- ~~worker heartbeats~~ — with the reaper's `dead_after` flagged before it fires.
+- **retry/backoff visualisation** — not built, though the row now carries
+  `backoff_base_ms`/`backoff_max_ms` precisely so it could be rendered without
+  re-deriving anything.
+- ~~circuit breaker and throttle state~~ — as *observed*; see the caveat above.
+
+Also built, and not anticipated here because the features did not exist yet:
+schedules with their cron rule and DST policy, resume progress (step names and
+cursors) per job, and autovacuum-behind warnings.
 
 That last one is worth emphasising: because resilience lives in our own crates,
 the dashboard can show breaker state and rate-limit headroom, which Sidekiq and
@@ -33,10 +60,21 @@ Oban cannot show without their paid tiers.
 
 ### Open
 
-- Does the daemon serve the dashboard directly, or is it a separate binary?
-- Auth model. Note the CommonShare precedent: GoodJob's dashboard was left
-  unauthenticated on staging/prod for a long time because auth was opt-in.
-  **Make it secure by default here.**
+- ~~Does the daemon serve the dashboard directly?~~ It does, behind `--http`.
+- ~~Auth model.~~ **Opt-out, not opt-in**: no `--dashboard-token`, no dashboard,
+  and the daemon says so at startup. Unauthenticated requests get 404 rather
+  than 401 — an anonymous caller has no business learning a dashboard is here.
+  The token rides on the query string because `EventSource` cannot set headers,
+  which puts it in server logs and browser history; that cost is written into
+  the module docs rather than glossed.
+- **Still open: write actions.** Retry, cancel, pause-schedule and re-drive are
+  MCP-only. In a browser they need CSRF protection, confirmation and an audit
+  trail of who did what — none of which the read-only console has.
+- **Still open: the job list is not indexed for it.** `recent_jobs` walks the
+  primary key backwards and filters on `state`, so asking for a rare state on a
+  large partition reads a lot of pages. Bounded by `LIMIT`, so it cannot run
+  away, but it is not free. A dedicated index would make every insert pay for a
+  dashboard nobody may be watching.
 
 ## MCP control plane
 
