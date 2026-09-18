@@ -8,7 +8,8 @@
 //!     cargo test --test integration
 
 use sqlx::{AssertSqlSafe, PgPool};
-use stampede_core::{DstPolicy, FailureKind, NewJob, Queue};
+use std::time::Duration;
+use stampede_core::{DstPolicy, FailureKind, JobState, NewJob, Queue};
 use uuid::Uuid;
 
 /// Each test gets its own Postgres schema.
@@ -401,4 +402,231 @@ async fn paused_schedules_never_fire() {
         .unwrap();
 
     assert_eq!(q.run_due_schedules(10).await.unwrap(), 0);
+}
+
+// ---------------------------------------------------------------- plans/15
+
+#[tokio::test]
+async fn our_own_backpressure_refunds_the_attempt() {
+    // The correctness rule. `attempt` is spent at claim, so declining to run a
+    // job has to give it back -- otherwise a long downstream outage silently
+    // burns every queued job's budget and discards the whole backlog.
+    let q = q!();
+    let id = q.enqueue(NewJob::new("default", "calls_api")).await.unwrap().unwrap();
+    let w = q.register_worker("h", 1, &["default".into()]).await.unwrap();
+
+    let claimed = q.claim("default", w, 1).await.unwrap();
+    assert_eq!(claimed[0].attempt, 1, "claim spends an attempt");
+
+    q.fail(&claimed[0], w, FailureKind::BreakerOpen, "circuit open", Some(Duration::from_millis(1)))
+        .await
+        .unwrap();
+
+    let job = q.fetch("default", id).await.unwrap().unwrap();
+    assert_eq!(job.attempt, 0, "breaker_open must refund");
+    assert_eq!(job.state, JobState::Retryable);
+    assert_eq!(job.interruptions, 0, "a refund is not also an interruption");
+}
+
+#[tokio::test]
+async fn a_raise_does_not_refund() {
+    // The other half: if everything refunded, max_attempts would never be
+    // reached and the retry budget would be decorative.
+    let q = q!();
+    let id = q.enqueue(NewJob::new("default", "buggy")).await.unwrap().unwrap();
+    let w = q.register_worker("h", 1, &["default".into()]).await.unwrap();
+    let claimed = q.claim("default", w, 1).await.unwrap();
+
+    q.fail(&claimed[0], w, FailureKind::Raised, "boom", Some(Duration::from_millis(1)))
+        .await
+        .unwrap();
+
+    assert_eq!(q.fetch("default", id).await.unwrap().unwrap().attempt, 1);
+}
+
+#[tokio::test]
+async fn a_job_that_kills_workers_is_discarded_long_before_max_attempts() {
+    // The interruptions brake. With max_attempts 25 and one free interruption,
+    // a job that segfaults its worker must stop after the SECOND claim -- not
+    // walk 25 workers down one process at a time.
+    let q = q!();
+    let id = q.enqueue(NewJob::new("default", "segfaults")).await.unwrap().unwrap();
+    let w = q.register_worker("h", 1, &["default".into()]).await.unwrap();
+
+    let c = q.claim("default", w, 1).await.unwrap();
+    q.fail_with_exit(&c[0], w, FailureKind::WorkerExited, "killed", Some(Duration::from_millis(1)), Some(137))
+        .await
+        .unwrap();
+    assert_eq!(q.fetch("default", id).await.unwrap().unwrap().state, JobState::Retryable);
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let c = q.claim("default", w, 1).await.unwrap();
+    assert_eq!(c.len(), 1, "should be claimable again after one interruption");
+    q.fail_with_exit(&c[0], w, FailureKind::WorkerExited, "killed", Some(Duration::from_millis(1)), Some(137))
+        .await
+        .unwrap();
+
+    let job = q.fetch("default", id).await.unwrap().unwrap();
+    assert_eq!(job.state, JobState::Discarded, "the interruptions budget, not max_attempts");
+    assert_eq!(job.interruptions, 2);
+    assert!(job.attempt < job.max_attempts, "attempt budget was nowhere near spent");
+
+    // The exit status survives, which is what makes an OOM diagnosable.
+    let errors = job.errors.as_array().expect("errors is an array");
+    assert_eq!(errors.len(), 2);
+    assert_eq!(errors[0]["exit_status"], 137);
+}
+
+#[tokio::test]
+async fn the_error_history_is_bounded() {
+    // River bounds attempted_by but appends errors unbounded -- the half that
+    // actually leaks, since error text dwarfs a worker id.
+    let q = q!();
+    let id = q
+        .enqueue(NewJob::new("default", "flaky").max_attempts(100))
+        .await
+        .unwrap()
+        .unwrap();
+    let w = q.register_worker("h", 1, &["default".into()]).await.unwrap();
+
+    for i in 0..15 {
+        let c = q.claim("default", w, 1).await.unwrap();
+        assert_eq!(c.len(), 1, "iteration {i}");
+        q.fail(&c[0], w, FailureKind::Raised, &format!("failure {i}"), Some(Duration::from_millis(1)))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    let job = q.fetch("default", id).await.unwrap().unwrap();
+    let errors = job.errors.as_array().unwrap();
+    assert_eq!(errors.len(), 10, "ring buffer must cap at 10");
+    assert_eq!(errors[9]["message"], "failure 14", "newest kept");
+    assert_eq!(errors[0]["message"], "failure 5", "oldest dropped");
+}
+
+#[tokio::test]
+async fn a_terminal_failure_dead_letters_with_provenance() {
+    // pg-boss's design: the DLQ is a queue, so re-drive is just working it.
+    // The provenance is what makes the resulting row actionable -- a dead
+    // letter with no history is an alert nobody can do anything with.
+    let q = q!();
+    q.create_queue("dead").await.unwrap();
+
+    let id = q
+        .enqueue(NewJob::new("default", "doomed").max_attempts(1).dead_letter("dead"))
+        .await
+        .unwrap()
+        .unwrap();
+    let w = q.register_worker("h", 1, &["default".into()]).await.unwrap();
+    let c = q.claim("default", w, 1).await.unwrap();
+    q.fail(&c[0], w, FailureKind::Raised, "boom", None).await.unwrap();
+
+    assert_eq!(q.fetch("default", id).await.unwrap().unwrap().state, JobState::Discarded);
+
+    let letters = q.claim("dead", w, 10).await.unwrap();
+    assert_eq!(letters.len(), 1, "the failure should have landed in the DLQ");
+    assert_eq!(letters[0].task, "doomed");
+    assert_eq!(letters[0].source_queue.as_deref(), Some("default"));
+    assert_eq!(letters[0].source_id, Some(id));
+    assert_eq!(letters[0].source_attempts, Some(1));
+    assert!(letters[0].dead_letter_queue.is_none(), "a dead letter must not itself dead-letter");
+}
+
+#[tokio::test]
+async fn a_wedged_job_expires_even_though_its_worker_is_healthy() {
+    // The case neither other timeout layer covers: the worker is alive and
+    // heartbeating normally, so the reaper sees nothing wrong, but the job
+    // itself is stuck.
+    let q = q!();
+    let id = q
+        .enqueue(NewJob::new("default", "wedged").expires_in(Duration::from_secs(1)))
+        .await
+        .unwrap()
+        .unwrap();
+    let w = q.register_worker("h", 1, &["default".into()]).await.unwrap();
+    q.claim("default", w, 1).await.unwrap();
+
+    assert_eq!(q.expire(10).await.unwrap(), 0, "not expired yet");
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert_eq!(q.expire(10).await.unwrap(), 1);
+
+    let job = q.fetch("default", id).await.unwrap().unwrap();
+    assert_eq!(job.failure_kind, Some(FailureKind::TimedOut));
+    assert_eq!(job.state, JobState::Retryable, "expiry uses the normal fail path");
+}
+
+#[tokio::test]
+async fn touching_a_long_job_keeps_it_alive() {
+    // A legitimately slow job must be distinguishable from a wedged one, or
+    // the only available response is to guess a timeout.
+    let q = q!();
+    let id = q
+        .enqueue(NewJob::new("default", "slow").expires_in(Duration::from_secs(1)))
+        .await
+        .unwrap()
+        .unwrap();
+    let w = q.register_worker("h", 1, &["default".into()]).await.unwrap();
+    let c = q.claim("default", w, 1).await.unwrap();
+
+    for _ in 0..3 {
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(q.touch(&c[0], w).await.unwrap(), "touch should succeed while we own it");
+        assert_eq!(q.expire(10).await.unwrap(), 0, "a touching job must not expire");
+    }
+    assert_eq!(q.fetch("default", id).await.unwrap().unwrap().state, JobState::Executing);
+
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert_eq!(q.expire(10).await.unwrap(), 1, "stop touching and it expires");
+}
+
+// ---------------------------------------------------------------- plans/13
+
+#[tokio::test]
+async fn depth_comes_from_counters_and_tracks_transitions() {
+    // The counters must follow the job through its whole lifecycle, or the
+    // dashboard lies -- which is worse than being slow, since nobody checks a
+    // number they believe.
+    let q = q!();
+    for _ in 0..5 {
+        q.enqueue(NewJob::new("default", "x")).await.unwrap();
+    }
+    assert_eq!(depth_of(&q, "available").await, 5);
+
+    let w = q.register_worker("h", 1, &["default".into()]).await.unwrap();
+    let claimed = q.claim("default", w, 2).await.unwrap();
+    assert_eq!(depth_of(&q, "available").await, 3);
+    assert_eq!(depth_of(&q, "executing").await, 2);
+
+    q.complete(&claimed[0], w).await.unwrap();
+    assert_eq!(depth_of(&q, "executing").await, 1);
+    assert_eq!(depth_of(&q, "completed").await, 1);
+}
+
+#[tokio::test]
+async fn recount_repairs_drifted_counters() {
+    // Counters drift is a bug, but one that must be repairable without
+    // downtime -- otherwise the only fix is the aggregate we banned.
+    let q = q!();
+    for _ in 0..4 {
+        q.enqueue(NewJob::new("default", "x")).await.unwrap();
+    }
+    sqlx::query("UPDATE stampede_queue_counts SET n = 999 WHERE queue = 'default'")
+        .execute(q.pool())
+        .await
+        .unwrap();
+    assert_eq!(depth_of(&q, "available").await, 999);
+
+    q.recount("default").await.unwrap();
+    assert_eq!(depth_of(&q, "available").await, 4);
+}
+
+async fn depth_of(q: &Queue, state: &str) -> i64 {
+    q.depth("default")
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|(s, _)| s == state)
+        .map(|(_, n)| n)
+        .unwrap_or(0)
 }

@@ -251,7 +251,7 @@ impl Worker {
                             .fail(
                                 &job,
                                 worker_id,
-                                FailureKind::Interrupted,
+                                FailureKind::Throttled,
                                 "throttled: tenant rate limit",
                                 Some(delay),
                             )
@@ -364,12 +364,12 @@ async fn report_failure(
     backoff: BackoffPolicy,
 ) -> Result<()> {
     let kind = match &err {
-        Error::Timeout(_) => FailureKind::Timeout,
-        // The downstream is sick, not the job. Recorded as `interrupted` for
-        // the same reason a dead worker is: the job never got a fair run, so
-        // treating it as a defect would burn the budget on someone else's
-        // outage.
-        Error::CircuitOpen(_) => FailureKind::Interrupted,
+        Error::Timeout(_) => FailureKind::TimedOut,
+        // The downstream is sick, not the job. `breaker_open` REFUNDS the
+        // attempt spent at claim: the job never got a fair run, and burning its
+        // budget on someone else's outage would mean a long enough downstream
+        // failure discards the entire backlog rather than replaying it.
+        Error::CircuitOpen(_) => FailureKind::BreakerOpen,
         e if e.is_unrecoverable() => FailureKind::Unrecoverable,
         _ => FailureKind::Raised,
     };

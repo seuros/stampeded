@@ -56,8 +56,10 @@ impl Queue {
         let id: Option<Uuid> = sqlx::query_scalar(
             r#"
             INSERT INTO stampede_jobs
-                (queue, task, args, tenant_id, priority, max_attempts, scheduled_at, dedup_scope)
-            VALUES ($1, $2, $3, $4, $5, $6, coalesce($7, now()), $8)
+                (queue, task, args, tenant_id, priority, max_attempts, scheduled_at,
+                 dedup_scope, destination, dead_letter_queue, expire_seconds)
+            VALUES ($1, $2, $3, $4, $5, $6, coalesce($7, now()),
+                    $8, $9, $10, coalesce($11, 3600))
             ON CONFLICT DO NOTHING
             RETURNING id
             "#,
@@ -70,6 +72,9 @@ impl Queue {
         .bind(job.max_attempts)
         .bind(job.scheduled_at)
         .bind(&job.dedup_scope)
+        .bind(&job.destination)
+        .bind(&job.dead_letter_queue)
+        .bind(job.expire_seconds)
         .fetch_optional(&self.pool)
         .await?
         .flatten();
@@ -123,30 +128,76 @@ impl Queue {
         error: &str,
         retry_delay: Option<std::time::Duration>,
     ) -> Result<Transition> {
-        let kind_str = match kind {
-            FailureKind::Raised => "raised",
-            FailureKind::Timeout => "timeout",
-            FailureKind::Interrupted => "interrupted",
-            FailureKind::Cancelled => "cancelled",
-            FailureKind::Unrecoverable => "unrecoverable",
-        };
+        self.fail_with_exit(job, worker_id, kind, error, retry_delay, None).await
+    }
 
-        let row: Option<(Option<String>, Option<String>)> = sqlx::query_as(
-            "SELECT was, now_state FROM stampede_fail($1, $2, $3, $4, $5, $6)",
+    /// `fail`, plus the exit status of a worker process that died.
+    ///
+    /// Separate entry point because only a supervising daemon has a status to
+    /// report, and 137 (OOM) is the single highest-signal artefact in the
+    /// survey: it turns "the job mysteriously stopped" into "the job needs more
+    /// memory".
+    #[allow(clippy::too_many_arguments)]
+    pub async fn fail_with_exit(
+        &self,
+        job: &Job,
+        worker_id: Uuid,
+        kind: FailureKind,
+        error: &str,
+        retry_delay: Option<std::time::Duration>,
+        exit_status: Option<i32>,
+    ) -> Result<Transition> {
+        let row: Option<(Option<String>, Option<String>, Option<bool>)> = sqlx::query_as(
+            "SELECT was, now_state, dead_lettered FROM stampede_fail($1,$2,$3,$4,$5,$6,$7)",
         )
         .bind(&job.queue)
         .bind(job.id)
         .bind(worker_id)
-        .bind(kind_str)
+        .bind(kind.as_str())
         .bind(error)
         .bind(retry_delay.map(|d| d.as_millis() as i64))
+        .bind(exit_status)
         .fetch_optional(&self.pool)
         .await?;
 
         Ok(match row {
-            Some((was, now)) => Transition { was, now, owned: true },
+            Some((was, now, _dlq)) => Transition { was, now, owned: true },
             None => Transition { was: None, now: None, owned: false },
         })
+    }
+
+    /// Tell the database a long-running job is still progressing.
+    ///
+    /// Layer 3 of the timeout stack. The worker heartbeat says the PROCESS is
+    /// alive; this says this particular JOB is. Without it a legitimately slow
+    /// job and a wedged one are indistinguishable, and the only available
+    /// response is to guess a timeout.
+    pub async fn touch(&self, job: &Job, worker_id: Uuid) -> Result<bool> {
+        // Double Option: the outer is "no row came back", the inner is the
+        // function returning NULL because the UPDATE matched nothing. Both mean
+        // the same thing here -- this worker no longer owns the job.
+        let ok: Option<Option<bool>> = sqlx::query_scalar("SELECT stampede_touch($1, $2, $3)")
+            .bind(&job.queue)
+            .bind(job.id)
+            .bind(worker_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(ok.flatten().unwrap_or(false))
+    }
+
+    /// Fail jobs whose wall-clock budget ran out. Returns how many.
+    ///
+    /// Catches what neither other layer can: a worker that is alive and
+    /// heartbeating normally but wedged on one job forever. The reaper only
+    /// sees dead workers; the in-process timeout needs the worker to still be
+    /// running our code and cooperating.
+    pub async fn expire(&self, limit: i32) -> Result<u64> {
+        let rows: Vec<(Uuid, String, Option<Uuid>)> =
+            sqlx::query_as("SELECT out_id, out_queue, out_worker FROM stampede_expire($1)")
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows.len() as u64)
     }
 
     /// Register this process as a worker. The returned id is the heartbeat
@@ -375,13 +426,22 @@ impl Queue {
     }
 
     /// Queue depth by state — the dashboard and MCP `queue_status` tool.
+    ///
+    /// Reads `stampede_queue_counts`, NEVER `count(*)` over the job table.
+    /// plans/13 item 6: an unbounded aggregate holds the xmin horizon open,
+    /// which stops vacuum reclaiming dead tuples, which bloats the table, which
+    /// makes the aggregate slower, which holds the horizon open longer. pg-boss
+    /// documents that spiral (src/plans.ts:968-975). The dashboard runs this
+    /// every second, so it is exactly the query that must not cause it.
+    ///
+    /// Zero rows are dropped: "0 discarded" is not information, and a counter
+    /// row lingers after the last job of that state is pruned.
     pub async fn depth(&self, queue: &str) -> Result<Vec<(String, i64)>> {
         let rows = sqlx::query_as::<_, (String, i64)>(
             r#"
-            SELECT state::text, count(*)
-              FROM stampede_jobs
-             WHERE queue = $1 AND finished_at IS NULL
-             GROUP BY state
+            SELECT state, n
+              FROM stampede_queue_counts
+             WHERE queue = $1 AND n <> 0
              ORDER BY state
             "#,
         )
@@ -390,5 +450,17 @@ impl Queue {
         .await?;
 
         Ok(rows)
+    }
+
+    /// Rebuild a queue's counters from the jobs table.
+    ///
+    /// The one place an unbounded aggregate is allowed, because it is explicit,
+    /// manual and rare. Do not put it on a timer.
+    pub async fn recount(&self, queue: &str) -> Result<()> {
+        sqlx::query("SELECT stampede_recount_queue($1)")
+            .bind(queue)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 }

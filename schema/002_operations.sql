@@ -64,6 +64,11 @@ LANGUAGE sql AS $$
     UPDATE stampede_jobs j
        SET state        = 'executing',
            attempt      = j.attempt + 1,
+           -- Seed the job heartbeat at claim so stampede_expire has a baseline
+           -- for a job that never calls stampede_touch. Left NULL it would fall
+           -- back to claimed_at, which is the same thing -- but only by accident,
+           -- and the expiry predicate should not depend on that coincidence.
+           heartbeat_at = coalesce(p_now, now()),
            claimed_by   = p_worker_id,
            claimed_at   = coalesce(p_now, now()),
            -- Bounded ring buffer (River). Unbounded attempt history is a slow
@@ -120,6 +125,44 @@ $$;
 -- default, which not one of thirteen surveyed implementations does) and passes
 -- the resulting instant in. Putting the formula in SQL would fork it.
 -- ---------------------------------------------------------------------------
+-- Error fingerprint: the normalisation that makes failures CLUSTER.
+--
+-- "connection to 10.0.0.7:5432 timed out after 30012ms" and
+-- "connection to 10.0.0.9:5432 timed out after 29998ms" are one incident, but
+-- as raw strings they are two. Strip the parts that vary per occurrence —
+-- UUIDs, hex blobs, numbers — and hash what survives. Nobody in the survey
+-- does this, which is why every `failure_summary` equivalent lists instances
+-- instead of causes.
+--
+-- IMMUTABLE so it can be computed in an index or a generated column later.
+CREATE FUNCTION stampede_fingerprint(p_error text) RETURNS bytea
+LANGUAGE sql IMMUTABLE AS $$
+    SELECT sha256(convert_to(
+        regexp_replace(
+          regexp_replace(
+            regexp_replace(
+              lower(coalesce(p_error, '')),
+              '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', 'U', 'g'),
+            '0x[0-9a-f]+|\m[0-9a-f]{16,}\M', 'X', 'g'),
+          '[0-9]+', 'N', 'g'),
+        'UTF8')::bytea);
+$$;
+
+-- ---------------------------------------------------------------------------
+-- FAIL
+--
+-- Three outcomes, decided by WHY the job failed rather than only by how many
+-- times it has (plans/15).
+--
+--   breaker_open      -- our backpressure. REFUNDS the attempt.
+--   worker-death      -- charges `interruptions`, a separate and much tighter
+--                        budget than `attempt`.
+--   everything else   -- charges `attempt`, which was already spent at claim.
+--
+-- On a terminal outcome the job dead-letters if a queue is configured, because
+-- pg-boss is right that the DLQ should be a QUEUE: re-drive is then just
+-- working it, and every tool that understands jobs already understands it.
+-- ---------------------------------------------------------------------------
 CREATE FUNCTION stampede_fail(
     p_queue        text,
     p_id           uuid,
@@ -136,40 +179,167 @@ CREATE FUNCTION stampede_fail(
     -- scheduled for "now" not ready yet.
     --
     -- The database applies its own clock, so there is nothing to agree about.
-    p_retry_delay_ms bigint DEFAULT NULL
-) RETURNS TABLE (was text, now_state text)
-LANGUAGE sql AS $$
+    p_retry_delay_ms bigint DEFAULT NULL,
+    -- Exit status, when the daemon supervises the worker process and saw it
+    -- die. 137 is OOM. plans/15 calls this the cheapest, highest-signal
+    -- artefact in the survey, and it is thrown away everywhere else.
+    p_exit_status  integer DEFAULT NULL
+) RETURNS TABLE (was text, now_state text, dead_lettered boolean)
+LANGUAGE plpgsql AS $$
+DECLARE
+    j            stampede_jobs%ROWTYPE;
+    v_was        text;
+    v_state      text;
+    v_interrupt  boolean;
+    v_refund     boolean;
+    v_terminal   boolean;
+    v_dlq        boolean := false;
+BEGIN
+    SELECT * INTO j FROM stampede_jobs
+     WHERE queue = p_queue AND id = p_id AND claimed_by = p_worker_id;
+    IF NOT FOUND THEN
+        -- Not ours: the reaper already reclaimed it and somebody else owns the
+        -- outcome. Writing a failure over another worker's result would be
+        -- worse than doing nothing.
+        RETURN;
+    END IF;
+
+    v_was := j.state;
+
+    -- Did the worker die, rather than the job fail?
+    v_interrupt := p_kind IN ('heartbeat_lost', 'worker_exited', 'worker_missing');
+    -- Did WE refuse to run it?
+    -- Both are US declining to run the job: one because the downstream is
+    -- sick, one because the tenant is over its share. Kept as separate kinds
+    -- because the operator response differs -- "the API is down" and "this
+    -- customer is flooding us" want different people woken up.
+    v_refund    := p_kind IN ('breaker_open', 'throttled');
+
+    -- The correctness rule from plans/15: a failure caused by our own
+    -- backpressure must not count against the job's retry budget. The attempt
+    -- was spent at claim, so declining to run the job has to give it back --
+    -- otherwise a downstream outage silently burns every job's budget and a
+    -- fleet-wide breaker trip discards the entire backlog. This is Oban's
+    -- `snooze` (which decrements) and River's EventKindJobInterrupted (which
+    -- "does not consume an attempt or add an attempt error").
+    v_terminal := CASE
+        WHEN v_refund    THEN false
+        WHEN p_kind = 'unrecoverable' THEN true
+        WHEN v_interrupt THEN j.interruptions + 1 > j.max_interruptions
+        ELSE j.attempt >= j.max_attempts
+    END;
+
+    v_state := CASE WHEN v_terminal THEN 'discarded' ELSE 'retryable' END;
+
     UPDATE stampede_jobs
-       SET state = CASE
-                     WHEN p_kind = 'unrecoverable'    THEN 'discarded'
-                     WHEN attempt >= max_attempts     THEN 'discarded'
-                     ELSE 'retryable'
-                   END,
+       SET state        = v_state,
            failure_kind = p_kind,
+           attempt      = CASE WHEN v_refund THEN greatest(attempt - 1, 0) ELSE attempt END,
+           interruptions = CASE WHEN v_interrupt THEN interruptions + 1 ELSE interruptions END,
            -- Truncated in SQL, not in client code: que is the only surveyed
            -- implementation that bounds error text database-side, and it is the
            -- only bound that survives a polyglot worker (plans/15).
            last_error   = left(p_error, 4000),
+           error_fingerprint = stampede_fingerprint(p_error),
+           -- Ring buffer, newest last, capped at 10. River bounds attempted_by
+           -- but appends errors unbounded -- the half that actually leaks,
+           -- since error text dwarfs a worker id.
+           errors = (
+               SELECT coalesce(jsonb_agg(e), '[]'::jsonb) FROM (
+                   SELECT e FROM jsonb_array_elements(
+                       errors || jsonb_build_object(
+                           'at',          now(),
+                           'attempt',     j.attempt,
+                           'kind',        p_kind,
+                           'message',     left(p_error, 1000),
+                           'destination', j.destination,
+                           'exit_status', p_exit_status
+                       )
+                   ) e OFFSET greatest(jsonb_array_length(errors) + 1 - 10, 0)
+               ) t
+           ),
            scheduled_at = CASE
                             WHEN p_retry_delay_ms IS NULL THEN scheduled_at
                             ELSE now() + make_interval(secs => p_retry_delay_ms / 1000.0)
                           END,
            claimed_by   = NULL,
            claimed_at   = NULL,
+           heartbeat_at = NULL,
            -- Release the dedup slot only on a terminal outcome; a retryable job
            -- keeps its slot so a duplicate cannot be enqueued while it waits.
-           dedup_scope  = CASE
-                            WHEN p_kind = 'unrecoverable' OR attempt >= max_attempts
-                            THEN NULL ELSE dedup_scope
-                          END,
-           finished_at  = CASE
-                            WHEN p_kind = 'unrecoverable' OR attempt >= max_attempts
-                            THEN now() ELSE NULL
-                          END
-     WHERE queue = p_queue
-       AND id    = p_id
-       AND claimed_by = p_worker_id
-    RETURNING OLD.state, NEW.state;
+           dedup_scope  = CASE WHEN v_terminal THEN NULL ELSE dedup_scope END,
+           finished_at  = CASE WHEN v_terminal THEN now() ELSE NULL END
+     WHERE queue = p_queue AND id = p_id AND claimed_by = p_worker_id;
+
+    -- Dead letter, with provenance. The copy carries where it came from and how
+    -- hard it tried, because a DLQ row with no history is an alert nobody can
+    -- action. Its own dead_letter_queue is left NULL: a dead letter that can
+    -- itself dead-letter is a loop.
+    IF v_terminal AND j.dead_letter_queue IS NOT NULL THEN
+        INSERT INTO stampede_jobs
+            (queue, task, args, tenant_id, priority, destination,
+             source_id, source_queue, source_attempts, max_attempts)
+        VALUES
+            (j.dead_letter_queue, j.task, j.args, j.tenant_id, j.priority, j.destination,
+             j.id, j.queue, j.attempt, j.max_attempts);
+        v_dlq := true;
+    END IF;
+
+    RETURN QUERY SELECT v_was, v_state, v_dlq;
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- TOUCH — a long job proving it is alive
+--
+-- Layer 3 of the timeout stack (plans/15), pg-boss's touchJobs. The worker
+-- heartbeat says the PROCESS is alive; this says this particular JOB is still
+-- progressing. Without it a legitimately long job and a wedged one look
+-- identical, and the only available response is to guess a timeout.
+-- ---------------------------------------------------------------------------
+CREATE FUNCTION stampede_touch(p_queue text, p_id uuid, p_worker_id uuid)
+RETURNS boolean
+LANGUAGE sql AS $$
+    UPDATE stampede_jobs SET heartbeat_at = now()
+     WHERE queue = p_queue AND id = p_id
+       AND claimed_by = p_worker_id AND state = 'executing'
+    RETURNING true;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- EXPIRE — the timeout that fires when nobody is alive to fire it
+--
+-- Layer 2 of the three. The in-process tokio timeout cannot fire if the worker
+-- is dead, and the reaper only helps once the worker has stopped heartbeating
+-- entirely -- a worker that is alive and healthy but stuck on one job is
+-- invisible to both. This catches exactly that.
+--
+-- Routes through the NORMAL fail path so it consumes a retry, backs off and
+-- dead-letters like any other failure. pg-boss's failJobsByTimeout.
+-- ---------------------------------------------------------------------------
+CREATE FUNCTION stampede_expire(p_limit integer DEFAULT 100)
+RETURNS TABLE (out_id uuid, out_queue text, out_worker uuid)
+LANGUAGE plpgsql AS $$
+DECLARE
+    r record;
+BEGIN
+    FOR r IN
+        SELECT id, queue, claimed_by, expire_seconds
+          FROM stampede_jobs
+         WHERE state = 'executing'
+           -- From the last sign of life, not from claim: a job that is touching
+           -- is working, however long it has been running.
+           AND coalesce(heartbeat_at, claimed_at) < now() - make_interval(secs => expire_seconds)
+         LIMIT p_limit
+         FOR UPDATE SKIP LOCKED
+    LOOP
+        PERFORM stampede_fail(
+            r.queue, r.id, r.claimed_by, 'timed_out',
+            format('exceeded expire_seconds (%s)', r.expire_seconds), NULL, NULL);
+        out_id := r.id; out_queue := r.queue; out_worker := r.claimed_by;
+        RETURN NEXT;
+    END LOOP;
+END;
 $$;
 
 -- ---------------------------------------------------------------------------
@@ -193,17 +363,28 @@ LANGUAGE sql AS $$
          WHERE w.last_heartbeat < now() - p_dead_after
     )
     UPDATE stampede_jobs j
-       SET state        = CASE WHEN j.attempt >= j.max_attempts
+       -- TWO budgets now, and the tighter one usually wins. `attempt` was spent
+       -- at claim (the plans/04 poison brake); `interruptions` is the plans/15
+       -- brake specific to jobs that KILL their worker, defaulting to one free
+       -- one. A job that segfaults every worker it touches hits max_interruptions
+       -- after two claims instead of walking 25 workers down first.
+       SET state        = CASE WHEN j.interruptions + 1 > j.max_interruptions
+                                 OR j.attempt >= j.max_attempts
                                THEN 'discarded' ELSE 'retryable' END,
            -- Named distinctly from a raise. solid_queue's three typed process
            -- errors are the model; conflating them is what makes "why did this
            -- run twice" unanswerable in most implementations.
-           failure_kind = 'interrupted',
-           last_error   = 'worker stopped heartbeating; job reclaimed',
+           failure_kind  = 'worker_missing',
+           interruptions = j.interruptions + 1,
+           last_error    = 'worker stopped heartbeating; job reclaimed',
+           error_fingerprint = stampede_fingerprint('worker stopped heartbeating; job reclaimed'),
            claimed_by   = NULL,
            claimed_at   = NULL,
-           finished_at  = CASE WHEN j.attempt >= j.max_attempts THEN now() END,
-           dedup_scope  = CASE WHEN j.attempt >= j.max_attempts
+           heartbeat_at = NULL,
+           finished_at  = CASE WHEN j.interruptions + 1 > j.max_interruptions
+                                 OR j.attempt >= j.max_attempts THEN now() END,
+           dedup_scope  = CASE WHEN j.interruptions + 1 > j.max_interruptions
+                                 OR j.attempt >= j.max_attempts
                                THEN NULL ELSE j.dedup_scope END
       FROM dead d
      WHERE j.claimed_by = d.id
