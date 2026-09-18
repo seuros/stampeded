@@ -653,6 +653,28 @@ async fn execute(
             Err(Error::UnknownTask(task.clone()))
         }
         Some(h) => {
+            // River's invariant: rescue_after > job_timeout (plans/15 notes it
+            // is "enforced nowhere except a Go doc comment"). Layer 2 is
+            // per-job and set by the ENQUEUER, so this cannot be a constant --
+            // only a check against the row we were handed.
+            //
+            // Inverted, the database expires a job that is merely slow and
+            // returns it to `retryable`, where a second worker claims it while
+            // this one is still running it. The default (900s timeout vs 3600s
+            // expiry) is safe; a job enqueued with a short expire_seconds is
+            // not, and would otherwise double-execute silently.
+            if timeout.as_secs() >= job.expire_seconds.max(0) as u64 {
+                warn!(
+                    %job_id,
+                    task = %task,
+                    job_timeout_secs = timeout.as_secs(),
+                    expire_seconds = job.expire_seconds,
+                    "job_timeout is not shorter than this job's expire_seconds: the \
+                     database may expire it and let another worker claim it while this \
+                     one is still running it"
+                );
+            }
+
             let ctx = JobContext::new(job.clone(), queue.clone(), worker_id);
 
             let run = || async {

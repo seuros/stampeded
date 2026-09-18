@@ -1,6 +1,12 @@
 # frozen_string_literal: true
 
 require "socket"
+# worker.rb classifies Timeout::Error in failure_kind_for. Without this require
+# that constant does not exist outside Rails (ActiveSupport loads it), so EVERY
+# ordinary job failure raised NameError inside the rescue, report(:fail) never
+# ran, and the job sat in `executing` with no last_error until the reaper took
+# it -- charging an interruption for what was a clean application error.
+require "timeout"
 
 module Stampede
   # Claims jobs and runs them.
@@ -164,7 +170,10 @@ module Stampede
         handler = @handlers[job.task]
         raise UnknownTask, "no handler registered for task #{job.task.inspect}" if handler.nil?
 
-        handler.call(JobContext.new(job, worker_id))
+        # Layer 1. See Configuration#job_timeout: without this the database
+        # expires a merely-slow job and hands it to another worker while this
+        # thread is still running it.
+        with_job_timeout(job) { handler.call(JobContext.new(job, worker_id)) }
         report(:complete, job, worker_id)
       rescue Exception => e # rubocop:disable Lint/RescueException
         # Exception, not StandardError: a job that raises SignalException or
@@ -224,6 +233,25 @@ module Stampede
 
       log "DRIFT: the database did #{was} -> #{now} on #{event}, which lifecycle.rb " \
           "does not declare. schema/002_operations.sql and the state machine disagree."
+    end
+
+    # Bound the handler, and warn if the bound cannot do its job.
+    #
+    # `expire_seconds` is per-job and set by the enqueuer, so the ordering that
+    # prevents double execution cannot be enforced by a constant -- only
+    # checked against the row we were actually handed.
+    def with_job_timeout(job, &block)
+      limit = Stampede.config.job_timeout
+      return yield if limit.nil? || limit <= 0
+
+      expire = (job.row["expire_seconds"] || 3600).to_i
+      if limit >= expire
+        log "job_timeout (#{limit}s) is not shorter than #{job.task}'s expire_seconds " \
+            "(#{expire}s): the database may expire this job and let another worker " \
+            "claim it while this one is still running it"
+      end
+
+      Timeout.timeout(limit, Timeout::Error, "job exceeded job_timeout of #{limit}s", &block)
     end
 
     def failure_kind_for(error)

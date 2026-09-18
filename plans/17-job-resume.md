@@ -199,10 +199,41 @@ an error that says to store a cursor rather than a set.
   job opened. Elsewhere the connection is passed explicitly. The non-atomic
   form still exists for jobs that are idempotent anyway and would rather not
   hold a transaction open.
-- **Interaction with `expire_seconds` is untested.** A job that checkpoints
-  regularly can now never expire, since each checkpoint refreshes
-  `heartbeat_at`. That is intended, but it means a job stuck in a checkpointing
-  *loop* is invisible to every timeout layer.
+- ~~**Interaction with `expire_seconds` is untested.**~~ **TESTED, and it
+  found two bugs in the Ruby worker — neither of them about checkpointing.**
+
+  The premise was half right. A checkpointing job does refresh `heartbeat_at`
+  and so is never expired by layer 2, which is intended. But "invisible to
+  every timeout layer" was wrong for Rust and right for Ruby, and chasing the
+  difference is what turned the bugs up:
+
+  - **Rust** bounds the handler with `job_timeout` (15 min, layer 1), which is
+    shorter than the 1 hour `expire_seconds` default. A looping job dies at
+    layer 1.
+  - **Ruby had no layer 1 at all.** `failure_kind_for` classified
+    `Timeout::Error` but the worker never imposed one, so River's
+    `rescue_after > job_timeout` invariant was violated **by construction**
+    rather than by misconfiguration. A hanging job — an HTTP call with no
+    timeout is the usual cause — kept its thread while `stampede_expire`
+    returned the row to `retryable` for a second worker to claim. Demonstrated:
+    the job reached `retryable` while execution 1 was still running.
+  - **The gem never required `timeout`.** Nothing inside Rails notices, because
+    ActiveSupport loads it. In the plain-Ruby worker the gem explicitly
+    supports, the `when Timeout::Error` clause is evaluated for *any* error that
+    is not `UnknownTask`, so **every ordinary job failure raised `NameError`
+    inside the rescue that was reporting it**. The job was never reported, sat
+    in `executing` with a null `last_error`, and was eventually reclaimed by the
+    reaper as though the worker had died — charging an interruption for a clean
+    application error.
+
+  Both fixed, with tests. The invariant is now also checked at run time on both
+  sides against the job's own `expire_seconds`, since layer 2 is set by the
+  enqueuer and cannot be validated by a constant.
+
+  What remains true from the original entry: a job stuck in a checkpointing
+  loop still defeats layer 2 by design, and now dies at layer 1 instead. That
+  is the right trade — the alternative is expiring jobs that are demonstrably
+  working.
 - **Should the dashboard show it?** A cursor is often the single most useful
   number about a long job ("50,000 / 100,000"), but it is opaque JSON and we
   cannot know which field to render.

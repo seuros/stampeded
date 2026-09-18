@@ -150,6 +150,29 @@ separately, because none would have been found by testing the happy path:
   ActiveRecord's decoders return `true` where a bare `PG.connect` returns
   `"t"`.
 
+Two more from testing an interaction rather than a feature. plans/17 listed
+"interaction with `expire_seconds` is untested" as an open item about
+checkpointing; testing it found nothing wrong with checkpointing and two bugs
+in the Ruby worker:
+
+- **The Ruby worker had no per-job timeout**, so River's
+  `rescue_after > job_timeout` invariant was violated *by construction*. A
+  hanging job kept its thread while the database expired the row and handed it
+  to a second worker. Rust was fine only because it has layer 1.
+- **The gem never required `timeout`**, yet classified `Timeout::Error`. Inside
+  Rails ActiveSupport loads it, which is why nothing ever noticed; in the
+  plain-Ruby worker the gem supports, every ordinary job failure raised
+  `NameError` *inside the rescue that was reporting the failure*, leaving the
+  job in `executing` with no error recorded.
+
+The second is also the third time a test of mine passed against the reverted
+fix. Same cause each time: the test ran in a process where something else had
+already supplied what the fix supplies — here `test_helper` requires
+`active_job`, so `Timeout` was always defined. It is now a subprocess test that
+boots a clean interpreter, and it fails with the exact `NameError` when the
+require is removed. A test that cannot observe the bug is not a test, and
+in-process tests of what the environment provides usually cannot.
+
 And one that appeared from running the suite *wrong*. Measuring `fillfactor`
 meant dropping and recreating databases, which left
 `STAMPEDE_TEST_DATABASE_URL` unset for one run. The Ruby suite reported

@@ -118,6 +118,63 @@ class WorkerTest < Minitest::Test
   ensure
     thread&.kill
   end
+
+  # An ordinary job failure must be REPORTED, in a worker that never loaded
+  # Rails.
+  #
+  # `failure_kind_for` matches on `Timeout::Error`, and nothing in the gem
+  # required "timeout". Inside Rails that constant exists because ActiveSupport
+  # loads it, which is why every existing test passed. In the plain-Ruby worker
+  # the gem explicitly supports via `register`, the `when Timeout::Error` clause
+  # is evaluated for ANY error that is not UnknownTask -- so every ordinary
+  # failure raised NameError inside the rescue, report(:fail) never ran, and the
+  # job sat in `executing` with a null last_error until the reaper took it,
+  # charging an interruption for a clean application error.
+  # The in-process half: the failure is reported and classified.
+  #
+  # NOTE: this half CANNOT detect the missing require, because test_helper
+  # requires active_job, which loads ActiveSupport, which loads timeout. The
+  # first version of this test passed with the fix reverted for exactly that
+  # reason. The subprocess test below is the one that actually holds the line.
+  def test_an_ordinary_failure_is_reported
+    id = Stampede.enqueue(queue: "default", task: "boom", max_attempts: 1)
+    worker = Stampede::Worker.new(queue: "default", poll_interval: 0.05)
+    worker.register("boom") { raise ArgumentError, "ordinary failure" }
+
+    run_worker(worker) { job_row(id)["state"] != "available" }
+
+    row = job_row(id)
+
+    refute_equal "executing", row["state"], "the failure was never reported"
+    assert_equal "raised", row["failure_kind"]
+    assert_match "ordinary failure", row["last_error"]
+  end
+
+  # Layer 1 must fire before layer 2, or the database hands a merely-slow job
+  # to a second worker while the first is still running it.
+  #
+  # The Ruby worker had no per-job timeout at all, so River's
+  # `rescue_after > job_timeout` invariant was violated by construction rather
+  # than by misconfiguration: a hanging job kept its thread while
+  # `stampede_expire` returned the row to `retryable` for someone else to claim.
+  def test_a_hanging_job_is_timed_out_before_the_database_expires_it
+    Stampede.config.job_timeout = 1.0
+    id = Stampede.enqueue(queue: "default", task: "hang", expire_seconds: 60, max_attempts: 1)
+
+    starts = Queue.new
+    worker = Stampede::Worker.new(queue: "default", poll_interval: 0.05)
+    worker.register("hang") { starts << 1; sleep 30 }
+
+    run_worker(worker) { %w[discarded retryable].include?(job_row(id)["state"]) }
+
+    assert_equal 1, starts.size, "the job must not have been started twice"
+    assert_equal "timed_out", job_row(id)["failure_kind"]
+    assert_match(/job_timeout/, job_row(id)["last_error"])
+  ensure
+    Stampede.config.job_timeout = 900.0
+  end
+
+
 end
 
 class WorkerValidationTest < Minitest::Test
@@ -132,4 +189,5 @@ class WorkerValidationTest < Minitest::Test
 
     assert Stampede::Worker.new(queue: "q", concurrency: 1, batch_size: 1)
   end
+
 end
