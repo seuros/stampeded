@@ -206,7 +206,12 @@ LANGUAGE sql AS $$
          WHERE enqueued_at < now() - p_older_than
          LIMIT 10000
     )
-    DELETE FROM stampede_cron_occurrences o USING doomed d
-     WHERE o.id = d.id
-    RETURNING 1;
+    -- Counted, for the same reason as stampede_prune: RETURNING 1 through a
+    -- RETURNS integer function is a constant, not a count.
+    , deleted AS (
+        DELETE FROM stampede_cron_occurrences o USING doomed d
+         WHERE o.id = d.id
+        RETURNING 1
+    )
+    SELECT count(*)::int FROM deleted;
 $$;

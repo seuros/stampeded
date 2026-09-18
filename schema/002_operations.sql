@@ -432,11 +432,24 @@ LANGUAGE sql AS $$
          ORDER BY finished_at
          LIMIT p_limit
          FOR UPDATE SKIP LOCKED
+    ),
+    -- COUNTED, not `RETURNING 1`.
+    --
+    -- A SQL function declared RETURNS integer yields the first column of the
+    -- FIRST ROW, so `DELETE ... RETURNING 1` returns 1 whether it deleted one
+    -- row or ten thousand (and NULL for none). The caller loops until the
+    -- returned count is less than the batch size -- with a constant 1 that
+    -- condition is always true, so the loop always exited after one batch and
+    -- a large backlog was pruned p_limit rows per TICK instead of per
+    -- iteration. The pruner looked correct and quietly did a fraction of the
+    -- work.
+    deleted AS (
+        DELETE FROM stampede_jobs j
+         USING doomed d
+         WHERE j.queue = d.queue AND j.id = d.id
+        RETURNING 1
     )
-    DELETE FROM stampede_jobs j
-     USING doomed d
-     WHERE j.queue = d.queue AND j.id = d.id
-    RETURNING 1;
+    SELECT count(*)::int FROM deleted;
 $$;
 
 -- ---------------------------------------------------------------------------

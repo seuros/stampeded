@@ -366,8 +366,7 @@ impl Queue {
         .await?;
 
         let n: Option<i32> = sqlx::query_scalar(
-            "SELECT count(*)::int FROM stampede_prune(\
-                 make_interval(secs => $1), $2, make_interval(secs => $3))",
+            "SELECT stampede_prune(make_interval(secs => $1), $2, make_interval(secs => $3))",
         )
         .bind(retain_completed.as_secs_f64())
         .bind(limit)

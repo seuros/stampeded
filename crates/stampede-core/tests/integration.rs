@@ -259,7 +259,7 @@ async fn retryable_is_reclaimable_so_poison_jobs_terminate() {
 }
 
 #[tokio::test]
-async fn reaper_reclaims_jobs_from_dead_workers_as_interrupted() {
+async fn reaper_reclaims_jobs_from_dead_workers_as_worker_missing() {
     let q = q!();
     let w = q
         .register_worker("test", 1, &["default".into()])
@@ -277,13 +277,17 @@ async fn reaper_reclaims_jobs_from_dead_workers_as_interrupted() {
     let n = q.reap(std::time::Duration::from_secs(300)).await.unwrap();
     assert_eq!(n, 1);
 
-    // Reclaimed as `interrupted`, distinct from a raise -- only BullMQ and
-    // solid_queue make this distinction (plans/15).
-    let kind: Option<String> = sqlx::query_scalar("SELECT failure_kind::text FROM stampede_jobs")
-        .fetch_one(q.pool())
-        .await
-        .unwrap();
-    assert_eq!(kind.as_deref(), Some("interrupted"));
+    // Reclaimed as `worker_missing`: the worker vanished without reporting,
+    // which is a different event from the job raising. Only BullMQ and
+    // solid_queue make that distinction at all (plans/15), and it is what
+    // charges the interruptions budget rather than the attempt budget.
+    let (kind, interruptions): (Option<String>, i16) =
+        sqlx::query_as("SELECT failure_kind::text, interruptions FROM stampede_jobs")
+            .fetch_one(q.pool())
+            .await
+            .unwrap();
+    assert_eq!(kind.as_deref(), Some("worker_missing"));
+    assert_eq!(interruptions, 1, "a reclaim charges the interruptions budget");
 
     // And it is claimable again, so the attempt budget can be spent.
     assert_eq!(q.claim("default", w, 1).await.unwrap().len(), 1);
@@ -1271,4 +1275,75 @@ async fn rescheduling_a_job_does_not_vacate_its_own_bucket() {
             .is_none(),
         "the slot must still be held after the reschedule"
     );
+}
+
+#[tokio::test]
+async fn prune_reports_how_many_it_actually_deleted() {
+    // This was a real bug and it hid in plain sight for the whole project.
+    //
+    // `stampede_prune` is declared RETURNS integer over a `DELETE ... RETURNING
+    // 1`, and a SQL function returns the first column of the FIRST ROW -- so it
+    // returned 1 whether it deleted one row or ten thousand, and NULL for none.
+    // The pruner loops "until the count is less than the batch size", and with
+    // a constant 1 that condition is always true: a backlog was pruned one
+    // batch per TICK instead of per iteration, and the loop that exists
+    // specifically to drain it never ran twice.
+    //
+    // Nothing failed. The pruner just quietly did a fraction of its job.
+    let q = q!();
+    let w = q.register_worker("h", 1, &["default".into()]).await.unwrap();
+
+    for _ in 0..7 {
+        let id = q.enqueue(NewJob::new("default", "x")).await.unwrap().unwrap();
+        let claimed = q.claim("default", w, 1).await.unwrap();
+        q.complete(&claimed[0], w).await.unwrap();
+        let _ = id;
+    }
+
+    // Retention zero: everything finished is eligible.
+    let n = q
+        .prune_batch(Duration::ZERO, Duration::ZERO, 100, Duration::from_secs(10))
+        .await
+        .unwrap();
+    assert_eq!(n, 7, "must report the real count, not 1");
+
+    let n = q
+        .prune_batch(Duration::ZERO, Duration::ZERO, 100, Duration::from_secs(10))
+        .await
+        .unwrap();
+    assert_eq!(n, 0, "nothing left");
+}
+
+#[tokio::test]
+async fn prune_stops_at_the_batch_limit_so_the_caller_can_loop() {
+    // The other half of the same contract: a full batch is how the caller
+    // learns there is more to do.
+    let q = q!();
+    let w = q.register_worker("h", 1, &["default".into()]).await.unwrap();
+
+    for _ in 0..5 {
+        q.enqueue(NewJob::new("default", "x")).await.unwrap();
+    }
+    for c in q.claim("default", w, 5).await.unwrap() {
+        q.complete(&c, w).await.unwrap();
+    }
+
+    let n = q
+        .prune_batch(Duration::ZERO, Duration::ZERO, 2, Duration::from_secs(10))
+        .await
+        .unwrap();
+    assert_eq!(n, 2, "a full batch signals more remaining");
+
+    let mut total = n;
+    loop {
+        let n = q
+            .prune_batch(Duration::ZERO, Duration::ZERO, 2, Duration::from_secs(10))
+            .await
+            .unwrap();
+        total += n;
+        if n < 2 {
+            break;
+        }
+    }
+    assert_eq!(total, 5, "looping until a short batch must drain everything");
 }
