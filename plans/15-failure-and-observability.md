@@ -773,6 +773,15 @@ wall-clock guess.
   counts toward nothing, a permanently-open breaker parks jobs forever and the
   queue silently grows. Probably needs a separate `deferrals` counter with its
   own (generous) cap, which is a third counter — is that one too many?
+- ~~**Graceful shutdown must not consume the interruption budget.**~~
+  **CLOSED 2026-09-18.** Both workers drain: in-flight jobs finish and report
+  their own outcome, so nothing is recorded as a worker death. Both drains are
+  BOUNDED — an unbounded one means a single wedged job holds a deploy open
+  until the supervisor SIGKILLs the process, at which point the worker never
+  deregistered and the reaper has to find the orphans the slow way. Past the
+  timeout the stragglers are left to the reaper and DO get charged, which is
+  the honest outcome. Tested on both sides.
+
 - **Interruption budget default.** BullMQ ships `maxStalledCount: 1`. Is one
   free interruption right when the most common cause is a routine deploy
   rather than an OOM? A graceful shutdown should not consume the budget at all

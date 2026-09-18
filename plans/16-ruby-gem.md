@@ -234,9 +234,6 @@ structurally valid and semantically meaningless, so nothing errors.
 - **`retry_on(wait:)`**, per §4.2. The row carries
   `backoff_base_ms`/`backoff_max_ms`, which covers exponential-with-cap but not
   an arbitrary schedule. Grow the row, or accept the gap?
-- **The RUST worker's graceful shutdown is still untested.** §7 closed this for
-  Ruby. The Rust daemon drains too, but nothing asserts that draining does not
-  charge an interruption.
 - **Cross-compilation is not wired into CI.** `rake build[…]` works for the
   host platform (verified on arm64-darwin); the five others need either a CI
   matrix or `cross`, and neither exists yet.

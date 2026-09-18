@@ -71,6 +71,16 @@ pub struct WorkerConfig {
     /// Trip a task's circuit after this many consecutive failures, so a failing
     /// downstream is not hammered by every retrying job. `None` disables it.
     pub breaker_failure_threshold: Option<usize>,
+    /// How long to let in-flight jobs finish on shutdown.
+    ///
+    /// BOUNDED, deliberately. Draining is what stops a routine deploy charging
+    /// every in-flight job an interruption (plans/15) — but an unbounded drain
+    /// means one wedged job blocks the deploy forever, and the supervisor
+    /// SIGKILLs the process anyway without ever deregistering the worker.
+    /// Past this, the stragglers are left to the reaper, which is the honest
+    /// outcome: from the queue's point of view the process did die on them.
+    pub shutdown_timeout: Duration,
+
     /// Minimum gap between claim round trips, however many wakeups arrive.
     ///
     /// GCRA on the RECEIVER side. The sender is a trigger with no memory across
@@ -97,6 +107,7 @@ impl Default for WorkerConfig {
             tenant_limit: Some(TenantLimit::default()),
             breaker_failure_threshold: Some(10),
             wakeup_cooldown: Duration::from_millis(5),
+            shutdown_timeout: Duration::from_secs(25),
         }
     }
 }
@@ -392,9 +403,31 @@ impl Worker {
             }
         }
 
-        // Drain: wait for in-flight jobs rather than abandoning them to the
-        // reaper. Acquiring every permit means everything finished.
-        let _ = sem.acquire_many(self.config.max_concurrency as u32).await;
+        // Drain: let in-flight jobs finish and report their own outcome, so a
+        // graceful shutdown never records a worker death. Acquiring every
+        // permit means everything finished.
+        let in_flight = self.config.max_concurrency - sem.available_permits();
+        if in_flight > 0 {
+            info!(%worker_id, in_flight, "draining");
+        }
+
+        let drained = tokio::time::timeout(
+            self.config.shutdown_timeout,
+            sem.acquire_many(self.config.max_concurrency as u32),
+        )
+        .await;
+
+        if drained.is_err() {
+            // Left to the reaper, which WILL charge them an interruption.
+            // Correct: they outlived the shutdown window, so from the queue's
+            // point of view this process died on them.
+            warn!(
+                %worker_id,
+                timeout = ?self.config.shutdown_timeout,
+                still_running = self.config.max_concurrency - sem.available_permits(),
+                "jobs did not finish draining; the reaper will reclaim them"
+            );
+        }
 
         heartbeat.abort();
         self.queue.deregister_worker(worker_id).await?;

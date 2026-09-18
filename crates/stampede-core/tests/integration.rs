@@ -9,7 +9,10 @@
 
 use chrono::Utc;
 use sqlx::{AssertSqlSafe, PgPool};
-use stampede_core::{DstPolicy, FailureKind, JobState, NewJob, Period, Queue, Wakeup};
+use stampede_core::{
+    DstPolicy, FailureKind, JobState, NewJob, Period, Queue, Wakeup, Worker, WorkerConfig,
+};
+use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -1410,4 +1413,106 @@ async fn an_ordinary_outage_does_not_exhaust_the_deferral_budget() {
          during a normal outage",
         job.max_deferrals
     );
+}
+
+// ---------------------------------------------------------- graceful shutdown
+
+#[tokio::test]
+async fn a_graceful_shutdown_lets_jobs_finish_and_charges_nothing() {
+    // plans/15: a routine deploy must NOT consume the interruption budget.
+    // The drain is what achieves that -- the job reports its own outcome, so
+    // nothing is ever recorded as a worker death. This was listed as untested
+    // in BOTH implementations; the Ruby side has had a test since the gem
+    // landed and this is the Rust one.
+    let q = q!();
+    let id = q.enqueue(NewJob::new("default", "slow")).await.unwrap().unwrap();
+
+    let started = Arc::new(tokio::sync::Notify::new());
+    let ready = started.clone();
+
+    let worker = Worker::new(
+        q.clone(),
+        WorkerConfig {
+            queue: "default".into(),
+            poll_interval: Duration::from_millis(50),
+            ..Default::default()
+        },
+    )
+    .register("slow", move |_job| {
+        let ready = ready.clone();
+        async move {
+            ready.notify_one();
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            Ok(())
+        }
+    });
+
+    let (tx, rx) = tokio::sync::watch::channel(false);
+    let handle = tokio::spawn(async move { worker.run(rx).await });
+
+    started.notified().await; // in flight
+    let _ = tx.send(true); // deploy
+
+    tokio::time::timeout(Duration::from_secs(10), handle)
+        .await
+        .expect("worker should stop")
+        .expect("join")
+        .expect("run");
+
+    let job = q.fetch("default", id).await.unwrap().unwrap();
+    assert_eq!(job.state, JobState::Completed, "the in-flight job must be allowed to finish");
+    assert_eq!(job.interruptions, 0, "a graceful shutdown is not a worker death");
+    assert_eq!(job.attempt, 1, "and it must not have been retried");
+}
+
+#[tokio::test]
+async fn a_wedged_job_does_not_block_shutdown_forever() {
+    // The other half. An unbounded drain means one stuck job holds the deploy
+    // open until the supervisor SIGKILLs the process -- at which point the
+    // worker never deregistered and the reaper has to find it the slow way.
+    let q = q!();
+    q.enqueue(NewJob::new("default", "wedged")).await.unwrap();
+
+    let started = Arc::new(tokio::sync::Notify::new());
+    let ready = started.clone();
+
+    let worker = Worker::new(
+        q.clone(),
+        WorkerConfig {
+            queue: "default".into(),
+            poll_interval: Duration::from_millis(50),
+            shutdown_timeout: Duration::from_millis(300),
+            ..Default::default()
+        },
+    )
+    .register("wedged", move |_job| {
+        let ready = ready.clone();
+        async move {
+            ready.notify_one();
+            // Longer than any test should wait.
+            tokio::time::sleep(Duration::from_secs(120)).await;
+            Ok(())
+        }
+    });
+
+    let (tx, rx) = tokio::sync::watch::channel(false);
+    let handle = tokio::spawn(async move { worker.run(rx).await });
+
+    started.notified().await;
+    let _ = tx.send(true);
+
+    // Must give up on the wedged job rather than waiting 120s for it.
+    tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("shutdown must be bounded")
+        .expect("join")
+        .expect("run");
+
+    // And it deregistered, so the reaper can tell the job is orphaned rather
+    // than waiting out dead_after on a worker that never said goodbye.
+    let workers: i64 = sqlx::query_scalar("SELECT count(*) FROM stampede_workers")
+        .fetch_one(q.pool())
+        .await
+        .unwrap();
+    assert_eq!(workers, 0, "a bounded shutdown must still deregister");
 }
