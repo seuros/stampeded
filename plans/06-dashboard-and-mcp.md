@@ -168,3 +168,29 @@ Everything else in Stampede is copyable in a quarter by a motivated competitor.
 A well-designed MCP control plane is not, because it requires the schema, the
 resilience crates and the daemon to have been designed for introspection from
 the start.
+
+## The write gate, verified
+
+The MCP surface had **no tests at all** — eleven tools, four of which change
+state, behind a single `allow_writes` boolean. Verified against the real stdio
+binary, driving JSON-RPC by hand:
+
+| | tools advertised | `job_cancel` | job afterwards |
+|---|---|---|---|
+| `STAMPEDE_MCP_ALLOW_WRITES=0` | 7 | `Tool not found` | `available` |
+| `STAMPEDE_MCP_ALLOW_WRITES=1` | 11 | `job … cancelled` | `cancelled` |
+
+The gate is correct, and the write tools are not merely hidden from
+`tools/list` — calling one by name on a read-only server is refused, which is
+the part that matters, since a hidden tool an attacker guesses is not gated at
+all.
+
+It is now also tested, because the risk was never that the gate is wrong today.
+`mount()` registers tools in two blocks that look identical apart from a
+`Some(visibility)` argument, so adding a new write tool to the wrong one is a
+one-line mistake with no symptom: the tool works, and it works for everybody.
+The test writes out the expected write set rather than deriving it, so a new
+write tool fails until someone says which side it belongs on, and it asserts
+the two routers differ by *exactly* that set — which also catches the reverse
+mistake of gating a read tool, whose only symptom is that it quietly stops
+being advertised.

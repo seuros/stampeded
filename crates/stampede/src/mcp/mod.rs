@@ -157,3 +157,70 @@ pub fn server(name: &str, version: &str) -> mcp_host::server::ServerBuilder {
         )
         .with_tools(true)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(allow_writes: bool) -> std::collections::BTreeSet<String> {
+        tool_router(allow_writes)
+            .list()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect()
+    }
+
+    /// Every tool that can change state must be behind `allow_writes`.
+    ///
+    /// This is the deployment's only guarantee that a read-only MCP endpoint is
+    /// read-only, and until now nothing tested it. The risk is not that the
+    /// gate is wrong today -- it was verified correct against the real stdio
+    /// binary -- but that a tool added later is registered in the ungated
+    /// block, which is a one-line mistake in a function where the two blocks
+    /// look identical.
+    ///
+    /// The expected set is written out rather than derived, so a NEW write tool
+    /// fails this test until someone states which side it belongs on.
+    #[test]
+    fn write_tools_are_gated() {
+        let read_only = names(false);
+        let full = names(true);
+
+        let writes: std::collections::BTreeSet<String> = ["job_cancel", "job_retry", "schedule_pause", "schedule_upsert"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        for w in &writes {
+            assert!(!read_only.contains(w), "{w} is reachable without allow_writes");
+            assert!(full.contains(w), "{w} vanished when writes are allowed");
+        }
+
+        // The reverse regression: gating a READ tool by accident silently
+        // removes it from every read-only deployment, and nobody notices
+        // because the tool simply is not advertised.
+        assert_eq!(
+            full.difference(&read_only).cloned().collect::<std::collections::BTreeSet<_>>(),
+            writes,
+            "the only difference between the two routers must be the write tools"
+        );
+    }
+
+    /// The read surface is the whole point of a read-only endpoint.
+    #[test]
+    fn read_tools_are_always_present() {
+        let read_only = names(false);
+        for t in [
+            "queue_status",
+            "job_inspect",
+            "schedule_list",
+            "system_health",
+            "job_search",
+            "failure_summary",
+            "worker_status",
+        ] {
+            assert!(read_only.contains(t), "{t} is missing from the read-only router");
+        }
+        assert_eq!(read_only.len(), 7, "unexpected read tool count: {read_only:?}");
+    }
+}
