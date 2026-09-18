@@ -1,0 +1,43 @@
+# frozen_string_literal: true
+
+require "rake/clean"
+
+# Platforms we ship.
+#
+# musl is not optional: most container images are Alpine, and a gnu binary
+# there fails at exec with a linker error rather than anything actionable.
+PLATFORMS = {
+  "arm64-darwin"       => "aarch64-apple-darwin",
+  "x86_64-darwin"      => "x86_64-apple-darwin",
+  "aarch64-linux-gnu"  => "aarch64-unknown-linux-gnu",
+  "x86_64-linux-gnu"   => "x86_64-unknown-linux-gnu",
+  "aarch64-linux-musl" => "aarch64-unknown-linux-musl",
+  "x86_64-linux-musl"  => "x86_64-unknown-linux-musl"
+}.freeze
+
+WORKSPACE = File.expand_path("..", __dir__)
+
+desc "Build the binary for one rubygems platform"
+task :build, [:platform] do |_t, args|
+  platform = args[:platform] or abort "usage: rake build[arm64-darwin]"
+  target = PLATFORMS.fetch(platform) { abort "unknown platform #{platform}" }
+
+  sh "cargo build --release --target #{target} --manifest-path #{WORKSPACE}/Cargo.toml"
+
+  dest = File.join(__dir__, "exe", platform)
+  mkdir_p dest
+  cp File.join(WORKSPACE, "target", target, "release", "stampede"), File.join(dest, "stampede")
+  chmod 0o755, File.join(dest, "stampede")
+end
+
+desc "Package a platform gem"
+task :package, [:platform] => :build do |_t, args|
+  platform = args[:platform]
+  ENV["STAMPEDE_GEM_PLATFORM"] = platform
+  sh "gem build stampede-daemon.gemspec"
+end
+
+desc "List shippable platforms"
+task :platforms do
+  PLATFORMS.each { |gem_plat, rust| puts format("  %-20s %s", gem_plat, rust) }
+end

@@ -1,2 +1,6 @@
-/target
-**/*.rs.bk
+target/
+ruby/.bundle/
+ruby/Gemfile.lock
+ruby-daemon/exe/*/
+ruby-daemon/*.gem
+*.gem
