@@ -703,10 +703,8 @@ original analysis did not anticipate.
   console can now show what it can see, so the introspection window is at least
   observable — but nobody has run it long enough to say whether an hour is
   right.
-- **`uuidv7` and btree deduplication.** pg-boss's 24 MB vs 19 MB at 500k rows
-  is a v4-UUID number (`plans.ts:916-923`). Re-measure with v7; if
-  deduplication works as expected, `id` becomes a free ordering tiebreaker and
-  the fetch index can be simpler than pg-boss's.
+- ~~**`uuidv7` and btree deduplication.**~~ **MEASURED. The premise is wrong:
+  `id` is not a free tiebreaker, and the UUID version is irrelevant.** See §13.
 - ~~**`pg_cron` for the sweep?**~~ **No, decided.** It would split the
   retention policy between the daemon and the database, and the daemon already
   survives every worker being down — the pruner is a maintenance role, not a
@@ -782,3 +780,64 @@ against the operation that was most salient (claiming) rather than the one that
 happens most (heartbeating). "Is this parameter justified?" was answerable in
 about twenty minutes of measurement; it sat open through several rounds of
 reasoning instead. When a parameter is cheap to measure, measure it.
+
+## 13. `uuidv7`, deduplication, and the price of the tiebreaker
+
+The open item guessed that v7 UUIDs might make `id` "a free ordering
+tiebreaker" in the claim index, pg-boss's 24 MB vs 19 MB being a v4 number.
+
+**Both halves of that are wrong.** Measured on PG18, 500k rows, identical data
+in both tables:
+
+| index | v4 (`gen_random_uuid`) | v7 (`uuidv7`) |
+|---|---|---|
+| `(queue, state, priority, scheduled_at)` | 7872 kB | 7872 kB |
+| `(queue, state, priority, scheduled_at, id)` | 32 MB | 32 MB |
+
+**Byte-identical between v4 and v7.** The UUID version does not enter into it,
+because the cost is not about how the values sort — it is that adding ANY
+unique column makes every index tuple distinct, and btree deduplication has
+nothing left to collapse. v7's sequentiality helps page-split behaviour on
+insert; it cannot recover deduplication.
+
+So the tiebreaker is not free, and on our real schema it is the most expensive
+thing in the table:
+
+| rows | `(queue, priority, scheduled_at, id)` | `(queue, priority, scheduled_at)` |
+|---|---|---|
+| 300k | **28 MB** | 2.1 MB |
+| 1M | **85 MB** | 10 MB |
+
+8.5–13x, on the hottest index in the system — the one most wanted resident in
+`shared_buffers`, since every claim on every queue walks it.
+
+### What the tiebreaker buys, exactly
+
+`stampede_claim` orders by `priority, scheduled_at, id`. Dropping `id` from the
+index while keeping it in the ORDER BY is the worst of both worlds — measured
+at 300k rows, 100-row claim:
+
+| index | ORDER BY | sort? | time | size |
+|---|---|---|---|---|
+| with `id` | `…, id` | no | 0.11 ms | 28 MB |
+| without `id` | `…, id` | **yes** | 0.26 ms | 2.1 MB |
+| without `id` | no `id` | no | 0.13 ms | 2.1 MB |
+
+Dropping it from both costs nothing measurable (0.13 vs 0.11 ms is noise at
+this scale) and saves an order of magnitude of index.
+
+What is lost is **deterministic FIFO among jobs sharing an exact
+`(priority, scheduled_at)`**. That is not the rare case it sounds like: a bulk
+enqueue in one transaction gives every row the same `now()`, so a batch of 500
+is exactly one such tie. With `id` (v7, time-ordered) they are claimed in
+insertion order; without it, in whatever order the index scan reaches them —
+stable for a given index state, so not a starvation risk, but not defined
+either.
+
+Worth noting that strict FIFO is already not on offer across workers:
+`FOR UPDATE SKIP LOCKED` means a concurrent worker takes the next unlocked row,
+not the next row. The tiebreaker makes single-worker ordering deterministic,
+not the system's.
+
+**Not changed unilaterally** — this is a semantics decision, not a bug, and it
+belongs to whoever is prepared to say FIFO-within-a-batch is not promised.
