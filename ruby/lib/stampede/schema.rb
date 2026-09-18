@@ -58,18 +58,34 @@ module Stampede
     # wired to a rake task: it deletes every job.
     def drop!(conn = nil)
       run = lambda do |c|
+        # Functions are dropped by PATTERN, not by a list.
+        #
+        # This was a hand-maintained list of twenty names, and adding a
+        # twenty-first function broke it exactly as you would expect: install,
+        # drop, install again, and the second install failed with
+        # "function stampede_partition_health already exists". The list has no
+        # way to stay correct -- nothing links it to the schema files, so it
+        # rots silently until a test that reinstalls happens to run.
+        #
+        # Scoped to current_schema() because the test suite installs into a
+        # private schema per class, and a pattern that ignored that would drop
+        # another test's functions mid-run.
         c.exec(<<~SQL)
           DROP TABLE IF EXISTS stampede_cron_occurrences, stampede_schedules,
                                stampede_queue_counts, stampede_jobs, stampede_workers CASCADE;
-          DROP FUNCTION IF EXISTS stampede_claim, stampede_complete, stampede_fail,
-                                  stampede_touch, stampede_expire, stampede_reap,
-                                  stampede_prune, stampede_heartbeat, stampede_checkpoint,
-                                  stampede_fingerprint, stampede_vacuum_health,
-                                  stampede_index_density, stampede_create_queue,
-                                  stampede_notify_insert, stampede_count_delta,
-                                  stampede_attach_counters, stampede_recount_queue,
-                                  stampede_claim_due_schedules, stampede_fire_schedule,
-                                  stampede_prune_occurrences CASCADE;
+          DO $$
+          DECLARE r record;
+          BEGIN
+            FOR r IN
+              SELECT p.oid::regprocedure AS sig
+                FROM pg_proc p
+                JOIN pg_namespace n ON n.oid = p.pronamespace
+               WHERE p.proname LIKE 'stampede\_%'
+                 AND n.nspname = current_schema()
+            LOOP
+              EXECUTE 'DROP FUNCTION IF EXISTS ' || r.sig || ' CASCADE';
+            END LOOP;
+          END $$;
         SQL
       end
       conn ? run.call(conn) : Connection.with(&run)

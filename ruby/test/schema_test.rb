@@ -95,4 +95,36 @@ class SchemaMissingTest < Minitest::Test
     end
     assert_match(/some_other_app_table/, error.message)
   end
+
+  # drop! must remove EVERY stampede function, not a list someone maintains.
+  #
+  # It was a hardcoded list of twenty names, and adding a twenty-first broke
+  # install -> drop -> install with "function already exists". Nothing linked
+  # the list to the schema files, so it rotted silently until a test that
+  # reinstalls happened to run. This asserts the property instead of the list.
+  def test_drop_removes_every_stampede_function_not_a_hardcoded_list
+    Stampede::Connection.own do |c|
+      before = stampede_functions(c)
+
+      assert_operator before, :>, 15, "expected the schema to define functions"
+
+      Stampede::Schema.drop!(c)
+
+      assert_equal 0, stampede_functions(c),
+                   "drop! left functions behind; it is dropping a list rather than a pattern"
+
+      # The real symptom: a second install must succeed.
+      Stampede::Schema.install!(c)
+
+      assert_equal before, stampede_functions(c), "reinstall did not restore the schema"
+    end
+  end
+
+  def stampede_functions(conn)
+    conn.exec(<<~SQL)[0]["count"].to_i
+      SELECT count(*) FROM pg_proc p
+        JOIN pg_namespace n ON n.oid = p.pronamespace
+       WHERE p.proname LIKE 'stampede\\_%' AND n.nspname = current_schema()
+    SQL
+  end
 end
