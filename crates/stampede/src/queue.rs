@@ -484,6 +484,64 @@ impl Queue {
         Ok(n.unwrap_or(0) as u64)
     }
 
+    /// Delete old cron occurrence rows. Returns how many.
+    ///
+    /// The ledger is the idempotency backstop for recurring jobs: one row per
+    /// firing, forever. A schedule running every minute writes 525,600 rows a
+    /// year. It is deliberately a separate table from the jobs (plans/11) so it
+    /// can have its OWN horizon -- good_job and solid_queue put the cron key on
+    /// the jobs table and then had to guarantee those rows are never pruned,
+    /// which couples cron correctness to the retention window.
+    ///
+    /// That horizon must stay comfortably longer than any window in which the
+    /// same occurrence could be re-derived, or the backstop silently stops
+    /// backstopping.
+    pub async fn prune_occurrences(&self, older_than: std::time::Duration) -> Result<u64> {
+        let n: Option<i32> =
+            sqlx::query_scalar("SELECT stampede_prune_occurrences(make_interval(secs => $1))")
+                .bind(older_than.as_secs_f64())
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(n.unwrap_or(0) as u64)
+    }
+
+    /// How full the async notification queue is, 0.0 to 1.0.
+    ///
+    /// plans/12 lists this as untested and notes that **none of the surveyed
+    /// implementations export it**. The failure mode is specific and nasty: a
+    /// backend that is LISTENing but stuck inside a long transaction pins the
+    /// 8 GB queue, and once it fills, every `NOTIFY` starts erroring — which
+    /// means every INSERT into the jobs table starts erroring, because the
+    /// notify trigger runs inside it. Enqueue stops working, and the cause is
+    /// nowhere near the symptom.
+    ///
+    /// Cheap: a single function call, no table access.
+    pub async fn notification_queue_usage(&self) -> Result<f64> {
+        sqlx::query_scalar("SELECT pg_notification_queue_usage()::float8")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Difference between this process's clock and the database's, in seconds.
+    ///
+    /// Positive means we are ahead. pg-boss measures this and warns past 60 s
+    /// (`src/timekeeper.ts:298-337`), which is the right instinct: skew is
+    /// invisible until it produces behaviour nobody can explain.
+    ///
+    /// Stampede is mostly IMMUNE by construction -- retry delays are passed as
+    /// durations and the database applies its own clock (plans/15), and the
+    /// scheduler compares `next_run_at` to `now()` server-side. This is
+    /// therefore a diagnostic rather than a correctness input: a large skew
+    /// means log timestamps will not line up with job timestamps, and any
+    /// client-side reasoning about `scheduled_at` is wrong.
+    pub async fn clock_skew(&self) -> Result<f64> {
+        let db_now: DateTime<Utc> = sqlx::query_scalar("SELECT now()")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok((Utc::now() - db_now).num_milliseconds() as f64 / 1000.0)
+    }
+
     /// Autovacuum health per partition.
     ///
     /// pg-boss's `#checkVacuum`, which plans/13 calls the most valuable

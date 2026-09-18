@@ -68,6 +68,10 @@ pub mod names {
     pub const MAINTENANCE_JOBS: &str = "stampede.maintenance.jobs";
     /// Whether the NOTIFY path is working. 0 = polling only.
     pub const WAKEUP_HEALTHY: &str = "stampede.wakeup.healthy";
+    /// Async notification queue fullness, 0.0-1.0. Nobody else exports this.
+    pub const NOTIFY_QUEUE_USAGE: &str = "stampede.notify.queue_usage";
+    /// Seconds this process's clock differs from the database's.
+    pub const CLOCK_SKEW_SECONDS: &str = "stampede.clock.skew_seconds";
     pub const WAKEUPS_RECEIVED: &str = "stampede.wakeups.received";
 
     /// `{destination}` — 0 closed, 1 half-open, 2 open. Ours alone.

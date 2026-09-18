@@ -1823,3 +1823,68 @@ async fn a_job_checkpointed_by_ruby_resumes_in_rust() {
     .unwrap();
     assert!(!ran, "a step Ruby completed must not run again in Rust");
 }
+
+#[tokio::test]
+async fn the_cron_occurrence_ledger_is_pruned() {
+    // It was not. `stampede_prune_occurrences` existed in the schema and was
+    // called from nowhere, so the ledger grew one row per firing forever --
+    // 525,600 a year for a schedule running every minute. plans/11 flagged it
+    // as "narrow, but unbounded"; nothing acted on that.
+    let q = q!();
+
+    sqlx::query(
+        "INSERT INTO stampede_schedules (key, queue, task, interval_secs) \
+         VALUES ('tick', 'default', 't', 60)",
+    )
+    .execute(q.pool())
+    .await
+    .unwrap();
+
+    // A year of firings, aged.
+    sqlx::query(
+        "INSERT INTO stampede_cron_occurrences (cron_key, occurrence_token, enqueued_at) \
+         SELECT 'tick', g::text, now() - interval '60 days' FROM generate_series(1, 50) g",
+    )
+    .execute(q.pool())
+    .await
+    .unwrap();
+    // And a few recent ones, which must survive.
+    sqlx::query(
+        "INSERT INTO stampede_cron_occurrences (cron_key, occurrence_token) \
+         SELECT 'tick', 'recent-' || g FROM generate_series(1, 3) g",
+    )
+    .execute(q.pool())
+    .await
+    .unwrap();
+
+    let pruned = q.prune_occurrences(Duration::from_secs(30 * 24 * 3600)).await.unwrap();
+    assert_eq!(pruned, 50, "old occurrences should go");
+
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM stampede_cron_occurrences")
+        .fetch_one(q.pool())
+        .await
+        .unwrap();
+    assert_eq!(left, 3, "recent ones are the idempotency backstop and must stay");
+}
+
+#[tokio::test]
+async fn the_notification_queue_and_clock_skew_are_observable() {
+    // plans/12 lists both as untested and notes that NONE of the surveyed
+    // implementations export the notification queue usage.
+    //
+    // The failure it detects is specific: a backend LISTENing from inside a
+    // long transaction pins the 8 GB async queue, and once it fills every
+    // NOTIFY errors -- which means every INSERT into stampede_jobs errors,
+    // because the notify trigger runs inside it. Enqueue stops working and the
+    // cause is nowhere near the symptom.
+    let q = q!();
+
+    let usage = q.notification_queue_usage().await.unwrap();
+    assert!((0.0..=1.0).contains(&usage), "usage is a fraction: {usage}");
+
+    // Skew against the same machine's database should be tiny. The assertion is
+    // loose on purpose -- this is a diagnostic, and a slow CI box should not
+    // fail the suite.
+    let skew = q.clock_skew().await.unwrap();
+    assert!(skew.abs() < 60.0, "skew against a local database was {skew}s");
+}

@@ -34,6 +34,13 @@ pub struct MaintenanceConfig {
     pub prune_interval: Duration,
     /// Finished jobs older than this are deleted.
     pub retain_for: Duration,
+    /// Cron occurrence rows older than this are deleted.
+    ///
+    /// Its OWN horizon, separate from job retention, which is the whole reason
+    /// the ledger is a separate table (plans/11). Must stay comfortably longer
+    /// than any window in which the same occurrence could be re-derived, or the
+    /// idempotency backstop silently stops backstopping.
+    pub retain_occurrences_for: Duration,
     /// Rows per prune batch. River's shape: bounded batches, looped, never one
     /// unbounded DELETE (plans/13).
     pub prune_batch: i32,
@@ -71,6 +78,7 @@ impl Default for MaintenanceConfig {
             prune_batch: 10_000,
             schedule_interval: Duration::from_secs(5),
             retain_failed_for: Duration::from_secs(7 * 24 * 3600),
+            retain_occurrences_for: Duration::from_secs(30 * 24 * 3600),
             prune_statement_timeout: Duration::from_secs(30),
             expire_interval: Duration::from_secs(30),
             health_interval: Duration::from_secs(3600),
@@ -222,6 +230,19 @@ async fn prune_loop(
             Ok(None) => debug!("pruner: another node is pruning"),
             Err(e) => warn!(error = %e, "pruner failed"),
         }
+
+        // The cron occurrence ledger, on its own horizon. Until this was wired
+        // in, `stampede_prune_occurrences` existed and was called from nowhere,
+        // so the ledger grew one row per firing forever -- half a million a
+        // year for a schedule running every minute.
+        match queue.prune_occurrences(config.retain_occurrences_for).await {
+            Ok(0) => {}
+            Ok(n) => {
+                info!(pruned = n, "pruner: deleted old cron occurrences");
+                metrics.count(names::MAINTENANCE_JOBS, n, &[label("outcome", "occurrences")]);
+            }
+            Err(e) => warn!(error = %e, "occurrence pruner failed"),
+        }
     }
 }
 
@@ -323,6 +344,39 @@ async fn health_loop(
             }
             Ok(_) => debug!("no sparse indexes"),
             Err(e) => debug!(error = %e, "index density check unavailable"),
+        }
+
+        // Two signals nobody in the survey exports, both cheap, both failures
+        // that are invisible until they are catastrophic.
+        if let Ok(usage) = queue.notification_queue_usage().await {
+            metrics.gauge(names::NOTIFY_QUEUE_USAGE, usage, &[]);
+            if usage > 0.5 {
+                // Past full, every NOTIFY errors -- and the notify trigger runs
+                // inside the INSERT, so ENQUEUE ITSELF starts failing. The
+                // cause is a LISTENing backend stuck in a long transaction,
+                // which is nowhere near where the error appears.
+                warn!(
+                    usage,
+                    "the async notification queue is filling; a LISTENing backend is probably \
+                     stuck in a long transaction. If it fills, NOTIFY errors -- and because the \
+                     notify trigger runs inside the INSERT, enqueueing stops working."
+                );
+            }
+        }
+
+        if let Ok(skew) = queue.clock_skew().await {
+            metrics.gauge(names::CLOCK_SKEW_SECONDS, skew, &[]);
+            if skew.abs() > 60.0 {
+                // Not a correctness problem here -- retry delays are durations
+                // applied by the database, and the scheduler compares
+                // server-side -- but it makes logs and job timestamps
+                // irreconcilable, which costs an hour during an incident.
+                warn!(
+                    skew_seconds = skew,
+                    "this host's clock differs from the database's by more than a minute; \
+                     job timestamps and log timestamps will not line up"
+                );
+            }
         }
 
         if let Ok(ages) = queue.oldest_available_age().await {
