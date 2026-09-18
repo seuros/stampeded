@@ -19,8 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter("stampede_core=debug,worker=info")
         .init();
 
-    let url = std::env::var("STAMPEDE_DATABASE_URL")
-        .map_err(|_| "set STAMPEDE_DATABASE_URL")?;
+    let url = std::env::var("STAMPEDE_DATABASE_URL").map_err(|_| "set STAMPEDE_DATABASE_URL")?;
     let pool = sqlx::PgPool::connect(&url).await?;
     stampede_core::schema::migrate(&pool).await?;
 
@@ -29,11 +28,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Seed a few jobs, including one that always fails so the retry path is
     // visible, and a deduplicated one enqueued twice.
-    queue.enqueue(NewJob::new("default", "greet").args(serde_json::json!({"name": "world"}))).await?;
+    queue
+        .enqueue(NewJob::new("default", "greet").args(serde_json::json!({"name": "world"})))
+        .await?;
     queue.enqueue(NewJob::new("default", "slow")).await?;
-    queue.enqueue(NewJob::new("default", "flaky").max_attempts(3)).await?;
-    queue.enqueue(NewJob::new("default", "greet").unique("only-once")).await?;
-    let dup = queue.enqueue(NewJob::new("default", "greet").unique("only-once")).await?;
+    queue
+        .enqueue(NewJob::new("default", "flaky").max_attempts(3))
+        .await?;
+    queue
+        .enqueue(NewJob::new("default", "greet").unique("only-once"))
+        .await?;
+    let dup = queue
+        .enqueue(NewJob::new("default", "greet").unique("only-once"))
+        .await?;
     println!("duplicate enqueue returned {dup:?} (None means deduplicated)");
 
     let worker = Worker::new(
@@ -46,7 +53,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     )
     .register("greet", |job| async move {
-        let name = job.args.get("name").and_then(|v| v.as_str()).unwrap_or("nobody");
+        let name = job
+            .args
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("nobody");
         println!("hello, {name}!");
         Ok(())
     })

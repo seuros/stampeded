@@ -12,7 +12,11 @@ fn retryable_is_claimable_not_terminal() {
 
 #[test]
 fn terminal_states_are_not_claimable() {
-    for s in [JobState::Completed, JobState::Discarded, JobState::Cancelled] {
+    for s in [
+        JobState::Completed,
+        JobState::Discarded,
+        JobState::Cancelled,
+    ] {
         assert!(s.is_terminal());
         assert!(!s.is_claimable());
     }
@@ -27,7 +31,10 @@ fn worker_death_is_not_fatal() {
         FailureKind::HeartbeatLost,
     ] {
         assert!(!k.is_fatal(), "{k}");
-        assert!(k.is_interruption(), "{k} must charge the interruptions budget");
+        assert!(
+            k.is_interruption(),
+            "{k} must charge the interruptions budget"
+        );
     }
     assert!(FailureKind::Unrecoverable.is_fatal());
 }

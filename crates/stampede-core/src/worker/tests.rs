@@ -39,7 +39,10 @@ fn default_backoff_uses_full_jitter() {
     }
 
     assert!(max > 0, "backoff produced no delays");
-    assert!(min < max / 2, "spread {min}..{max} is too narrow for full jitter");
+    assert!(
+        min < max / 2,
+        "spread {min}..{max} is too narrow for full jitter"
+    );
 }
 
 #[test]
@@ -55,7 +58,9 @@ fn backoff_delay_is_bounded_and_varies() {
 
     let mut seen = std::collections::HashSet::new();
     for _ in 0..50 {
-        let d = policy.delay(5, &mut rng).expect("attempt 5 of 10 should retry");
+        let d = policy
+            .delay(5, &mut rng)
+            .expect("attempt 5 of 10 should retry");
         assert!(d <= 60_000, "delay {d} exceeded max_delay_ms");
         seen.insert(d);
     }
@@ -106,5 +111,8 @@ async fn breakers_are_per_task_not_global() {
     let a_again = w.breaker_for("charge_card", 5);
 
     assert!(!std::sync::Arc::ptr_eq(&a, &b), "tasks share a breaker");
-    assert!(std::sync::Arc::ptr_eq(&a, &a_again), "same task got two breakers");
+    assert!(
+        std::sync::Arc::ptr_eq(&a, &a_again),
+        "same task got two breakers"
+    );
 }

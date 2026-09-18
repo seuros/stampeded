@@ -24,8 +24,8 @@ use crate::metrics::{Metrics, label, names};
 use crate::queue::Queue;
 use crate::wakeup::{NextPoll, Wakeup};
 use breaker_machines::async_circuit::AsyncCircuitBreaker;
-use chrono_machines::{BackoffPolicy, BackoffStrategy, ExponentialBackoff};
 use chrono::Utc;
+use chrono_machines::{BackoffPolicy, BackoffStrategy, ExponentialBackoff};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -38,8 +38,12 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 /// What a task handler returns.
-pub type HandlerFuture =
-    Pin<Box<dyn Future<Output = std::result::Result<(), Box<dyn std::error::Error + Send + Sync>>> + Send>>;
+pub type HandlerFuture = Pin<
+    Box<
+        dyn Future<Output = std::result::Result<(), Box<dyn std::error::Error + Send + Sync>>>
+            + Send,
+    >,
+>;
 
 /// A task handler: receives the job, does the work.
 pub type Handler = Arc<dyn Fn(Job) -> HandlerFuture + Send + Sync>;
@@ -249,7 +253,10 @@ impl Worker {
         });
 
         let sem = Arc::new(tokio::sync::Semaphore::new(self.config.max_concurrency));
-        let mut wakeups = self.wakeup.as_ref().map(|w| w.subscribe(&self.config.queue));
+        let mut wakeups = self
+            .wakeup
+            .as_ref()
+            .map(|w| w.subscribe(&self.config.queue));
 
         // GCRA state for the wakeup gate. One tenant of one: this paces THIS
         // worker's claims, nothing else.
@@ -295,7 +302,10 @@ impl Worker {
             let decision = Gcra::check(
                 tat,
                 now_secs(),
-                GcraParams { emission_interval: cooldown, delay_tolerance: cooldown * 4.0 },
+                GcraParams {
+                    emission_interval: cooldown,
+                    delay_tolerance: cooldown * 4.0,
+                },
             );
             tat = decision.state;
             if !decision.allowed {
@@ -342,24 +352,24 @@ impl Worker {
                 if let Some(f) = &self.fairness
                     && let crate::fairness::Admission::Throttled { retry_after_secs } =
                         f.admit(job.tenant_id.as_deref())
-                    {
-                        let delay = Duration::from_secs_f64(retry_after_secs.clamp(0.05, 60.0));
-                        debug!(
-                            job_id = %job.id, tenant = ?job.tenant_id,
-                            ?delay, "tenant throttled; releasing job"
-                        );
-                        let _ = self
-                            .queue
-                            .fail(
-                                &job,
-                                worker_id,
-                                FailureKind::Throttled,
-                                "throttled: tenant rate limit",
-                                Some(delay),
-                            )
-                            .await;
-                        continue;
-                    }
+                {
+                    let delay = Duration::from_secs_f64(retry_after_secs.clamp(0.05, 60.0));
+                    debug!(
+                        job_id = %job.id, tenant = ?job.tenant_id,
+                        ?delay, "tenant throttled; releasing job"
+                    );
+                    let _ = self
+                        .queue
+                        .fail(
+                            &job,
+                            worker_id,
+                            FailureKind::Throttled,
+                            "throttled: tenant rate limit",
+                            Some(delay),
+                        )
+                        .await;
+                    continue;
+                }
 
                 let permit = sem.clone().acquire_owned().await.expect("semaphore closed");
                 let queue = self.queue.clone();
@@ -374,8 +384,10 @@ impl Worker {
 
                 tokio::spawn(async move {
                     let _permit = permit;
-                    execute(queue, job, worker_id, handler, timeout, backoff, breaker, metrics)
-                        .await;
+                    execute(
+                        queue, job, worker_id, handler, timeout, backoff, breaker, metrics,
+                    )
+                    .await;
                 });
             }
         }
@@ -515,6 +527,7 @@ async fn execute(
 
 async fn report_success(queue: &Queue, job: &Job, worker_id: Uuid) -> Result<()> {
     let t = queue.complete(job, worker_id).await?;
+    t.verify(crate::lifecycle::Transitions::Complete);
     if !t.owned {
         // The reaper took it. Someone else owns the outcome now.
         warn!(job_id = %job.id, "completed a job we no longer owned; result discarded");
@@ -552,6 +565,15 @@ async fn report_failure(
     let t = queue
         .fail(job, worker_id, kind, &err.to_string(), retry_delay)
         .await?;
+
+    // Which transition SQL should have made depends on whether there was budget
+    // left, and SQL decides that -- so check against what it reported rather
+    // than against what we guessed.
+    t.verify(if t.now.as_deref() == Some("discarded") {
+        crate::lifecycle::Transitions::Discard
+    } else {
+        crate::lifecycle::Transitions::Retry
+    });
 
     if !t.owned {
         warn!(job_id = %job.id, "failed a job we no longer owned; result discarded");

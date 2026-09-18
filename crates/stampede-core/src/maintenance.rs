@@ -87,7 +87,11 @@ pub struct Maintenance {
 
 impl Maintenance {
     pub fn new(queue: Queue, config: MaintenanceConfig) -> Self {
-        Self { queue, config, metrics: Metrics::noop() }
+        Self {
+            queue,
+            config,
+            metrics: Metrics::noop(),
+        }
     }
 
     /// Send measurements somewhere. Defaults to nowhere.
@@ -242,7 +246,10 @@ async fn expire_loop(
         match queue.expire(100).await {
             Ok(0) => {}
             Ok(n) => {
-                warn!(expired = n, "expirer: jobs exceeded their wall-clock budget");
+                warn!(
+                    expired = n,
+                    "expirer: jobs exceeded their wall-clock budget"
+                );
                 metrics.count(names::MAINTENANCE_JOBS, n, &[label("outcome", "expired")]);
             }
             Err(e) => warn!(error = %e, "expirer failed"),
@@ -358,7 +365,11 @@ fn jittered(min: Duration, max: Duration) -> Duration {
 /// takes each schedule row with FOR UPDATE SKIP LOCKED, so concurrent nodes
 /// simply take different rows. That is the whole reason the schedule row
 /// carries `next_run_at` instead of the schedule living in config (plans/11).
-async fn schedule_loop(queue: Queue, config: MaintenanceConfig, mut shutdown: watch::Receiver<bool>) {
+async fn schedule_loop(
+    queue: Queue,
+    config: MaintenanceConfig,
+    mut shutdown: watch::Receiver<bool>,
+) {
     let mut ticker = tokio::time::interval(config.schedule_interval);
     loop {
         tokio::select! {

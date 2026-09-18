@@ -124,7 +124,10 @@ impl FailureKind {
     /// one free by default. A job that kills its worker must not be allowed to
     /// walk the whole fleet one process at a time.
     pub fn is_interruption(self) -> bool {
-        matches!(self, Self::HeartbeatLost | Self::WorkerExited | Self::WorkerMissing)
+        matches!(
+            self,
+            Self::HeartbeatLost | Self::WorkerExited | Self::WorkerMissing
+        )
     }
 
     /// Whether the attempt spent at claim is given back.
@@ -163,6 +166,7 @@ pub struct Job {
     pub claimed_by: Option<Uuid>,
     pub claimed_at: Option<DateTime<Utc>>,
     pub dedup_scope: Option<String>,
+    pub dedup_period: Option<String>,
     pub destination: Option<String>,
     pub interruptions: i16,
     pub max_interruptions: i16,
@@ -197,6 +201,37 @@ impl Job {
     }
 }
 
+/// A deduplication window.
+///
+/// Fixed buckets, not sliding windows: a sliding window needs
+/// `ts >= now() - period`, which is not immutable and so cannot live in an
+/// index or a generated column. The honest consequence is a boundary hole —
+/// two jobs a minute apart can land either side of an hour boundary and both
+/// run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Period {
+    Minute,
+    Hour,
+    Day,
+    Week,
+    Month,
+}
+
+impl Period {
+    /// Must match the CHECK constraint on `dedup_period`, and is passed
+    /// straight to `date_trunc`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Minute => "minute",
+            Self::Hour => "hour",
+            Self::Day => "day",
+            Self::Week => "week",
+            Self::Month => "month",
+        }
+    }
+}
+
 /// A job to enqueue.
 ///
 /// Deliberately constructible without a client library — this mirrors the
@@ -213,6 +248,8 @@ pub struct NewJob {
     /// `None` means "this job is not deduplicated". When set, uniqueness is
     /// enforced per-queue by a partial unique index — see plans/10.
     pub dedup_scope: Option<String>,
+    /// Optional bucket: `Some("hour")` means "one per hour", not "one ever".
+    pub dedup_period: Option<String>,
     /// What this job talks to. Keys the circuit breaker, so it is a column
     /// rather than a tag inside `args`.
     pub destination: Option<String>,
@@ -235,6 +272,7 @@ impl NewJob {
             max_attempts: 25,
             scheduled_at: None,
             dedup_scope: None,
+            dedup_period: None,
             destination: None,
             dead_letter_queue: None,
             expire_seconds: None,
@@ -285,6 +323,16 @@ impl NewJob {
     }
 
     /// Enable per-queue deduplication on this scope string.
+    /// One job per `scope` per bucket, e.g. `("report:42", Period::Hour)`.
+    ///
+    /// The bucket is computed by the database from `inserted_at`, so enqueuers
+    /// with skewed clocks still agree on which window they are in.
+    pub fn unique_per(mut self, scope: impl Into<String>, period: Period) -> Self {
+        self.dedup_scope = Some(scope.into());
+        self.dedup_period = Some(period.as_str().to_string());
+        self
+    }
+
     pub fn unique(mut self, scope: impl Into<String>) -> Self {
         self.dedup_scope = Some(scope.into());
         self

@@ -12,8 +12,8 @@ use crate::error::{Error, Result};
 use crate::job::{FailureKind, Job, NewJob};
 use crate::schedule::Schedule;
 use chrono::{DateTime, Utc};
-use jiff::tz::TimeZone;
 use jiff::Timestamp;
+use jiff::tz::TimeZone;
 use sqlx::PgPool;
 use tracing::warn;
 use uuid::Uuid;
@@ -58,6 +58,50 @@ pub struct Transition {
     pub owned: bool,
 }
 
+impl Transition {
+    /// Check what SQL actually did against the declared lifecycle.
+    ///
+    /// The SQL functions are authoritative — a polyglot worker calls them
+    /// directly and never runs this code — so this cannot PREVENT anything. It
+    /// exists to make drift loud: if a WHERE clause is edited and starts
+    /// permitting a transition the table forbids, the alternative is finding
+    /// out from a customer. `RETURNING OLD./NEW.` is what makes the check free;
+    /// the before and after states come back from the same statement.
+    pub fn verify(&self, event: crate::lifecycle::Transitions) {
+        let (Some(was), Some(now)) = (&self.was, &self.now) else {
+            return;
+        };
+        let Some(from) = parse_state(was) else { return };
+        let Some(to) = parse_state(now) else { return };
+
+        // The event enum carries payloads in general, so it is not Copy;
+        // describe it before it is consumed.
+        let described = format!("{event:?}");
+        match crate::lifecycle::apply(from, event) {
+            Some(expected) if expected == to => {}
+            _ => warn!(
+                %was, %now, event = %described,
+                "the database performed a transition the lifecycle does not declare; \
+                 schema/002_operations.sql and lifecycle.rs have drifted"
+            ),
+        }
+    }
+}
+
+fn parse_state(s: &str) -> Option<crate::JobState> {
+    use crate::JobState::*;
+    Some(match s {
+        "available" => Available,
+        "claimed" => Claimed,
+        "executing" => Executing,
+        "retryable" => Retryable,
+        "completed" => Completed,
+        "discarded" => Discarded,
+        "cancelled" => Cancelled,
+        _ => return None,
+    })
+}
+
 impl Queue {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
@@ -80,9 +124,9 @@ impl Queue {
             r#"
             INSERT INTO stampede_jobs
                 (queue, task, args, tenant_id, priority, max_attempts, scheduled_at,
-                 dedup_scope, destination, dead_letter_queue, expire_seconds)
+                 dedup_scope, dedup_period, destination, dead_letter_queue, expire_seconds)
             VALUES ($1, $2, $3, $4, $5, $6, coalesce($7, now()),
-                    $8, $9, $10, coalesce($11, 3600))
+                    $8, $9, $10, $11, coalesce($12, 3600))
             ON CONFLICT DO NOTHING
             RETURNING id
             "#,
@@ -95,6 +139,7 @@ impl Queue {
         .bind(job.max_attempts)
         .bind(job.scheduled_at)
         .bind(&job.dedup_scope)
+        .bind(&job.dedup_period)
         .bind(&job.destination)
         .bind(&job.dead_letter_queue)
         .bind(job.expire_seconds)
@@ -107,33 +152,38 @@ impl Queue {
 
     /// Claim up to `limit` jobs for this worker.
     pub async fn claim(&self, queue: &str, worker_id: Uuid, limit: i32) -> Result<Vec<Job>> {
-        let jobs = sqlx::query_as::<_, Job>(
-            "SELECT * FROM stampede_claim($1, $2, $3, NULL)",
-        )
-        .bind(queue)
-        .bind(worker_id)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
+        let jobs = sqlx::query_as::<_, Job>("SELECT * FROM stampede_claim($1, $2, $3, NULL)")
+            .bind(queue)
+            .bind(worker_id)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?;
 
         Ok(jobs)
     }
 
     /// Mark a job completed.
     pub async fn complete(&self, job: &Job, worker_id: Uuid) -> Result<Transition> {
-        let row: Option<(Option<String>, Option<String>, Option<bool>)> = sqlx::query_as(
-            "SELECT was, now_state, owned FROM stampede_complete($1, $2, $3)",
-        )
-        .bind(&job.queue)
-        .bind(job.id)
-        .bind(worker_id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let row: Option<(Option<String>, Option<String>, Option<bool>)> =
+            sqlx::query_as("SELECT was, now_state, owned FROM stampede_complete($1, $2, $3)")
+                .bind(&job.queue)
+                .bind(job.id)
+                .bind(worker_id)
+                .fetch_optional(&self.pool)
+                .await?;
 
         Ok(match row {
-            Some((was, now, owned)) => Transition { was, now, owned: owned.unwrap_or(false) },
+            Some((was, now, owned)) => Transition {
+                was,
+                now,
+                owned: owned.unwrap_or(false),
+            },
             // Zero rows means the WHERE clause did not match: we no longer own it.
-            None => Transition { was: None, now: None, owned: false },
+            None => Transition {
+                was: None,
+                now: None,
+                owned: false,
+            },
         })
     }
 
@@ -151,7 +201,8 @@ impl Queue {
         error: &str,
         retry_delay: Option<std::time::Duration>,
     ) -> Result<Transition> {
-        self.fail_with_exit(job, worker_id, kind, error, retry_delay, None).await
+        self.fail_with_exit(job, worker_id, kind, error, retry_delay, None)
+            .await
     }
 
     /// `fail`, plus the exit status of a worker process that died.
@@ -184,8 +235,16 @@ impl Queue {
         .await?;
 
         Ok(match row {
-            Some((was, now, _dlq)) => Transition { was, now, owned: true },
-            None => Transition { was: None, now: None, owned: false },
+            Some((was, now, _dlq)) => Transition {
+                was,
+                now,
+                owned: true,
+            },
+            None => Transition {
+                was: None,
+                now: None,
+                owned: false,
+            },
         })
     }
 
@@ -225,7 +284,12 @@ impl Queue {
 
     /// Register this process as a worker. The returned id is the heartbeat
     /// identity and what the reaper checks.
-    pub async fn register_worker(&self, hostname: &str, pid: i32, queues: &[String]) -> Result<Uuid> {
+    pub async fn register_worker(
+        &self,
+        hostname: &str,
+        pid: i32,
+        queues: &[String],
+    ) -> Result<Uuid> {
         let id: Uuid = sqlx::query_scalar(
             r#"
             INSERT INTO stampede_workers (hostname, pid, queues)
@@ -338,11 +402,10 @@ impl Queue {
     /// Measured, not scheduled. River rebuilds everything at midnight; this
     /// reports what is actually sparse so the caller can rebuild only that.
     pub async fn sparse_indexes(&self) -> Result<Vec<String>> {
-        let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT indexname FROM stampede_index_density() WHERE sparse",
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let rows: Vec<(String,)> =
+            sqlx::query_as("SELECT indexname FROM stampede_index_density() WHERE sparse")
+                .fetch_all(&self.pool)
+                .await?;
         Ok(rows.into_iter().map(|(n,)| n).collect())
     }
 
@@ -382,7 +445,6 @@ impl Queue {
         Ok(rows)
     }
 
-
     /// Ensure a queue has its own partition, with the storage and autovacuum
     /// settings a partition cannot inherit (see `stampede_create_queue`).
     pub async fn create_queue(&self, queue: &str) -> Result<()> {
@@ -405,11 +467,10 @@ impl Queue {
         // between the claim and the fire would give that guarantee away.
         let mut tx = self.pool.begin().await?;
 
-        let due: Vec<Schedule> =
-            sqlx::query_as("SELECT * FROM stampede_claim_due_schedules($1)")
-                .bind(limit)
-                .fetch_all(&mut *tx)
-                .await?;
+        let due: Vec<Schedule> = sqlx::query_as("SELECT * FROM stampede_claim_due_schedules($1)")
+            .bind(limit)
+            .fetch_all(&mut *tx)
+            .await?;
 
         let now = Utc::now();
         let mut fired = 0u64;
@@ -495,9 +556,9 @@ impl Queue {
         let now = Timestamp::from_second(Utc::now().timestamp())
             .unwrap_or(Timestamp::UNIX_EPOCH)
             .to_zoned(tz.clone());
-        let first = cron
-            .next_after(&now, &tz, policy)
-            .ok_or_else(|| Error::InvalidSchedule(format!("{expr:?} has no occurrence within four years")))?;
+        let first = cron.next_after(&now, &tz, policy).ok_or_else(|| {
+            Error::InvalidSchedule(format!("{expr:?} has no occurrence within four years"))
+        })?;
         let first = DateTime::from_timestamp(first.timestamp().as_second(), 0).unwrap_or_default();
 
         let dst_policy = match policy {
@@ -534,13 +595,12 @@ impl Queue {
     /// find one row. The partition key is part of the primary key for the same
     /// reason.
     pub async fn fetch(&self, queue: &str, id: Uuid) -> Result<Option<Job>> {
-        let job = sqlx::query_as::<_, Job>(
-            "SELECT * FROM stampede_jobs WHERE queue = $1 AND id = $2",
-        )
-        .bind(queue)
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let job =
+            sqlx::query_as::<_, Job>("SELECT * FROM stampede_jobs WHERE queue = $1 AND id = $2")
+                .bind(queue)
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?;
         Ok(job)
     }
 

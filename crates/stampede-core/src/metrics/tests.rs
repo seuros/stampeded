@@ -11,13 +11,22 @@ struct Capture(Arc<Mutex<Seen>>);
 
 impl Recorder for Capture {
     fn count(&self, name: &'static str, v: u64, l: &[Label]) {
-        self.0.lock().unwrap().push((name.into(), format!("count:{v}"), l.to_vec()));
+        self.0
+            .lock()
+            .unwrap()
+            .push((name.into(), format!("count:{v}"), l.to_vec()));
     }
     fn gauge(&self, name: &'static str, v: f64, l: &[Label]) {
-        self.0.lock().unwrap().push((name.into(), format!("gauge:{v}"), l.to_vec()));
+        self.0
+            .lock()
+            .unwrap()
+            .push((name.into(), format!("gauge:{v}"), l.to_vec()));
     }
     fn duration(&self, name: &'static str, v: Duration, l: &[Label]) {
-        self.0.lock().unwrap().push((name.into(), format!("dur:{}", v.as_millis()), l.to_vec()));
+        self.0
+            .lock()
+            .unwrap()
+            .push((name.into(), format!("dur:{}", v.as_millis()), l.to_vec()));
     }
 }
 
@@ -94,9 +103,16 @@ fn durations_say_so_in_their_name() {
         names::JOB_QUEUE_TIME_SECONDS,
         names::CLAIM_DURATION_SECONDS,
     ] {
-        assert!(n.ends_with("_seconds"), "{n} is a duration and should say so");
+        assert!(
+            n.ends_with("_seconds"),
+            "{n} is a duration and should say so"
+        );
     }
-    for n in [names::JOBS_COMPLETED, names::JOBS_FAILED, names::JOBS_INTERRUPTED] {
+    for n in [
+        names::JOBS_COMPLETED,
+        names::JOBS_FAILED,
+        names::JOBS_INTERRUPTED,
+    ] {
         assert!(!n.ends_with("_seconds"), "{n} is a count");
     }
 }

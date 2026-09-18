@@ -44,7 +44,10 @@ fn rejects_out_of_range_and_nonsense() {
 #[test]
 fn accepts_names_and_step_forms() {
     assert!(Cron::parse("0 0 * jan mon").is_ok());
-    assert!(Cron::parse("0 0 * JAN MON").is_ok(), "names are case-insensitive");
+    assert!(
+        Cron::parse("0 0 * JAN MON").is_ok(),
+        "names are case-insensitive"
+    );
     assert!(Cron::parse("*/15 * * * *").is_ok());
     assert!(Cron::parse("0-30/10 * * * *").is_ok());
     assert!(Cron::parse("1,2,3 * * * *").is_ok());
@@ -63,7 +66,12 @@ fn sunday_is_both_zero_and_seven() {
 #[test]
 fn every_minute_advances_one_minute() {
     assert_eq!(
-        next("* * * * *", "2026-03-10T10:15:30-04:00[America/New_York]", "America/New_York", DstPolicy::WallClock),
+        next(
+            "* * * * *",
+            "2026-03-10T10:15:30-04:00[America/New_York]",
+            "America/New_York",
+            DstPolicy::WallClock
+        ),
         "2026-03-10 10:16 EDT"
     );
 }
@@ -73,7 +81,12 @@ fn is_strictly_after_so_it_does_not_refire_in_its_own_minute() {
     // Exactly on the boundary: the next firing must be the NEXT slot, or a
     // scheduler that stores next_run_at would loop on the same occurrence.
     assert_eq!(
-        next("0 * * * *", "2026-03-10T10:00:00-04:00[America/New_York]", "America/New_York", DstPolicy::WallClock),
+        next(
+            "0 * * * *",
+            "2026-03-10T10:00:00-04:00[America/New_York]",
+            "America/New_York",
+            DstPolicy::WallClock
+        ),
         "2026-03-10 11:00 EDT"
     );
 }
@@ -81,7 +94,12 @@ fn is_strictly_after_so_it_does_not_refire_in_its_own_minute() {
 #[test]
 fn step_and_list_fields_pick_the_next_slot() {
     assert_eq!(
-        next("*/15 * * * *", "2026-03-10T10:16:00-04:00[America/New_York]", "America/New_York", DstPolicy::WallClock),
+        next(
+            "*/15 * * * *",
+            "2026-03-10T10:16:00-04:00[America/New_York]",
+            "America/New_York",
+            DstPolicy::WallClock
+        ),
         "2026-03-10 10:30 EDT"
     );
 }
@@ -89,11 +107,21 @@ fn step_and_list_fields_pick_the_next_slot() {
 #[test]
 fn rolls_into_the_next_day_and_month() {
     assert_eq!(
-        next("0 9 * * *", "2026-03-10T23:00:00-04:00[America/New_York]", "America/New_York", DstPolicy::WallClock),
+        next(
+            "0 9 * * *",
+            "2026-03-10T23:00:00-04:00[America/New_York]",
+            "America/New_York",
+            DstPolicy::WallClock
+        ),
         "2026-03-11 09:00 EDT"
     );
     assert_eq!(
-        next("0 0 1 * *", "2026-03-15T00:00:00-04:00[America/New_York]", "America/New_York", DstPolicy::WallClock),
+        next(
+            "0 0 1 * *",
+            "2026-03-15T00:00:00-04:00[America/New_York]",
+            "America/New_York",
+            DstPolicy::WallClock
+        ),
         "2026-04-01 00:00 EDT"
     );
 }
@@ -108,7 +136,11 @@ fn dom_and_dow_together_match_either_not_both() {
     // 2026-06-01 is a Monday; 2026-06-08 is a Monday but not the 1st.
     let from = zoned("2026-06-02T00:00:00+00:00[UTC]");
     let n = c.next_after(&from, &t, DstPolicy::WallClock).unwrap();
-    assert_eq!(n.strftime("%Y-%m-%d").to_string(), "2026-06-08", "Mondays should match");
+    assert_eq!(
+        n.strftime("%Y-%m-%d").to_string(),
+        "2026-06-08",
+        "Mondays should match"
+    );
 
     // 2026-07-01 is a Wednesday: matches on day-of-month alone.
     let from = zoned("2026-06-30T12:00:00+00:00[UTC]");
@@ -120,14 +152,25 @@ fn dom_and_dow_together_match_either_not_both() {
 fn impossible_expression_returns_none_rather_than_hanging() {
     // 30 February never occurs. The search is bounded at four years.
     let c = Cron::parse("0 0 30 2 *").unwrap();
-    assert!(c.next_after(&zoned("2026-01-01T00:00:00+00:00[UTC]"), &tz("UTC"), DstPolicy::WallClock).is_none());
+    assert!(
+        c.next_after(
+            &zoned("2026-01-01T00:00:00+00:00[UTC]"),
+            &tz("UTC"),
+            DstPolicy::WallClock
+        )
+        .is_none()
+    );
 }
 
 #[test]
 fn finds_29_february_within_the_bound() {
     let c = Cron::parse("0 0 29 2 *").unwrap();
     let n = c
-        .next_after(&zoned("2027-03-01T00:00:00+00:00[UTC]"), &tz("UTC"), DstPolicy::WallClock)
+        .next_after(
+            &zoned("2027-03-01T00:00:00+00:00[UTC]"),
+            &tz("UTC"),
+            DstPolicy::WallClock,
+        )
         .expect("2028 is a leap year");
     assert_eq!(n.strftime("%Y-%m-%d").to_string(), "2028-02-29");
 }
@@ -143,9 +186,16 @@ fn wall_clock_fires_once_on_the_fall_back_day() {
     let t = tz("America/New_York");
 
     let first = c
-        .next_after(&zoned("2026-11-01T00:00:00-04:00[America/New_York]"), &t, DstPolicy::WallClock)
+        .next_after(
+            &zoned("2026-11-01T00:00:00-04:00[America/New_York]"),
+            &t,
+            DstPolicy::WallClock,
+        )
         .unwrap();
-    assert_eq!(first.strftime("%Y-%m-%d %H:%M %Z").to_string(), "2026-11-01 01:30 EDT");
+    assert_eq!(
+        first.strftime("%Y-%m-%d %H:%M %Z").to_string(),
+        "2026-11-01 01:30 EDT"
+    );
 
     // From just after that firing, the next is the FOLLOWING DAY -- not the
     // second 01:30 an hour later.
@@ -166,7 +216,10 @@ fn instant_fires_twice_in_the_repeated_hour() {
     let first = zoned("2026-11-01T01:30:00-04:00[America/New_York]");
 
     let second = c.next_after(&first, &t, DstPolicy::Instant).unwrap();
-    assert_eq!(second.strftime("%Y-%m-%d %H:%M %Z").to_string(), "2026-11-01 01:30 EST");
+    assert_eq!(
+        second.strftime("%Y-%m-%d %H:%M %Z").to_string(),
+        "2026-11-01 01:30 EST"
+    );
     assert_eq!(
         second.timestamp().as_second() - first.timestamp().as_second(),
         3600,
@@ -186,9 +239,16 @@ fn spring_forward_runs_at_the_end_of_the_gap() {
     let c = Cron::parse("30 2 * * *").unwrap();
     let t = tz("America/New_York");
     let n = c
-        .next_after(&zoned("2026-03-08T00:00:00-05:00[America/New_York]"), &t, DstPolicy::WallClock)
+        .next_after(
+            &zoned("2026-03-08T00:00:00-05:00[America/New_York]"),
+            &t,
+            DstPolicy::WallClock,
+        )
         .expect("must still fire on a spring-forward day");
-    assert_eq!(n.strftime("%Y-%m-%d %H:%M %Z").to_string(), "2026-03-08 03:30 EDT");
+    assert_eq!(
+        n.strftime("%Y-%m-%d %H:%M %Z").to_string(),
+        "2026-03-08 03:30 EDT"
+    );
 }
 
 #[test]
@@ -199,11 +259,27 @@ fn day_of_week_range_may_wrap_through_sunday() {
     assert!(Cron::parse("0 0 * * 5-7").is_ok());
     let t = tz("UTC");
     // 2026-06-03 is a Wednesday -> next match is Friday the 5th.
-    let n = c.next_after(&zoned("2026-06-03T00:00:00+00:00[UTC]"), &t, DstPolicy::WallClock).unwrap();
+    let n = c
+        .next_after(
+            &zoned("2026-06-03T00:00:00+00:00[UTC]"),
+            &t,
+            DstPolicy::WallClock,
+        )
+        .unwrap();
     assert_eq!(n.strftime("%Y-%m-%d").to_string(), "2026-06-05");
     // ... then Sat, then Sun, then skip to Friday.
-    let n = c.next_after(&zoned("2026-06-07T00:00:00+00:00[UTC]"), &t, DstPolicy::WallClock).unwrap();
-    assert_eq!(n.strftime("%Y-%m-%d").to_string(), "2026-06-12", "Sunday matched, Mon-Thu did not");
+    let n = c
+        .next_after(
+            &zoned("2026-06-07T00:00:00+00:00[UTC]"),
+            &t,
+            DstPolicy::WallClock,
+        )
+        .unwrap();
+    assert_eq!(
+        n.strftime("%Y-%m-%d").to_string(),
+        "2026-06-12",
+        "Sunday matched, Mon-Thu did not"
+    );
 }
 
 #[test]
@@ -212,7 +288,11 @@ fn hourly_schedules_are_unaffected_by_dst() {
     let c = Cron::parse("0 * * * *").unwrap();
     let t = tz("America/New_York");
     let n = c
-        .next_after(&zoned("2026-11-01T01:00:00-04:00[America/New_York]"), &t, DstPolicy::Instant)
+        .next_after(
+            &zoned("2026-11-01T01:00:00-04:00[America/New_York]"),
+            &t,
+            DstPolicy::Instant,
+        )
         .unwrap();
     assert!(n.timestamp() > zoned("2026-11-01T01:00:00-04:00[America/New_York]").timestamp());
 }
@@ -220,7 +300,12 @@ fn hourly_schedules_are_unaffected_by_dst() {
 #[test]
 fn utc_is_unaffected_by_any_of_this() {
     assert_eq!(
-        next("30 1 * * *", "2026-11-01T00:00:00+00:00[UTC]", "UTC", DstPolicy::WallClock),
+        next(
+            "30 1 * * *",
+            "2026-11-01T00:00:00+00:00[UTC]",
+            "UTC",
+            DstPolicy::WallClock
+        ),
         "2026-11-01 01:30 UTC"
     );
 }

@@ -113,7 +113,51 @@ CREATE TABLE stampede_jobs (
     -- NOT sha256(convert_to(...)): convert_to is STABLE, not IMMUTABLE, and is
     -- rejected in a generated column. The ::bytea cast IS immutable. Verified.
     dedup_scope     text,
-    dedup_key       bytea       GENERATED ALWAYS AS (sha256(dedup_scope::bytea)) STORED,
+
+    -- Optional time bucket: "one of these per hour", not "one of these ever".
+    --
+    -- Computed SERVER-SIDE. The client could compose the bucket into
+    -- dedup_scope itself, but then two enqueuers with skewed clocks land in
+    -- different buckets and the limit quietly stops holding -- which is why
+    -- pg-boss computes its slot server-side too.
+    --
+    -- BUCKETED ON inserted_at, NOT scheduled_at. plans/10 verified the trap: a
+    -- STORED key bucketed on scheduled_at silently CHANGES when a job is
+    -- snoozed or rescheduled, vacating its own throttle slot and letting a
+    -- duplicate in. inserted_at is never updated, so the key is stable for the
+    -- row's whole life. River is exposed to this by design; Oban avoids it by
+    -- defaulting to inserted_at.
+    --
+    -- Honest limitation: buckets are fixed windows, not sliding ones. Two jobs
+    -- 60 seconds apart can land either side of an hour boundary and both run. A
+    -- sliding window needs `ts >= now() - period`, which is not immutable, so
+    -- it cannot live in an index or a generated column at all -- it needs a
+    -- read-modify-write per enqueue, and that needs the client to run our code,
+    -- which is exactly what the polyglot INSERT rules out.
+    dedup_period    text        CHECK (dedup_period IN
+                                  ('minute','hour','day','week','month')),
+
+    -- NOT sha256(convert_to(...)): convert_to is STABLE, not IMMUTABLE, and is
+    -- rejected in a generated column. The ::bytea cast IS immutable. Verified.
+    --
+    -- The bucket chain is fussier than it looks, and every step was checked:
+    -- two-argument date_trunc is STABLE (it reads the session TimeZone), the
+    -- three-argument form with an explicit zone is IMMUTABLE, and casting a
+    -- timestamptz to text is STABLE again (DateStyle) -- so the truncated time
+    -- is turned into a number by subtracting the epoch, which yields an
+    -- interval, and extract on an INTERVAL is immutable. Skipping any of that
+    -- gets "generation expression is not immutable" with no hint as to which
+    -- part.
+    dedup_key       bytea       GENERATED ALWAYS AS (
+        sha256((
+            dedup_scope || coalesce(
+                ':' || extract(
+                    epoch FROM (date_trunc(dedup_period, inserted_at, 'UTC') - to_timestamp(0))
+                )::bigint::text,
+                ''
+            )
+        )::bytea)
+    ) STORED,
 
     -- Failure taxonomy, borrowed from good_job's error_event enum — the best in
     -- the survey. Distinguishing "the worker died" from "the job raised" is the

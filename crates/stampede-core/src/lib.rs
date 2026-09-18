@@ -11,6 +11,7 @@ pub mod cron;
 pub mod error;
 pub mod fairness;
 pub mod job;
+pub mod lifecycle;
 pub mod maintenance;
 pub mod metrics;
 pub mod queue;
@@ -20,12 +21,13 @@ pub mod worker;
 
 pub use cron::{Cron, DstPolicy};
 pub use error::{Error, Result};
-pub use schedule::Schedule;
 pub use fairness::{Admission, Fairness, TenantLimit};
+pub use job::{FailureKind, Job, JobState, NewJob, Period};
+pub use lifecycle::Transitions;
 pub use maintenance::{Maintenance, MaintenanceConfig};
 pub use metrics::{Metrics, Recorder, TracingRecorder};
-pub use job::{FailureKind, Job, JobState, NewJob};
 pub use queue::{Queue, Transition};
+pub use schedule::Schedule;
 pub use wakeup::{NextPoll, Wakeup};
 pub use worker::{Worker, WorkerConfig};
 

@@ -3643,6 +3643,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
+ "state-machines",
  "thiserror",
  "throttle-machines",
  "tokio",

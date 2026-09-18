@@ -11,7 +11,10 @@ fn a_full_batch_means_go_again_immediately() {
     // per poll interval. Getting this wrong is invisible until the day there
     // is a backlog.
     assert_eq!(NextPoll::after_claim(5, 5, 10), NextPoll::Immediate);
-    assert_eq!(NextPoll::Immediate.delay(Duration::from_secs(1)), Duration::ZERO);
+    assert_eq!(
+        NextPoll::Immediate.delay(Duration::from_secs(1)),
+        Duration::ZERO
+    );
 }
 
 #[test]
@@ -20,7 +23,10 @@ fn a_partial_batch_means_the_queue_is_drained() {
     // going again immediately would just be an empty query.
     assert_eq!(NextPoll::after_claim(2, 5, 10), NextPoll::Idle);
     assert_eq!(NextPoll::after_claim(0, 5, 10), NextPoll::Idle);
-    assert_eq!(NextPoll::Idle.delay(Duration::from_secs(1)), Duration::from_secs(1));
+    assert_eq!(
+        NextPoll::Idle.delay(Duration::from_secs(1)),
+        Duration::from_secs(1)
+    );
 }
 
 #[test]
@@ -36,7 +42,10 @@ fn the_saturated_sleep_is_long_but_bounded() {
     // because if both are somehow missed the worker still has to recover.
     let d = NextPoll::Saturated.delay(Duration::from_secs(1));
     assert!(d > Duration::from_secs(1));
-    assert!(d <= Duration::from_secs(30), "an unbounded sleep here would be a stall");
+    assert!(
+        d <= Duration::from_secs(30),
+        "an unbounded sleep here would be a stall"
+    );
 }
 
 #[tokio::test]
@@ -60,7 +69,10 @@ async fn wakeups_are_filtered_to_the_subscribed_queue() {
 
     w.tx.send("reports".into()).ok();
     let woke = tokio::time::timeout(Duration::from_millis(50), mail.recv()).await;
-    assert!(woke.is_err(), "another queue's notification must not wake us");
+    assert!(
+        woke.is_err(),
+        "another queue's notification must not wake us"
+    );
 
     w.tx.send("mail".into()).ok();
     let woke = tokio::time::timeout(Duration::from_millis(50), mail.recv()).await;

@@ -4,7 +4,10 @@
 use super::*;
 
 fn limiter(rps: f64, burst: f64) -> Fairness {
-    Fairness::new(TenantLimit { jobs_per_second: rps, burst })
+    Fairness::new(TenantLimit {
+        jobs_per_second: rps,
+        burst,
+    })
 }
 
 #[test]
@@ -14,7 +17,11 @@ fn jobs_without_a_tenant_are_always_admitted() {
     for _ in 0..100 {
         assert!(f.admit(None).is_allowed());
     }
-    assert_eq!(f.tracked_tenants(), 0, "untenanted jobs should not allocate state");
+    assert_eq!(
+        f.tracked_tenants(),
+        0,
+        "untenanted jobs should not allocate state"
+    );
 }
 
 #[test]
@@ -37,7 +44,10 @@ fn burst_is_tolerated_then_the_smooth_rate_applies() {
         }
     }
     // The burst lets a few through at the same instant, but not all ten.
-    assert!((1..=5).contains(&allowed), "admitted {allowed} at one instant");
+    assert!(
+        (1..=5).contains(&allowed),
+        "admitted {allowed} at one instant"
+    );
 }
 
 #[test]
@@ -60,7 +70,10 @@ fn throttled_reports_how_long_to_wait() {
     match f.admit_at("acme", 1.0) {
         Admission::Throttled { retry_after_secs } => {
             assert!(retry_after_secs > 0.0, "retry_after should be positive");
-            assert!(retry_after_secs <= 1.0, "retry_after {retry_after_secs} exceeds the interval");
+            assert!(
+                retry_after_secs <= 1.0,
+                "retry_after {retry_after_secs} exceeds the interval"
+            );
         }
         Admission::Allowed => panic!("second call at the same instant should be throttled"),
     }

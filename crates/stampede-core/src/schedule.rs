@@ -79,8 +79,9 @@ impl Schedule {
     /// One step forward. The only place the two rule kinds differ.
     fn step(&self, from: &Zoned, tz: &TimeZone) -> Result<Zoned> {
         if let Some(expr) = &self.cron_expr {
-            let cron = Cron::parse(expr)
-                .map_err(|e| crate::Error::InvalidSchedule(format!("schedule {:?}: {e}", self.key)))?;
+            let cron = Cron::parse(expr).map_err(|e| {
+                crate::Error::InvalidSchedule(format!("schedule {:?}: {e}", self.key))
+            })?;
             return cron.next_after(from, tz, self.policy()).ok_or_else(|| {
                 crate::Error::InvalidSchedule(format!(
                     "schedule {:?}: {expr:?} has no occurrence within four years",

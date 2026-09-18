@@ -19,6 +19,7 @@ jiff.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
+state-machines.workspace = true
 chrono-machines.workspace = true
 breaker-machines.workspace = true
 throttle-machines.workspace = true

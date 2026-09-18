@@ -93,12 +93,17 @@ impl Wakeup {
         }
 
         let mut listener = PgListener::connect(database_url).await?;
-        listener.listen_all([insert_channel.as_str(), sonar_channel.as_str()]).await?;
+        listener
+            .listen_all([insert_channel.as_str(), sonar_channel.as_str()])
+            .await?;
 
         let (tx, _) = broadcast::channel(WAKEUP_BUFFER);
         let healthy = Arc::new(AtomicBool::new(false));
 
-        let handle = Self { tx: tx.clone(), healthy: healthy.clone() };
+        let handle = Self {
+            tx: tx.clone(),
+            healthy: healthy.clone(),
+        };
 
         let sonar_probe = sonar_channel.clone();
         let probe_pool = pool.clone();
@@ -183,7 +188,10 @@ impl Wakeup {
 
     /// Wakeups for one queue.
     pub fn subscribe(&self, queue: impl Into<String>) -> WakeupRx {
-        WakeupRx { queue: queue.into(), rx: self.tx.subscribe() }
+        WakeupRx {
+            queue: queue.into(),
+            rx: self.tx.subscribe(),
+        }
     }
 }
 
