@@ -1,0 +1,94 @@
+# frozen_string_literal: true
+
+require "test_helper"
+
+RAN = Queue.new
+
+class ConcurrentJob < ActiveJob::Base
+  def perform(n) = RAN << n
+end
+
+class ConcurrencyTest < Minitest::Test
+  include StampedeTest::Isolation
+
+  def setup
+    super
+    ActiveJob::Base.queue_adapter = ActiveJob::QueueAdapters::StampedeAdapter.new
+    RAN.clear
+  end
+
+  def test_several_workers_run_every_job_exactly_once
+    # The property the whole design is for, in the language most people will
+    # use. Each worker has its own connection and claims through the same SQL
+    # function the Rust worker uses -- FOR UPDATE SKIP LOCKED is what makes
+    # them take disjoint work rather than fighting.
+    30.times { |i| ConcurrentJob.perform_later(i) }
+
+    workers = 4.times.map do
+      Stampede::ActiveJobWorker.new(queue: "default", concurrency: 2, poll_interval: 0.05)
+    end
+    threads = workers.map { |w| Thread.new { w.run } }
+
+    deadline = Time.now + 20
+    sleep 0.05 until RAN.size >= 30 || Time.now > deadline
+    workers.each(&:stop)
+    threads.each { |t| t.join(5) }
+
+    ran = []
+    ran << RAN.pop until RAN.empty?
+
+    assert_equal 30, ran.size, "every job must run"
+    assert_equal ran.uniq.sort, (0...30).to_a, "each exactly once, none twice"
+
+    states = conn do |c|
+      c.exec("SELECT state, count(*) FROM stampede_jobs GROUP BY state")
+       .each_with_object({}) { |r, h| h[r["state"]] = r["count"].to_i }
+    end
+    assert_equal({ "completed" => 30 }, states)
+  ensure
+    threads&.each(&:kill)
+  end
+
+  def test_the_counters_agree_with_reality_after_concurrent_work
+    # The Ruby worker drives the same counter triggers that deadlocked under
+    # concurrent completion in Rust. Depth is read from them by the dashboard
+    # and every metric, so drift here is a lie everywhere.
+    20.times { |i| ConcurrentJob.perform_later(i) }
+
+    workers = 3.times.map do
+      Stampede::ActiveJobWorker.new(queue: "default", concurrency: 3, poll_interval: 0.05)
+    end
+    threads = workers.map { |w| Thread.new { w.run } }
+
+    deadline = Time.now + 20
+    sleep 0.05 until RAN.size >= 20 || Time.now > deadline
+    workers.each(&:stop)
+    threads.each { |t| t.join(5) }
+
+    assert_equal({ "completed" => 20 }, Stampede.depth("default"))
+
+    # Cross-checked against the truth, which is the one place an aggregate is
+    # allowed.
+    actual = conn { |c| c.exec("SELECT count(*) FROM stampede_jobs WHERE state='completed'")[0]["count"].to_i }
+    assert_equal 20, actual, "the counter and the table must agree"
+  ensure
+    threads&.each(&:kill)
+  end
+
+  def test_a_thundering_herd_of_identical_jobs_enqueues_one
+    # Forty threads deciding to enqueue the same refresh job at once, which is
+    # what a cache expiry actually looks like.
+    results = Queue.new
+    threads = 40.times.map do
+      Thread.new do
+        results << Stampede.enqueue(queue: "default", task: "refresh", unique: "cache:products")
+      end
+    end
+    threads.each(&:join)
+
+    ids = []
+    ids << results.pop until results.empty?
+    assert_equal 1, ids.compact.size, "exactly one enqueue may win"
+    assert_equal 1, conn { |c| c.exec("SELECT count(*) FROM stampede_jobs")[0]["count"].to_i }
+  end
+end
