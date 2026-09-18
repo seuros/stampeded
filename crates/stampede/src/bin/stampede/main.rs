@@ -35,6 +35,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    // Said BEFORE connecting, because an unreachable server produces no output
+    // at all until the acquire timeout elapses -- ten seconds of silence at
+    // startup reads as a hang, and the first thing anyone does is kill it.
+    info!(
+        url = %redact(&config.database_url),
+        "connecting"
+    );
+
     let pool = sqlx::postgres::PgPoolOptions::new()
         // Sized against the worker's concurrency, not arbitrarily. underway
         // pins a connection per in-flight job and exhausts a stock
@@ -44,7 +52,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .max_connections(config.pool_size)
         .acquire_timeout(Duration::from_secs(10))
         .connect(&config.database_url)
-        .await?;
+        .await
+        .map_err(|e| explain_connect_failure(&e, &config.database_url))?;
 
     if config.migrate {
         info!("applying schema");
@@ -56,7 +65,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Provision the partition up front so the first enqueue does not land in
     // the DEFAULT partition, which has no dedicated autovacuum settings.
     if config.worker {
-        queue.create_queue(&config.queue).await?;
+        queue.create_queue(&config.queue).await.map_err(|e| {
+            // The overwhelmingly likely cause on a first run, and the raw error
+            // ("function stampede_create_queue(text) does not exist") does not
+            // say so.
+            if e.to_string().contains("stampede_create_queue") {
+                Fatal(format!(
+                    "the Stampede schema is not installed in this database.\n\n\
+                     Run once with --migrate to create it:\n\n    \
+                     stampede --database-url ... --migrate\n\n\
+                     Or apply schema/*.sql by hand. Postgres 18+ is required: the \
+                     schema uses uuidv7(), RETURNING OLD./NEW. and generated columns, \
+                     with no compatibility shims."
+                ))
+            } else {
+                Fatal(format!("could not provision queue {:?}: {e}", config.queue))
+            }
+        })?;
     }
 
     // TracingRecorder by default: it emits at debug, so it costs nothing until
@@ -182,6 +207,67 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("stopped");
     Ok(())
+}
+
+/// A fatal startup error, printed for a human.
+///
+/// `main` returning `Result` prints the error with DEBUG, so a `String` comes
+/// out quoted with literal `\n` escapes — which turns a carefully written
+/// multi-line hint into one unreadable line. Debug delegating to Display is
+/// the standard fix.
+pub(crate) struct Fatal(pub String);
+
+impl std::fmt::Debug for Fatal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::fmt::Display for Fatal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Fatal {}
+
+/// Hide the password when echoing a connection URL.
+///
+/// It goes into logs, and a log line is the easiest secret to leak by
+/// accident — someone pastes a startup error into an issue.
+pub(crate) fn redact(url: &str) -> String {
+    match (url.find("://"), url.find('@')) {
+        (Some(scheme), Some(at)) if at > scheme + 3 => {
+            let userinfo = &url[scheme + 3..at];
+            let user = userinfo.split(':').next().unwrap_or("");
+            format!("{}{}:***{}", &url[..scheme + 3], user, &url[at..])
+        }
+        _ => url.to_string(),
+    }
+}
+
+/// Turn a connection failure into something actionable.
+///
+/// sqlx's Debug output is a full struct dump — accurate, and useless to
+/// someone who has just mistyped a database name.
+fn explain_connect_failure(e: &sqlx::Error, url: &str) -> Fatal {
+    let detail = match e {
+        sqlx::Error::Database(db) => db.message().to_string(),
+        other => other.to_string(),
+    };
+
+    let hint = if detail.contains("does not exist") {
+        "\n\nThe database itself is missing. Create it first: createdb <name>"
+    } else if detail.contains("password") || detail.contains("authentication") {
+        "\n\nCheck the credentials in the URL."
+    } else if detail.contains("Connection refused") || detail.contains("connect") {
+        "\n\nNothing is listening there. Check the host and port, and that \
+         Postgres is running."
+    } else {
+        ""
+    };
+
+    Fatal(format!("could not connect to {}: {detail}{hint}", redact(url)))
 }
 
 #[cfg(unix)]

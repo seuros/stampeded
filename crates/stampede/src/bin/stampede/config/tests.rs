@@ -109,3 +109,40 @@ fn roles_can_be_disabled_independently() {
     assert!(!c.worker);
     assert!(c.maintenance);
 }
+
+// ---------------------------------------------------------- startup failures
+
+#[test]
+fn a_connection_url_never_shows_its_password() {
+    // It goes into a log line at startup, and a log line is the easiest secret
+    // to leak by accident -- someone pastes a startup error into an issue.
+    let out = super::super::redact("postgres://app:hunter2@db.internal:5432/prod");
+
+    assert!(!out.contains("hunter2"), "password leaked: {out}");
+    assert!(out.contains("app"), "the user is useful and not secret");
+    assert!(out.contains("db.internal"));
+    assert!(out.contains("/prod"));
+}
+
+#[test]
+fn redaction_survives_urls_with_no_credentials() {
+    // Local development URLs often have neither, and mangling them would make
+    // the log line wrong exactly where it is most read.
+    assert_eq!(
+        super::super::redact("postgres://localhost/stampede"),
+        "postgres://localhost/stampede"
+    );
+    assert_eq!(super::super::redact("not a url"), "not a url");
+}
+
+#[test]
+fn a_fatal_error_prints_its_newlines() {
+    // `main` returning Result prints the error with DEBUG, so a String comes
+    // out quoted with literal \n escapes -- which turns a carefully written
+    // multi-line hint into one unreadable line. This is the bug that trick
+    // exists to avoid, so it gets a test.
+    let f = super::super::Fatal("first line\nsecond line".to_string());
+
+    assert_eq!(format!("{f:?}"), "first line\nsecond line");
+    assert!(!format!("{f:?}").contains("\\n"), "escapes leaked into the output");
+}
