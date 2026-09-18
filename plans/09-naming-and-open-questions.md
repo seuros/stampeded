@@ -4,6 +4,23 @@
 
 `stampede` is squatted on both registries. Neither is a live project.
 
+**DECIDED 2026-09-18: hold out for `stampede`.** Owners contacted directly on
+both registries. Both squats are dormant by any measure — a 0.0.0 placeholder
+with no repo from 2023, and a single-version gem from 2013 for an unrelated
+problem — which is exactly what the adoption processes exist for.
+
+**Verified fallback if neither replies: `stampeded`.** Free on both registries
+as of 2026-09-18 (checked, not assumed), and the `d` suffix is the daemon
+convention — `httpd`, `sshd`, `systemd` — so it reads as deliberate rather than
+as a consolation prize. `stampede-rs` / `stampede-rb` and `stampedeq` are also
+free, but two names for one project is worse than one slightly odd one.
+
+If the rename ever happens it should cover the **crate, gem and binary only**.
+The SQL identifiers stay `stampede_jobs` / `stampede_claim`, as do the metric
+names and the notify channel: a table prefix is not a package name, Postgres
+has no registry namespace to collide in, and churning them would invalidate
+every code sample in these notes and every polyglot snippet people copy.
+
 ### RubyGems — `stampede`
 
 ```
