@@ -200,7 +200,19 @@ module Stampede
           # The retry DELAY is computed by the database, not here: passing an
           # absolute timestamp would make retry timing depend on this box's
           # clock agreeing with the database's.
-          delay = kind == "unrecoverable" ? nil : backoff_ms(job)
+          #
+          # A handler may override it by raising RetryIn -- the Stampede
+          # equivalent of retry_on(wait:), and the reason refusing retry_on
+          # costs nothing in expressiveness. It picks WHEN, not whether: the
+          # attempt is charged and max_attempts still applies.
+          delay =
+            if kind == "unrecoverable"
+              nil
+            elsif error.is_a?(RetryIn)
+              error.delay_ms
+            else
+              backoff_ms(job)
+            end
           r = c.exec_params(
             "SELECT * FROM stampede_fail($1, $2, $3, $4, $5, $6, $7)",
             [job.queue, job.id, worker_id, kind, error.message.to_s[0, 4000], delay, nil]

@@ -2236,3 +2236,57 @@ async fn a_schedule_needs_a_key() {
         "the cron path needs the same guard"
     );
 }
+
+/// A handler choosing its own retry delay, the Rust half of `RetryIn`.
+///
+/// Parity with the Ruby worker matters here beyond tidiness: a job moved from
+/// one worker to the other must retry on the same schedule, or "the workers
+/// are peers" is false in a way users would feel.
+///
+/// Asserts the delay reached the DATABASE. A delay computed and then dropped
+/// looks identical from the handler's side.
+#[tokio::test]
+async fn a_handler_can_choose_its_own_retry_delay() {
+    let q = q!();
+    let w = q.register_worker("test", 1, &["default".into()]).await.unwrap();
+
+    let id = q.enqueue(NewJob::new("default", "ratelimited").max_attempts(5)).await.unwrap();
+    let jobs = q.claim("default", w, 1).await.unwrap();
+    let job = jobs.first().expect("claimed");
+
+    q.fail(
+        job,
+        w,
+        stampede::FailureKind::Raised,
+        "rate limited",
+        Some(std::time::Duration::from_secs(3600)),
+    )
+    .await
+    .unwrap();
+
+    let row = q.fetch("default", id.expect("enqueued")).await.unwrap().expect("job");
+    let delay = row.scheduled_at - chrono::Utc::now();
+
+    assert_eq!(row.state.as_str(), "retryable");
+    assert_eq!(row.attempt, 1, "a chosen delay must still charge the attempt");
+    assert!(
+        delay.num_seconds() > 3000,
+        "the chosen delay did not reach the database: {delay:?}"
+    );
+}
+
+/// The downcast that makes `RetryIn` work must actually fire.
+#[test]
+fn retry_in_survives_being_boxed_as_a_handler_error() {
+    let boxed: Box<dyn std::error::Error + Send + Sync> = Box::new(stampede::RetryIn::secs(42));
+    let err = stampede::Error::Handler(boxed);
+
+    let stampede::Error::Handler(src) = &err else {
+        panic!("wrong variant")
+    };
+    let found = src
+        .downcast_ref::<stampede::RetryIn>()
+        .expect("RetryIn must be recoverable after boxing, or the worker cannot see it");
+
+    assert_eq!(found.0, std::time::Duration::from_secs(42));
+}

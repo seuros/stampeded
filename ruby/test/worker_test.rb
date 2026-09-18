@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "test_helper"
+require "time"
 
 class WorkerTest < Minitest::Test
   include StampedeTest::Isolation
@@ -174,6 +175,42 @@ class WorkerTest < Minitest::Test
     Stampede.config.job_timeout = 900.0
   end
 
+
+
+  # A handler choosing its own retry delay -- the Stampede answer to
+  # retry_on(wait:), which the adapter refuses because it re-enqueues a NEW row
+  # and resets every counter.
+  #
+  # Asserts the delay reaches the DATABASE, not merely that the object holds
+  # it: the whole point is that scheduled_at moves, and a delay computed and
+  # then dropped on the floor would look identical from Ruby.
+  def test_a_handler_can_choose_its_own_retry_delay
+    id = Stampede.enqueue(queue: "default", task: "ratelimited", max_attempts: 5)
+    worker = Stampede::Worker.new(queue: "default", poll_interval: 0.05)
+    worker.register("ratelimited") { raise Stampede::RetryIn.new(3600, "rate limited") }
+
+    run_worker(worker) { job_row(id)["state"] == "retryable" }
+
+    row = job_row(id)
+    delay = Time.parse(row["scheduled_at"]) - Time.now
+
+    assert_equal "retryable", row["state"]
+    assert_equal 1, row["attempt"].to_i, "RetryIn must still charge the attempt"
+    # An hour, not the default backoff, which at attempt 1 is at most a second.
+    assert_operator delay, :>, 3000, "the handler's delay did not reach the database (got #{delay}s)"
+  end
+
+  # RetryIn picks when, not whether: the poison brake still applies.
+  def test_retry_in_does_not_exempt_a_job_from_max_attempts
+    id = Stampede.enqueue(queue: "default", task: "always", max_attempts: 1)
+    worker = Stampede::Worker.new(queue: "default", poll_interval: 0.05)
+    worker.register("always") { raise Stampede::RetryIn.new(0.01) }
+
+    run_worker(worker) { %w[discarded retryable].include?(job_row(id)["state"]) }
+
+    assert_equal "discarded", job_row(id)["state"],
+                 "max_attempts must still bound a job that picks its own delay"
+  end
 
 end
 

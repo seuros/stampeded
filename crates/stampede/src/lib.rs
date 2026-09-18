@@ -32,7 +32,7 @@ pub mod http;
 pub mod mcp;
 
 pub use cron::{Cron, DstPolicy};
-pub use error::{Error, Result};
+pub use error::{Error, Result, RetryIn};
 pub use fairness::{Admission, Fairness, TenantLimit};
 pub use job::{FailureKind, Job, JobState, NewJob, Period};
 pub use lifecycle::Transitions;

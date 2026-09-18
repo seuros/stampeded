@@ -753,6 +753,17 @@ async fn report_success(queue: &Queue, job: &Job, worker_id: Uuid) -> Result<()>
     Ok(())
 }
 
+/// A handler's own retry delay, if it asked for one.
+///
+/// The handler error is boxed by the time it reaches us, so this is a
+/// downcast rather than a match arm.
+fn retry_in_of(err: &Error) -> Option<Duration> {
+    match err {
+        Error::Handler(src) => src.downcast_ref::<crate::RetryIn>().map(|r| r.0),
+        _ => None,
+    }
+}
+
 async fn report_failure(
     queue: &Queue,
     job: &Job,
@@ -766,6 +777,10 @@ async fn report_failure(
     // which is what chrono-machines expects.
     let retry_delay = if kind == FailureKind::Unrecoverable {
         None
+    } else if let Some(r) = retry_in_of(&err) {
+        // The handler chose its own delay -- see RetryIn. Parity with the Ruby
+        // worker, so a job moved between the two retries on the same schedule.
+        Some(r)
     } else {
         let mut rng = chrono_machines::rand::rng();
         let ms = backoff

@@ -282,9 +282,33 @@ keeps claiming more that it will also appear to abandon.
 
 ## 8. Still open
 
-- **`retry_on(wait:)`**, per §4.2. The row carries
-  `backoff_base_ms`/`backoff_max_ms`, which covers exponential-with-cap but not
-  an arbitrary schedule. Grow the row, or accept the gap?
+- ~~**`retry_on(wait:)`**, per §4.2.~~ **CLOSED — neither. `RetryIn`.**
+
+  The question offered two answers: grow the row with a schedule column, or
+  accept the gap. Both were worse than the obvious third. `stampede_fail`
+  ALREADY takes a delay — the worker simply always computed it — so the whole
+  feature was letting a handler supply one:
+
+  ```ruby
+  rescue RateLimited => e
+    raise Stampede::RetryIn.new(e.retry_after)   # the server's Retry-After
+  ```
+
+  ```rust
+  Err(Box::new(RetryIn::secs(3600)))
+  ```
+
+  This is strictly more expressive than a schedule column, because the delay is
+  chosen at the moment of failure and can use what the failure itself said — a
+  stored schedule cannot read a `Retry-After` header. It also keeps the promise
+  §4.2 was defending: the objection to `retry_on` was never custom backoff, it
+  was a SECOND retry ledger. `RetryIn` picks *when* the next attempt happens,
+  not whether; the attempt is already charged at claim and `max_attempts` still
+  bounds the job, which is asserted by a test.
+
+  Implemented on both sides deliberately. A job moved between the Rust and Ruby
+  workers must retry on the same schedule, or "the workers are peers" is false
+  somewhere a user would feel it.
 - ~~**Cross-compilation is not wired into CI.**~~ **WIRED**, though not yet
   proven: `.github/workflows/release.yml` builds all six platform gems, using
   `cross` for the three that need it. It has never run — GitHub Actions cannot

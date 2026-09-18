@@ -392,6 +392,30 @@ poll interval instead of within milliseconds. If you want wakeups, give the
 daemon a **direct** connection (or a `session`-mode pool) — it is the only
 connection that needs one. Workers can stay pooled.
 
+## Custom retry delays
+
+The row carries `backoff_base_ms` and `backoff_max_ms`, which give exponential
+backoff with a cap. When a failure knows better than a formula, the handler can
+say so:
+
+```ruby
+rescue RateLimited => e
+  raise Stampede::RetryIn.new(e.retry_after)   # honour the server
+end
+```
+
+```rust
+Err(Box::new(RetryIn::secs(3600)))
+```
+
+This is Stampede's answer to ActiveJob's `retry_on(wait:)`, which the adapter
+refuses — see *Rails* above. The objection to `retry_on` is not custom backoff;
+it is that `retry_on` re-enqueues the job as a **new row**, which resets every
+counter and makes the dashboard lie about how many times anything has run.
+
+`RetryIn` chooses *when* the next attempt happens, not *whether*. The attempt
+was charged at claim, and `max_attempts` still discards the job on schedule.
+
 ## Timeouts
 
 Three layers, because the first cannot fire when the worker is dead and the

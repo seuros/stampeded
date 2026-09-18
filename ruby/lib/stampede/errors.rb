@@ -64,4 +64,35 @@ module Stampede
 
   # A job was claimed for a task with no registered handler.
   class UnknownTask < Error; end
+
+  # Raised by a handler to choose its own retry delay.
+  #
+  # This is the Stampede answer to ActiveJob's `retry_on(wait:)`, which the
+  # adapter refuses (see RetryConflict): `retry_on` re-enqueues the job as a
+  # NEW ROW, which resets every counter and makes the dashboard lie. The
+  # objection was never to custom backoff -- it was to a second retry ledger.
+  #
+  # The row already carries `backoff_base_ms` and `backoff_max_ms`, which
+  # express exponential-with-cap and nothing else. This covers the rest, and
+  # covers it better than a schedule column could, because the delay is
+  # computed at the moment of failure and can use what the failure itself
+  # said:
+  #
+  #   rescue RateLimited => e
+  #     raise Stampede::RetryIn.new(e.retry_after)   # the server's Retry-After
+  #
+  # The attempt is still charged and `max_attempts` still bounds the job: this
+  # chooses WHEN the next attempt happens, not whether the budget applies.
+  class RetryIn < Error
+    attr_reader :seconds
+
+    def initialize(seconds, message = nil)
+      @seconds = Float(seconds)
+      raise ArgumentError, "RetryIn needs a non-negative delay, got #{seconds.inspect}" if @seconds.negative?
+
+      super(message || "retry in #{@seconds}s")
+    end
+
+    def delay_ms = (@seconds * 1000).round
+  end
 end
