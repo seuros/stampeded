@@ -11,7 +11,9 @@
 mod config;
 
 use config::Config;
-use stampede_core::{Maintenance, MaintenanceConfig, Queue, Wakeup, Worker, WorkerConfig};
+use stampede_core::{
+    Maintenance, MaintenanceConfig, Metrics, Queue, TracingRecorder, Wakeup, Worker, WorkerConfig,
+};
 use std::time::Duration;
 use tokio::sync::watch;
 use tracing::{error, info, warn};
@@ -56,6 +58,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if config.worker {
         queue.create_queue(&config.queue).await?;
     }
+
+    // TracingRecorder by default: it emits at debug, so it costs nothing until
+    // someone sets RUST_LOG=stampede_core::metrics=debug -- at which point they
+    // have a working metrics feed with no backend to run. Anyone wanting real
+    // telemetry implements Recorder in their own crate, on their own upgrade
+    // schedule, which is the point of not depending on a vendor here.
+    let metrics = Metrics::new(TracingRecorder);
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -111,7 +120,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let worker = match wakeup.clone() {
             Some(w) => worker.with_wakeup(w),
             None => worker,
-        };
+        }
+        .with_metrics(metrics.clone());
         let rx = shutdown_rx.clone();
         tasks.push(tokio::spawn(async move { worker.run(rx).await }));
     }
@@ -125,7 +135,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ..Default::default()
             },
         );
-        info!("starting maintenance (reaper + pruner)");
+        let m = m.with_metrics(metrics.clone());
+        info!("starting maintenance (reaper, pruner, expirer, health)");
         let rx = shutdown_rx.clone();
         tasks.push(tokio::spawn(async move { m.run(rx).await }));
     }

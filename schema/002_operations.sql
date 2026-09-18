@@ -404,15 +404,31 @@ $$;
 -- Returns the count so the caller can loop until it returns < p_limit, which is
 -- how River avoids both a long transaction and an unfinished sweep.
 -- ---------------------------------------------------------------------------
+-- TWO retention clocks, not one (pg-boss's shape).
+--
+-- A completed job is evidence nobody will read; a discarded one is evidence
+-- somebody is about to be paged about. Keeping them for the same duration means
+-- either drowning in successes or deleting failures before anyone can look at
+-- them -- and Oban's 60-second default does exactly the latter, destroying the
+-- evidence before the alert has fired.
+--
+-- Defaults: 1 hour for completed (between Oban's 60s and River's 24h), 7 days
+-- for discarded and cancelled (River's number).
 CREATE FUNCTION stampede_prune(
-    p_older_than interval DEFAULT interval '14 days',
-    p_limit      integer  DEFAULT 10000
+    p_older_than interval DEFAULT interval '1 hour',
+    p_limit      integer  DEFAULT 10000,
+    p_failed_older_than interval DEFAULT interval '7 days'
 ) RETURNS integer
 LANGUAGE sql AS $$
     WITH doomed AS MATERIALIZED (
         SELECT queue, id FROM stampede_jobs
-         WHERE state IN ('completed','discarded','cancelled')
-           AND finished_at < now() - p_older_than
+         WHERE finished_at IS NOT NULL
+           AND CASE state
+                 WHEN 'completed' THEN finished_at < now() - p_older_than
+                 WHEN 'discarded' THEN finished_at < now() - p_failed_older_than
+                 WHEN 'cancelled' THEN finished_at < now() - p_failed_older_than
+                 ELSE false
+               END
          ORDER BY finished_at
          LIMIT p_limit
          FOR UPDATE SKIP LOCKED
@@ -421,6 +437,112 @@ LANGUAGE sql AS $$
      USING doomed d
      WHERE j.queue = d.queue AND j.id = d.id
     RETURNING 1;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- VACUUM HEALTH
+--
+-- plans/13 item 5: pg-boss's #checkVacuum is the single most valuable
+-- operational feature in the survey, because it converts the queue's
+-- characteristic death spiral from "mysterious slow backlog" into a named
+-- cause. A queue table is the pathological autovacuum case -- constant UPDATEs
+-- over a small hot set -- and when autovacuum falls behind, everything simply
+-- gets slower with no error anywhere.
+--
+-- Returns one row per partition: dead tuples, the threshold autovacuum will
+-- actually use for THAT table (its own reloptions, not the global defaults --
+-- which is the whole reason a naive n_dead_tup alert misfires), and when it
+-- last ran.
+CREATE FUNCTION stampede_vacuum_health()
+RETURNS TABLE (
+    relname       text,
+    live_tuples   bigint,
+    dead_tuples   bigint,
+    dead_ratio    double precision,
+    autovac_threshold double precision,
+    needs_vacuum  boolean,
+    last_autovacuum timestamptz
+)
+LANGUAGE sql AS $$
+    SELECT
+        c.relname::text,
+        s.n_live_tup,
+        s.n_dead_tup,
+        CASE WHEN s.n_live_tup > 0
+             THEN s.n_dead_tup::float8 / s.n_live_tup
+             ELSE 0 END,
+        -- The formula autovacuum itself uses, with this table's own settings
+        -- where they are set and the cluster defaults where they are not.
+        threshold.base + threshold.factor * s.n_live_tup,
+        s.n_dead_tup > threshold.base + threshold.factor * s.n_live_tup,
+        s.last_autovacuum
+      FROM pg_stat_user_tables s
+      JOIN pg_class c ON c.oid = s.relid
+      CROSS JOIN LATERAL (
+          SELECT
+            coalesce(
+              (SELECT option_value::float8 FROM pg_options_to_table(c.reloptions)
+                WHERE option_name = 'autovacuum_vacuum_threshold'),
+              current_setting('autovacuum_vacuum_threshold')::float8) AS base,
+            coalesce(
+              (SELECT option_value::float8 FROM pg_options_to_table(c.reloptions)
+                WHERE option_name = 'autovacuum_vacuum_scale_factor'),
+              current_setting('autovacuum_vacuum_scale_factor')::float8) AS factor
+      ) threshold
+     WHERE c.relname LIKE 'stampede_jobs%'
+       -- SCOPED TO THIS SCHEMA. pg_stat_user_tables spans the whole database,
+       -- so without this a second Stampede install -- or, here, a few hundred
+       -- leftover test schemas -- reports as this one's partitions. Found by
+       -- running it and getting 200 rows for a 2-partition install.
+       AND s.schemaname = current_schema()
+     ORDER BY s.n_dead_tup DESC;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- INDEX DENSITY
+--
+-- plans/13 item 4: reindex on a MEASUREMENT, not on a schedule. River rebuilds
+-- everything at midnight; pg-boss computes entries-per-page and only rebuilds
+-- what is actually sparse. The heuristic is pg-boss's (minPages 128, and an
+-- index is suspect below ~5 entries per page).
+--
+-- pg-boss calibrated its numbers against v4 UUIDs and notes that random keys
+-- defeat btree deduplication. Ours are uuidv7 and time-ordered, so healthy
+-- density should be HIGHER and this gate should hold with more margin --
+-- inferred, not measured, so treat a positive as a prompt to look rather than
+-- as a verdict.
+CREATE FUNCTION stampede_index_density()
+RETURNS TABLE (
+    indexname   text,
+    pages       bigint,
+    entries     bigint,
+    per_page    double precision,
+    sparse      boolean
+)
+LANGUAGE sql AS $$
+    SELECT
+        c.relname::text,
+        c.relpages::bigint,
+        c.reltuples::bigint,
+        CASE WHEN c.relpages > 0 THEN c.reltuples / c.relpages ELSE 0 END,
+        c.relpages >= 128
+          AND CASE WHEN c.relpages > 0 THEN c.reltuples / c.relpages ELSE 0 END < 5
+      FROM pg_class c
+      JOIN pg_index i ON i.indexrelid = c.oid
+      JOIN pg_class t ON t.oid = i.indrelid
+     WHERE c.relkind = 'i'
+       AND t.relname LIKE 'stampede_%'
+       -- Skip REINDEX CONCURRENTLY's leftovers rather than trying to rebuild
+       -- them: _ccnew/_ccold are transient artefacts and retrying one is how a
+       -- reindexer gets stuck in a loop.
+       AND c.relname NOT LIKE '%\_ccnew%'
+       AND c.relname NOT LIKE '%\_ccold%'
+       -- SCOPED TO THIS SCHEMA. pg_class spans the whole database, so without
+       -- this a second Stampede install's indexes -- or, when this was first
+       -- run, a few hundred leftover test schemas -- are reported as ours.
+       -- 1167 indexes for a two-partition install is how it was noticed.
+       AND t.relnamespace = current_schema()::regnamespace
+     ORDER BY 4;
 $$;
 
 -- ---------------------------------------------------------------------------

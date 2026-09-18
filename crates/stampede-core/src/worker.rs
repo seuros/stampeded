@@ -20,10 +20,12 @@
 use crate::error::{Error, Result};
 use crate::fairness::{Fairness, TenantLimit};
 use crate::job::{FailureKind, Job};
+use crate::metrics::{Metrics, label, names};
 use crate::queue::Queue;
 use crate::wakeup::{NextPoll, Wakeup};
 use breaker_machines::async_circuit::AsyncCircuitBreaker;
 use chrono_machines::{BackoffPolicy, BackoffStrategy, ExponentialBackoff};
+use chrono::Utc;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -136,6 +138,7 @@ pub struct Worker {
     /// `None` means poll-only, which is always correct and never wrong —
     /// just slower to start a job.
     wakeup: Option<Wakeup>,
+    metrics: Metrics,
     handlers: HashMap<String, Handler>,
     backoff: BackoffPolicy,
     fairness: Option<Arc<Fairness>>,
@@ -151,6 +154,7 @@ impl Worker {
             queue,
             config,
             wakeup: None,
+            metrics: Metrics::noop(),
             handlers: HashMap::new(),
             backoff: default_backoff(),
             fairness,
@@ -164,6 +168,12 @@ impl Worker {
     /// within one poll interval; with it, within milliseconds.
     pub fn with_wakeup(mut self, wakeup: Wakeup) -> Self {
         self.wakeup = Some(wakeup);
+        self
+    }
+
+    /// Send measurements somewhere. Defaults to nowhere.
+    pub fn with_metrics(mut self, metrics: Metrics) -> Self {
+        self.metrics = metrics;
         self
     }
 
@@ -297,6 +307,10 @@ impl Worker {
 
             let want = (available as i32).min(self.config.batch_size);
 
+            // Control plane at job fidelity (Oban's engine events). Claim
+            // latency is the first thing to move when the database is in
+            // trouble, and the last thing anybody thinks to measure.
+            let claim_started = std::time::Instant::now();
             let jobs = match self.queue.claim(&self.config.queue, worker_id, want).await {
                 Ok(j) => j,
                 Err(e) => {
@@ -305,6 +319,11 @@ impl Worker {
                     continue;
                 }
             };
+            self.metrics.duration(
+                names::CLAIM_DURATION_SECONDS,
+                claim_started.elapsed(),
+                &[label("queue", self.config.queue.clone())],
+            );
 
             // Decided BEFORE the jobs are consumed below. A full batch means
             // there is probably more waiting, so the next claim happens
@@ -351,10 +370,12 @@ impl Worker {
                     .config
                     .breaker_failure_threshold
                     .map(|t| self.breaker_for(&job.task, t));
+                let metrics = self.metrics.clone();
 
                 tokio::spawn(async move {
                     let _permit = permit;
-                    execute(queue, job, worker_id, handler, timeout, backoff, breaker).await;
+                    execute(queue, job, worker_id, handler, timeout, backoff, breaker, metrics)
+                        .await;
                 });
             }
         }
@@ -371,6 +392,25 @@ impl Worker {
 }
 
 /// Execute one job and report the outcome.
+/// Map an execution error onto the failure taxonomy.
+///
+/// One function so the metric label and the recorded `failure_kind` cannot
+/// disagree — if they did, a dashboard filtered by kind would quietly miss
+/// exactly the failures someone was looking for.
+fn failure_kind_of(err: &Error) -> FailureKind {
+    match err {
+        Error::Timeout(_) => FailureKind::TimedOut,
+        // The downstream is sick, not the job. `breaker_open` REFUNDS the
+        // attempt spent at claim: the job never got a fair run, and burning its
+        // budget on someone else's outage would mean a long enough downstream
+        // failure discards the entire backlog rather than replaying it.
+        Error::CircuitOpen(_) => FailureKind::BreakerOpen,
+        e if e.is_unrecoverable() => FailureKind::Unrecoverable,
+        _ => FailureKind::Raised,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn execute(
     queue: Queue,
     job: Job,
@@ -379,12 +419,35 @@ async fn execute(
     timeout: Duration,
     backoff: BackoffPolicy,
     breaker: Option<Arc<AsyncCircuitBreaker>>,
+    metrics: Metrics,
 ) {
     let job_id = job.id;
     let task = job.task.clone();
+    let labels = [
+        label("queue", job.queue.clone()),
+        label("task", task.clone()),
+    ];
+
+    // How long the job waited to start. Oban's :queue_time.
+    metrics.duration(
+        names::JOB_QUEUE_TIME_SECONDS,
+        (Utc::now() - job.scheduled_at).to_std().unwrap_or_default(),
+        &labels,
+    );
+
+    let started = std::time::Instant::now();
 
     let outcome: std::result::Result<(), Error> = match handler {
-        None => Err(Error::UnknownTask(task.clone())),
+        None => {
+            // celery's task_unknown. A rename deployed to the enqueuer but not
+            // to the workers is a real and recurring production failure, and it
+            // is invisible almost everywhere else -- River discards such jobs
+            // with a log line and no counter, so nobody finds out until the
+            // work silently stops happening.
+            warn!(%job_id, task = %task, "no handler registered for this task");
+            metrics.count(names::JOBS_UNKNOWN_TASK, 1, &labels);
+            Err(Error::UnknownTask(task.clone()))
+        }
         Some(h) => {
             let run = || async {
                 // tokio::select over a sleep, underway's model (plans/15). This
@@ -418,9 +481,31 @@ async fn execute(
         }
     };
 
+    metrics.duration(names::JOB_DURATION_SECONDS, started.elapsed(), &labels);
+
     let result = match outcome {
-        Ok(()) => report_success(&queue, &job, worker_id).await,
-        Err(e) => report_failure(&queue, &job, worker_id, e, backoff).await,
+        Ok(()) => {
+            metrics.count(names::JOBS_COMPLETED, 1, &labels);
+            report_success(&queue, &job, worker_id).await
+        }
+        Err(e) => {
+            let kind = failure_kind_of(&e);
+            let with_kind = [
+                labels[0].clone(),
+                labels[1].clone(),
+                label("failure_kind", kind.as_str()),
+            ];
+            // Interruptions are counted separately from failures, because they
+            // are a different question: "is our infrastructure killing jobs"
+            // rather than "is this job broken". Nobody else can chart the
+            // difference, because nobody else records it.
+            if kind.is_interruption() {
+                metrics.count(names::JOBS_INTERRUPTED, 1, &with_kind);
+            } else {
+                metrics.count(names::JOBS_FAILED, 1, &with_kind);
+            }
+            report_failure(&queue, &job, worker_id, e, backoff).await
+        }
     };
 
     if let Err(e) = result {
@@ -446,16 +531,7 @@ async fn report_failure(
     err: Error,
     backoff: BackoffPolicy,
 ) -> Result<()> {
-    let kind = match &err {
-        Error::Timeout(_) => FailureKind::TimedOut,
-        // The downstream is sick, not the job. `breaker_open` REFUNDS the
-        // attempt spent at claim: the job never got a fair run, and burning its
-        // budget on someone else's outage would mean a long enough downstream
-        // failure discards the entire backlog rather than replaying it.
-        Error::CircuitOpen(_) => FailureKind::BreakerOpen,
-        e if e.is_unrecoverable() => FailureKind::Unrecoverable,
-        _ => FailureKind::Raised,
-    };
+    let kind = failure_kind_of(&err);
 
     // `attempt` was already incremented at claim, so it is 1-indexed here,
     // which is what chrono-machines expects.

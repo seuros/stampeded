@@ -245,14 +245,14 @@ async fn prune_removes_only_finished_jobs() {
     q.complete(&job, w).await.unwrap();
 
     // Nothing is old enough yet.
-    assert_eq!(q.prune(std::time::Duration::from_secs(3600), 100).await.unwrap(), 0);
+    assert_eq!(q.prune_batch(Duration::from_secs(3600), Duration::from_secs(3600), 100, Duration::from_secs(10)).await.unwrap(), 0);
 
     sqlx::query("UPDATE stampede_jobs SET finished_at = now() - interval '30 days' WHERE finished_at IS NOT NULL")
         .execute(q.pool())
         .await
         .unwrap();
 
-    assert_eq!(q.prune(std::time::Duration::from_secs(3600), 100).await.unwrap(), 1);
+    assert_eq!(q.prune_batch(Duration::from_secs(3600), Duration::from_secs(3600), 100, Duration::from_secs(10)).await.unwrap(), 1);
     let left: i64 = sqlx::query_scalar("SELECT count(*) FROM stampede_jobs")
         .fetch_one(q.pool())
         .await
@@ -727,4 +727,92 @@ async fn a_future_dated_job_does_not_wake_anybody() {
 
     let fired = tokio::time::timeout(Duration::from_millis(500), woke.recv()).await;
     assert!(fired.is_err(), "a job scheduled an hour out must not wake a worker now");
+}
+
+#[tokio::test]
+async fn failures_are_kept_longer_than_successes() {
+    // Two retention clocks. A completed job is evidence nobody will read; a
+    // discarded one is evidence somebody is about to be paged about. Oban's
+    // 60-second default deletes the failure before the alert fires.
+    let q = q!();
+    let w = q.register_worker("h", 1, &["default".into()]).await.unwrap();
+
+    let done = q.enqueue(NewJob::new("default", "ok")).await.unwrap().unwrap();
+    let dead = q
+        .enqueue(NewJob::new("default", "bad").max_attempts(1))
+        .await
+        .unwrap()
+        .unwrap();
+
+    for c in q.claim("default", w, 2).await.unwrap() {
+        if c.id == done {
+            q.complete(&c, w).await.unwrap();
+        } else {
+            q.fail(&c, w, FailureKind::Raised, "boom", None).await.unwrap();
+        }
+    }
+
+    // Retention zero for completed, a week for failed: the success goes, the
+    // failure stays.
+    let n = q
+        .prune_batch(Duration::ZERO, Duration::from_secs(7 * 24 * 3600), 100, Duration::from_secs(10))
+        .await
+        .unwrap();
+    assert_eq!(n, 1, "only the completed job should have been pruned");
+
+    assert!(q.fetch("default", done).await.unwrap().is_none());
+    assert!(
+        q.fetch("default", dead).await.unwrap().is_some(),
+        "the discarded job is the evidence; it must outlive the successes"
+    );
+}
+
+#[tokio::test]
+async fn vacuum_health_reports_only_this_schema() {
+    // pg_stat_user_tables spans the whole database. Without scoping, a second
+    // install -- or another test's schema -- is reported as ours, which is how
+    // this was caught: 200 rows for a two-partition install.
+    let q = q!();
+    let rows = q.vacuum_health().await.unwrap();
+    assert!(!rows.is_empty(), "should see our own partitions");
+    assert!(
+        rows.len() < 10,
+        "saw {} tables; the schema filter is not working",
+        rows.len()
+    );
+    assert!(rows.iter().all(|r| r.relname.starts_with("stampede_jobs")));
+}
+
+#[tokio::test]
+async fn a_dirty_table_is_flagged_for_vacuum() {
+    // The detector has to actually fire, or it is decoration. 500 updates
+    // against a table with scale_factor 0.02 puts dead tuples well past the
+    // threshold autovacuum uses for it.
+    let q = q!();
+    for _ in 0..500 {
+        q.enqueue(NewJob::new("default", "churn")).await.unwrap();
+    }
+    sqlx::query("UPDATE stampede_jobs SET priority = 1")
+        .execute(q.pool())
+        .await
+        .unwrap();
+    sqlx::query("ANALYZE").execute(q.pool()).await.unwrap();
+
+    let rows = q.vacuum_health().await.unwrap();
+    let dirty = rows.iter().find(|r| r.dead_tuples > 0).expect("dead tuples after 500 updates");
+    assert!(
+        dirty.needs_vacuum,
+        "500 dead against threshold {} should be flagged",
+        dirty.autovac_threshold
+    );
+}
+
+#[tokio::test]
+async fn index_density_ignores_reindex_artefacts() {
+    // _ccnew/_ccold are transient leftovers of a failed REINDEX CONCURRENTLY.
+    // Retrying one is how a reindexer gets stuck in a loop, so they are skipped
+    // rather than reported.
+    let q = q!();
+    let names = q.sparse_indexes().await.unwrap();
+    assert!(names.iter().all(|n| !n.contains("_ccnew") && !n.contains("_ccold")));
 }

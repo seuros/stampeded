@@ -23,6 +23,29 @@ pub struct Queue {
     pool: PgPool,
 }
 
+/// One partition's autovacuum standing.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct VacuumHealth {
+    pub relname: String,
+    pub live_tuples: i64,
+    pub dead_tuples: i64,
+    pub dead_ratio: f64,
+    /// The threshold autovacuum will actually use for THIS table, computed from
+    /// its own reloptions rather than the cluster defaults.
+    pub autovac_threshold: f64,
+    pub needs_vacuum: bool,
+    pub last_autovacuum: Option<DateTime<Utc>>,
+}
+
+/// Quote an SQL identifier for interpolation.
+///
+/// Only ever used on names read back out of `pg_class`, never on caller input —
+/// but doubling embedded quotes anyway costs one line, and the alternative is a
+/// function whose safety depends on where its argument came from.
+fn quote_ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
 /// Outcome of a terminal transition.
 ///
 /// `owned == false` means the reaper (or an operator) took the job away while
@@ -247,22 +270,118 @@ impl Queue {
         Ok(rows.len() as u64)
     }
 
-    /// Delete finished jobs older than `older_than`, in bounded batches.
+    /// Delete one batch of finished jobs. Returns how many.
     ///
-    /// Returns rows deleted. Callers loop until this returns less than `limit`
-    /// — River's shape (plans/13). A single unbounded DELETE on a large table
-    /// holds locks and bloats worse than what it reclaims.
-    pub async fn prune(&self, older_than: std::time::Duration, limit: i32) -> Result<u64> {
+    /// TWO retention clocks (pg-boss's shape): a completed job is evidence
+    /// nobody will read, a discarded one is evidence somebody is about to be
+    /// paged about. One clock means either drowning in successes or deleting
+    /// failures before anyone can look at them — and Oban's 60-second default
+    /// does exactly the latter, destroying the evidence before the alert fires.
+    ///
+    /// `statement_timeout` is set for this statement alone. A prune that runs
+    /// long on a huge table must be abandoned and retried smaller, not left to
+    /// hold locks; the caller halves the batch when this returns a timeout.
+    pub async fn prune_batch(
+        &self,
+        retain_completed: std::time::Duration,
+        retain_failed: std::time::Duration,
+        limit: i32,
+        statement_timeout: std::time::Duration,
+    ) -> Result<u64> {
+        let mut conn = self.pool.acquire().await?;
+
+        // LOCAL: reverts when the connection returns to the pool, so this
+        // cannot leak onto an unrelated query later.
+        // AssertSqlSafe: the only interpolated value is a u128 of our own
+        // making. SET does not accept a bind parameter.
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SET LOCAL statement_timeout = {}",
+            statement_timeout.as_millis().max(1)
+        )))
+        .execute(&mut *conn)
+        .await?;
+
         let n: Option<i32> = sqlx::query_scalar(
-            "SELECT stampede_prune(make_interval(secs => $1), $2)",
+            "SELECT count(*)::int FROM stampede_prune(\
+                 make_interval(secs => $1), $2, make_interval(secs => $3))",
         )
-        .bind(older_than.as_secs_f64())
+        .bind(retain_completed.as_secs_f64())
         .bind(limit)
-        .fetch_one(&self.pool)
+        .bind(retain_failed.as_secs_f64())
+        .fetch_one(&mut *conn)
         .await?;
 
         Ok(n.unwrap_or(0) as u64)
     }
+
+    /// Autovacuum health per partition.
+    ///
+    /// pg-boss's `#checkVacuum`, which plans/13 calls the most valuable
+    /// operational feature in the survey: it turns the queue's characteristic
+    /// death spiral from "mysterious slow backlog" into a named cause. The
+    /// threshold compared against is the one autovacuum will ACTUALLY use for
+    /// that table, from its own reloptions — comparing against the global
+    /// default is why naive dead-tuple alerts cry wolf.
+    pub async fn vacuum_health(&self) -> Result<Vec<VacuumHealth>> {
+        let rows = sqlx::query_as::<_, VacuumHealth>(
+            "SELECT relname, live_tuples, dead_tuples, dead_ratio, \
+                    autovac_threshold, needs_vacuum, last_autovacuum \
+               FROM stampede_vacuum_health()",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// Indexes sparse enough to be worth rebuilding.
+    ///
+    /// Measured, not scheduled. River rebuilds everything at midnight; this
+    /// reports what is actually sparse so the caller can rebuild only that.
+    pub async fn sparse_indexes(&self) -> Result<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT indexname FROM stampede_index_density() WHERE sparse",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|(n,)| n).collect())
+    }
+
+    /// Rebuild one index without blocking writes.
+    ///
+    /// CONCURRENTLY cannot run inside a transaction, hence a bare execute.
+    /// A failure leaves an invalid `_ccnew` index behind, which
+    /// `stampede_index_density` deliberately skips rather than retrying —
+    /// retrying one is how a reindexer gets stuck in a loop.
+    pub async fn reindex(&self, index: &str) -> Result<()> {
+        // Identifier comes from pg_class, not from a caller.
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "REINDEX INDEX CONCURRENTLY {}",
+            quote_ident(index)
+        )))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Age of the oldest job still waiting to run, per queue.
+    ///
+    /// asynq's queue_latency, and the number that actually tells you whether a
+    /// queue is healthy: depth says how much work there is, this says whether
+    /// it is being done. 10,000 jobs with an oldest age of two seconds is fine;
+    /// 3 jobs with an oldest age of an hour is broken, and depth alone reports
+    /// the second as the quieter of the two.
+    pub async fn oldest_available_age(&self) -> Result<Vec<(String, f64)>> {
+        let rows = sqlx::query_as::<_, (String, f64)>(
+            "SELECT queue, extract(epoch FROM now() - min(scheduled_at))::float8 \
+               FROM stampede_jobs \
+              WHERE state IN ('available','retryable') AND scheduled_at <= now() \
+              GROUP BY queue",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
 
     /// Ensure a queue has its own partition, with the storage and autovacuum
     /// settings a partition cannot inherit (see `stampede_create_queue`).
