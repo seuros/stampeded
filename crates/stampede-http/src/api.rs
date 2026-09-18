@@ -16,7 +16,7 @@ use rama::http::service::web::extract::{Path, State};
 use rama::http::service::web::extract::body::Json as JsonBody;
 use rama::http::service::web::response::{IntoResponse, Json, Sse};
 use serde::{Deserialize, Serialize};
-use stampede_core::{NewJob, Queue};
+use stampede_core::{NewJob, Period, Queue};
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
@@ -102,6 +102,19 @@ pub struct EnqueueRequest {
     /// When set, enables per-queue deduplication on this scope.
     #[serde(default)]
     pub unique: Option<String>,
+    /// Bucket for `unique`: minute, hour, day, week or month. "One per hour"
+    /// rather than "one ever".
+    #[serde(default)]
+    pub unique_period: Option<String>,
+    /// What this job talks to. Keys the circuit breaker.
+    #[serde(default)]
+    pub destination: Option<String>,
+    /// Where a terminal failure goes, with provenance.
+    #[serde(default)]
+    pub dead_letter_queue: Option<String>,
+    /// Database-enforced wall-clock budget, in seconds.
+    #[serde(default)]
+    pub expire_seconds: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -146,7 +159,30 @@ async fn enqueue(
         job = job.max_attempts(m);
     }
     if let Some(u) = body.unique {
-        job = job.unique(u);
+        job = match body.unique_period.as_deref().map(parse_period).transpose() {
+            Ok(Some(p)) => job.unique_per(u, p),
+            Ok(None) => job.unique(u),
+            Err(bad) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: format!(
+                            "unique_period must be minute, hour, day, week or month, got {bad:?}"
+                        ),
+                    }),
+                )
+                    .into_response();
+            }
+        };
+    }
+    if let Some(d) = body.destination {
+        job = job.destination(d);
+    }
+    if let Some(q) = body.dead_letter_queue {
+        job = job.dead_letter(q);
+    }
+    if let Some(secs) = body.expire_seconds {
+        job = job.expires_in(std::time::Duration::from_secs(secs));
     }
 
     match state.queue.enqueue(job).await {
@@ -295,6 +331,17 @@ fn job_json(job: &stampede_core::Job) -> serde_json::Value {
         "scheduled_at": job.scheduled_at,
         "finished_at": job.finished_at,
     })
+}
+
+fn parse_period(s: &str) -> Result<Period, String> {
+    match s {
+        "minute" => Ok(Period::Minute),
+        "hour" => Ok(Period::Hour),
+        "day" => Ok(Period::Day),
+        "week" => Ok(Period::Week),
+        "month" => Ok(Period::Month),
+        other => Err(other.to_string()),
+    }
 }
 
 fn internal(msg: &str) -> rama::http::Response {

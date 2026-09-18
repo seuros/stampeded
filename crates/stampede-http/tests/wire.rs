@@ -48,6 +48,7 @@ async fn serve() -> Option<(String, Queue, watch::Sender<bool>)> {
     stampede_core::schema::migrate(&pool).await.expect("migrate");
     let queue = Queue::new(pool);
     queue.create_queue("default").await.expect("create queue");
+    queue.create_queue("dead").await.expect("create dlq");
 
     // Port 0 and then ask the OS what it gave us: a fixed port would make these
     // tests fail when run in parallel with anything else.
@@ -269,6 +270,63 @@ async fn the_token_is_not_reflected_unescaped_into_the_page() {
     )
     .await;
     assert!(!body.contains("<script>alert(1)"), "reflected XSS: {body}");
+
+    let _ = tx.send(true);
+}
+
+#[tokio::test]
+async fn enqueue_accepts_every_field_the_job_row_has() {
+    // The API silently dropped destination, dead_letter_queue and
+    // expire_seconds after they were added to NewJob: the request struct did
+    // not have them, serde ignored the unknown keys, and the job was created
+    // WITHOUT them. No error, no warning -- an HTTP caller simply could not
+    // reach half the features, and the end-to-end dead-letter check is what
+    // caught it.
+    let (addr, q, tx) = server!();
+
+    let (status, body) = request(
+        &addr,
+        "POST",
+        "/jobs",
+        Some(
+            r#"{"queue":"default","task":"sync","destination":"api.vendor.com",
+                "dead_letter_queue":"dead","expire_seconds":42,
+                "unique":"k","unique_period":"hour","priority":3}"#,
+        ),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+
+    let id: uuid::Uuid = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    let job = q.fetch("default", id).await.unwrap().expect("job exists");
+    assert_eq!(job.destination.as_deref(), Some("api.vendor.com"));
+    assert_eq!(job.dead_letter_queue.as_deref(), Some("dead"));
+    assert_eq!(job.expire_seconds, 42);
+    assert_eq!(job.dedup_period.as_deref(), Some("hour"));
+    assert_eq!(job.priority, 3);
+
+    let _ = tx.send(true);
+}
+
+#[tokio::test]
+async fn a_bad_unique_period_is_rejected_rather_than_ignored() {
+    // Silently ignoring it would mean the caller believes they have an hourly
+    // limit and they have a permanent one.
+    let (addr, _q, tx) = server!();
+    let (status, body) = request(
+        &addr,
+        "POST",
+        "/jobs",
+        Some(r#"{"queue":"default","task":"x","unique":"k","unique_period":"fortnight"}"#),
+    )
+    .await;
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("fortnight"), "the error should name the bad value: {body}");
 
     let _ = tx.send(true);
 }
