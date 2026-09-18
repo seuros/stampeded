@@ -119,3 +119,17 @@ class WorkerTest < Minitest::Test
     thread&.kill
   end
 end
+
+class WorkerValidationTest < Minitest::Test
+  def test_a_worker_that_could_never_work_is_refused
+    # `CONCURRENCY=abc bin/rails stampede:work` becomes 0 via String#to_i, and
+    # the loop then computes `free = 0 - 0` and sleeps in a tight circle doing
+    # nothing -- a process that looks healthy, passes every liveness check, and
+    # silently runs no jobs.
+    assert_raises(ArgumentError) { Stampede::Worker.new(queue: "q", concurrency: 0) }
+    assert_raises(ArgumentError) { Stampede::Worker.new(queue: "q", concurrency: "abc") }
+    assert_raises(ArgumentError) { Stampede::Worker.new(queue: "q", batch_size: 0) }
+
+    assert Stampede::Worker.new(queue: "q", concurrency: 1, batch_size: 1)
+  end
+end

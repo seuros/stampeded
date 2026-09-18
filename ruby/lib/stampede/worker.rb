@@ -20,13 +20,28 @@ module Stampede
 
     def initialize(queue: nil, concurrency: nil, batch_size: nil, poll_interval: nil)
       @queue        = queue || Stampede.config.default_queue
-      @concurrency  = concurrency || Stampede.config.concurrency
-      @batch_size   = batch_size || Stampede.config.batch_size
+      @concurrency  = positive!(concurrency || Stampede.config.concurrency, "concurrency")
+      @batch_size   = positive!(batch_size || Stampede.config.batch_size, "batch_size")
       @poll_interval = poll_interval || Stampede.config.poll_interval
       @handlers     = {}
       @stopping     = false
       @in_flight    = Concurrent_Set.new
     end
+
+    # A worker with zero concurrency claims nothing, forever.
+    #
+    # `CONCURRENCY=abc bin/rails stampede:work` becomes 0 via String#to_i, and
+    # the loop then computes `free = 0 - 0` and sleeps in a tight circle
+    # doing nothing -- a process that looks healthy, passes every liveness
+    # check, and silently runs no jobs. Same shape as a job with
+    # max_attempts: 0, and just as hard to spot from the outside.
+    def positive!(value, name)
+      n = value.to_i
+      raise ArgumentError, "#{name} must be at least 1, got #{value.inspect}" if n < 1
+
+      n
+    end
+    private :positive!
 
     # Register a handler for a task name.
     #

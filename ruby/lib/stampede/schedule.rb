@@ -34,6 +34,9 @@ module Stampede
     # instant ("every two hours" should run 13 times on a 25-hour day).
     def recurring(key:, job:, cron:, args: [], queue: nil, timezone: "UTC",
                   dst_policy: nil, priority: nil)
+      raise Error, "a schedule needs a key: it is how you pause, remove or find it" if key.to_s.strip.empty?
+
+      validate_cron!(cron)
       job_class = job.is_a?(Class) ? job : job.class
       queue ||= resolve_queue_name(job_class) || Stampede.config.default_queue
 
@@ -71,6 +74,37 @@ module Stampede
         c.exec("SELECT key, queue, task, cron_expr, timezone, dst_policy, paused, next_run_at, last_run_at
                   FROM stampede_schedules ORDER BY next_run_at").to_a
       end
+    end
+
+    # Reject an expression the daemon will not be able to parse.
+    #
+    # The Rust side validates on write (`upsert_cron_schedule`) so a typo is a
+    # rejected call. Ruby did not, so `cron: "garbage"` was stored happily and
+    # then failed at FIRE time -- where the scheduler logs a warning, leaves
+    # the row due, and repeats that every tick forever. A schedule that never
+    # runs plus a log line every five seconds.
+    #
+    # This is a shape check, not the full parser: five fields, each made of
+    # the characters the grammar allows. It catches the mistakes people
+    # actually make -- wrong field count, prose, a stray semicolon -- without
+    # reimplementing cron in two languages, which would be a second thing to
+    # keep in sync.
+    CRON_FIELD = /\A[-0-9*,\/a-zA-Z]+\z/
+    private_constant :CRON_FIELD
+
+    def validate_cron!(expr)
+      fields = expr.to_s.split
+      return if fields.size == 5 && fields.all? { |f| f.match?(CRON_FIELD) }
+
+      raise Error, <<~MSG
+        #{expr.inspect} is not a cron expression.
+
+        Five fields are required: minute hour day-of-month month day-of-week
+
+            "0 3 * * *"        every day at 03:00
+            "*/15 * * * *"     every fifteen minutes
+            "0 9-17 * * mon-fri"
+      MSG
     end
 
     # ActiveJob's `queue_name` CLASS attribute may hold a lambda -- Rails sets

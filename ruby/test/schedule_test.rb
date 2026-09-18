@@ -106,3 +106,42 @@ class ScheduleTest < Minitest::Test
     assert_empty Stampede::Schedule.all
   end
 end
+
+class ScheduleValidationTest < Minitest::Test
+  include StampedeTest::Isolation
+
+  def test_an_unparseable_cron_expression_is_refused_at_write_time
+    # The Rust side validated on write; Ruby did not. So `cron: "garbage"` was
+    # stored happily and then failed at FIRE time -- where the scheduler logs a
+    # warning, leaves the row due, and repeats that every tick FOREVER. A
+    # schedule that never runs plus a log line every five seconds, and nothing
+    # pointing at the typo that caused it.
+    error = assert_raises(Stampede::Error) do
+      Stampede::Schedule.recurring(key: "bad", job: NightlyJob, cron: "garbage")
+    end
+    assert_match(/Five fields are required/, error.message)
+
+    assert_raises(Stampede::Error) do
+      Stampede::Schedule.recurring(key: "bad", job: NightlyJob, cron: "0 3 * *")
+    end
+
+    assert_empty Stampede::Schedule.all, "nothing may be created"
+  end
+
+  def test_real_expressions_still_work
+    # A shape check that rejected valid cron would be worse than none.
+    ["0 3 * * *", "*/15 * * * *", "0 9-17 * * mon-fri", "0 0 1,15 * *", "* * * * *"].each do |expr|
+      Stampede::Schedule.remove("ok")
+      Stampede::Schedule.recurring(key: "ok", job: NightlyJob, cron: expr)
+    end
+  end
+
+  def test_a_schedule_needs_a_key
+    assert_raises(Stampede::Error) do
+      Stampede::Schedule.recurring(key: "", job: NightlyJob, cron: "* * * * *")
+    end
+    assert_raises(Stampede::Error) do
+      Stampede::Schedule.recurring(key: "  ", job: NightlyJob, cron: "* * * * *")
+    end
+  end
+end
