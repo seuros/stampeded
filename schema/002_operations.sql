@@ -57,7 +57,11 @@ LANGUAGE sql AS $$
            AND state        IN ('available','retryable')
            AND scheduled_at <= coalesce(p_now, now())
            AND attempt      < max_attempts
-         ORDER BY priority, scheduled_at, id
+         -- Must match stampede_jobs_claim_idx EXACTLY. `id` is not a
+         -- tiebreaker here: adding one reintroduces a sort unless it is also
+         -- added to the index, and in the index it costs 8.5x the size by
+         -- defeating btree deduplication. See the index comment in 001.
+         ORDER BY priority, scheduled_at
          LIMIT p_limit
          FOR UPDATE SKIP LOCKED
     )

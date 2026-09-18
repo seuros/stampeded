@@ -242,6 +242,27 @@ own narrow table: good_job and solid_queue put the cron key on the jobs table
 and then had to guarantee those rows are never pruned, which couples cron
 correctness to your retention horizon.
 
+## Claim order
+
+Jobs are claimed by `priority`, then `scheduled_at`. **Ties are not broken.**
+
+Jobs bulk-enqueued in one transaction all share the same `scheduled_at` — one
+`now()` for the whole statement — so a batch is exactly such a tie, and its
+members are claimed in index-scan order rather than insertion order. That order
+is stable for a given index state, so nothing starves; it is simply not
+defined, and you should not build on it.
+
+This is deliberate. A `uuidv7` tiebreaker would give insertion order, but
+adding any unique column to the claim index makes every entry distinct and
+leaves btree deduplication nothing to collapse: **85 MB against 10 MB at a
+million rows**, on the index every claim walks and the one most wanted resident
+in cache. Claim latency was identical either way.
+
+Strict FIFO is not on offer across concurrent workers regardless: `FOR UPDATE
+SKIP LOCKED` takes the next *unlocked* row, not the next row. If you need
+ordering guarantees, encode them in `priority` or `scheduled_at`, which are the
+columns the claim actually orders by.
+
 ## Unique jobs
 
 Set `dedup_scope` and the database refuses a second job with the same one:

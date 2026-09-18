@@ -325,8 +325,26 @@ CREATE TABLE stampede_jobs_default PARTITION OF stampede_jobs DEFAULT;
 -- Must cover BOTH claimable states. A retryable job whose backoff has elapsed
 -- is claimable (see stampede_claim in 002); indexing only 'available' would
 -- make every retry a seq scan.
+--
+-- `id` is deliberately NOT a trailing tiebreaker. It would make every index
+-- tuple unique, which leaves btree deduplication nothing to collapse:
+-- MEASURED at 85 MB against 10 MB at a million rows, 8.5x, on the index every
+-- claim on every queue walks and the one most wanted resident in
+-- shared_buffers. Claim time is indifferent (0.13 ms vs 0.11 ms for a 100-row
+-- claim, no sort either way), so the tiebreaker bought only determinism.
+--
+-- WHAT THAT COSTS: jobs sharing an exact (priority, scheduled_at) are claimed
+-- in index-scan order rather than insertion order. A bulk enqueue produces
+-- such a tie by construction -- one transaction, one now(), every row the
+-- same. The order is stable for a given index state, so nothing starves; it
+-- is simply not defined. Strict FIFO was never on offer across workers anyway,
+-- since FOR UPDATE SKIP LOCKED takes the next UNLOCKED row, not the next row.
+--
+-- stampede_claim's ORDER BY must match this index exactly. Adding a column
+-- there without adding it here reintroduces a sort: measured 0.26 ms and 244
+-- buffers against 0.13 ms and 212. plans/13 s13.
 CREATE INDEX stampede_jobs_claim_idx
-    ON stampede_jobs (queue, priority, scheduled_at, id)
+    ON stampede_jobs (queue, priority, scheduled_at)
     WHERE state IN ('available', 'retryable');
 
 -- Uniqueness. Partial: a full constraint costs 1272 kB per 200k non-dedup rows

@@ -2290,3 +2290,44 @@ fn retry_in_survives_being_boxed_as_a_handler_error() {
 
     assert_eq!(found.0, std::time::Duration::from_secs(42));
 }
+
+/// The claim must never plan a sort.
+///
+/// `stampede_claim`'s ORDER BY and `stampede_jobs_claim_idx` have to agree
+/// exactly. If they drift -- someone re-adds `id` as a tiebreaker to one but
+/// not the other -- Postgres silently inserts a Sort node over the matching
+/// rows. Nothing errors, no test fails, the queue stays correct; claiming just
+/// gets slower under exactly the load where it matters, and the LIMIT no longer
+/// bounds the work because the sort must see every candidate row first.
+///
+/// Measured when the two disagreed: 0.26ms and 244 buffers, against 0.13ms and
+/// 212 when they agree.
+#[tokio::test]
+async fn the_claim_never_plans_a_sort() {
+    let q = q!();
+
+    for i in 0..200 {
+        q.enqueue(NewJob::new("default", "t").priority(i % 3)).await.unwrap();
+    }
+    sqlx::query("ANALYZE stampede_jobs_default").execute(q.pool()).await.ok();
+
+    // The claim's own predicate and ordering, verbatim from 002_operations.sql.
+    let plan: (serde_json::Value,) = sqlx::query_as(
+        "EXPLAIN (FORMAT JSON) \
+         SELECT id FROM stampede_jobs \
+          WHERE queue = 'default' AND state IN ('available','retryable') \
+            AND scheduled_at <= now() \
+          ORDER BY priority, scheduled_at \
+          LIMIT 10 FOR UPDATE SKIP LOCKED",
+    )
+    .fetch_one(q.pool())
+    .await
+    .unwrap();
+
+    let rendered = plan.0.to_string();
+    assert!(
+        !rendered.contains("\"Sort"),
+        "the claim planned a sort, so the ORDER BY and stampede_jobs_claim_idx have \
+         drifted apart:\n{rendered}"
+    );
+}

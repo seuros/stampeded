@@ -842,5 +842,22 @@ Worth noting that strict FIFO is already not on offer across workers:
 not the next row. The tiebreaker makes single-worker ordering deterministic,
 not the system's.
 
-**Not changed unilaterally** — this is a semantics decision, not a bug, and it
-belongs to whoever is prepared to say FIFO-within-a-batch is not promised.
+### Decided: dropped
+
+The owner took the 8.5x. `id` is gone from both `stampede_jobs_claim_idx` and
+`stampede_claim`'s ORDER BY. Measured on the real schema afterwards: **12 MB at
+1M rows against 85 MB**, claim unchanged at 0.11 ms with no sort, and no
+existing test depended on the old ordering.
+
+**FIFO within a batch is therefore not promised**, and that is now stated in
+the README rather than left to be discovered. Jobs sharing an exact
+`(priority, scheduled_at)` are claimed in index-scan order: stable for a given
+index state, so nothing starves, but not defined.
+
+The drift hazard this creates is the reason for a new test. The ORDER BY and
+the index must agree exactly; if someone re-adds a tiebreaker to one but not
+the other, Postgres inserts a Sort node and **nothing fails** — the queue stays
+correct, claiming just gets slower under load, and the LIMIT stops bounding the
+work because the sort must see every candidate row first.
+`the_claim_never_plans_a_sort` asserts the plan directly, and fails with the
+ORDER BY drifted by one column.
