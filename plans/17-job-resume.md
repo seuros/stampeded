@@ -234,6 +234,22 @@ an error that says to store a cursor rather than a set.
   loop still defeats layer 2 by design, and now dies at layer 1 instead. That
   is the right trade — the alternative is expiring jobs that are demonstrably
   working.
-- **Should the dashboard show it?** A cursor is often the single most useful
-  number about a long job ("50,000 / 100,000"), but it is opaque JSON and we
-  cannot know which field to render.
+- ~~**Should the dashboard show it?**~~ **It already did** — this entry was
+  stale. `describe_progress` renders the steps format natively
+  (`steps: download,transform · rows=50000`) because that format is OURS and
+  therefore knowable, and falls back to a truncated dump for a checkpoint
+  written by hand.
+
+  **The fallback had a latent panic**, found while closing this item. It cut
+  the JSON with `&raw[..raw.len().min(48)]` — a BYTE index — and a checkpoint
+  is arbitrary user data. `{"file":"xxx…é.pdf"}` puts a multi-byte character
+  across byte 48 and slicing panics, inside the SSE stream rendering the detail
+  panel. The blast radius is pointed: it fires only for a job that HAS a
+  checkpoint, which is to say a long-running one, which is to say the job an
+  operator opened the panel to look at. Fixed with a char-boundary-safe
+  truncation, with a test that panics without it and a second that checks every
+  offset of a string of accents, CJK and an emoji.
+
+  What remains genuinely open is the nice version: a cursor is often the single
+  most useful number about a long job ("50,000 / 100,000"), and we render
+  `rows=50000` without the denominator because nothing tells us there is one.

@@ -608,8 +608,26 @@ fn describe_progress(job: &crate::Job) -> String {
         ));
     }
 
-    let raw = cp.to_string();
-    esc(&raw[..raw.len().min(48)])
+    // A checkpoint is arbitrary user JSON, so it can contain any character --
+    // a filename, a customer name, a city, an error message. Slicing a String
+    // by BYTE index panics when the cut lands inside a multi-byte character,
+    // which `{"file":"xxx…é.pdf"}` does at exactly the wrong length. That
+    // panic would fire inside the SSE stream, taking out the job panel for the
+    // one job an operator is looking at -- the job that has a checkpoint,
+    // which is to say a long-running one they care about.
+    esc(&truncate_chars(&cp.to_string(), 48))
+}
+
+/// Truncate to at most `max` BYTES without splitting a character.
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
 }
 
 async fn render_health(state: &ApiState) -> Option<String> {

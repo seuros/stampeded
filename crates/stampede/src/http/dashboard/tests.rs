@@ -283,3 +283,36 @@ fn no_worker_daemon_is_not_reported_as_degraded() {
     let unique: std::collections::BTreeSet<_> = texts.iter().collect();
     assert_eq!(unique.len(), 3, "wakeup states must be distinguishable: {texts:?}");
 }
+
+/// A checkpoint containing non-ASCII must not panic the job panel.
+///
+/// `describe_progress` fell back to `&raw[..raw.len().min(48)]` for a
+/// checkpoint that is not in our steps format. That is a BYTE index, and a
+/// checkpoint is arbitrary user JSON -- a filename, a customer name, a city.
+/// When byte 48 lands inside a multi-byte character, slicing panics, and it
+/// panics inside the SSE stream rendering the detail panel for exactly the
+/// kind of job an operator is looking at: a long one, with a checkpoint.
+#[test]
+fn a_checkpoint_with_multibyte_characters_does_not_panic() {
+    // Byte 48 falls inside the 'é' here -- the case found by searching for it.
+    let raw = r#"{"file":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxé.pdf"}"#;
+    assert!(raw.len() > 48 && !raw.is_char_boundary(48), "fixture no longer exercises the bug");
+
+    let out = truncate_chars(raw, 48);
+
+    assert!(out.len() <= 48);
+    assert!(raw.starts_with(&out), "truncation must be a prefix");
+    // Round-trips as valid UTF-8 by construction -- the point of the fix.
+    assert_eq!(out, String::from_utf8(out.clone().into_bytes()).unwrap());
+}
+
+/// Every byte offset must be safe, not just the one that was reported.
+#[test]
+fn truncation_is_safe_at_every_offset() {
+    let s = "héllo wörld — ünïcödé ✓ 日本語 🎉";
+    for n in 0..=s.len() + 4 {
+        let out = truncate_chars(s, n);
+        assert!(s.starts_with(&out), "not a prefix at {n}");
+        assert!(out.len() <= n || s.len() <= n, "too long at {n}");
+    }
+}
