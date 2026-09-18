@@ -793,6 +793,13 @@ impl Queue {
     }
 
     /// Register or update a fixed-interval schedule.
+    ///
+    /// REJECTS a zero interval rather than clamping it. The first version did
+    /// `.max(1)` to satisfy the CHECK, which meant asking for `every_secs: 0`
+    /// silently produced a schedule firing EVERY SECOND -- an extreme value
+    /// nobody asked for, from input that was plainly a mistake. Found by
+    /// fuzzing the MCP tool, which then cheerfully reported "set to every 0s"
+    /// while storing 1.
     pub async fn upsert_schedule(
         &self,
         key: &str,
@@ -800,6 +807,18 @@ impl Queue {
         task: &str,
         every: std::time::Duration,
     ) -> Result<()> {
+        if key.trim().is_empty() {
+            return Err(Error::InvalidSchedule(
+                "a schedule needs a key: it is the primary key and how you pause or remove it"
+                    .into(),
+            ));
+        }
+        if every.as_secs() == 0 {
+            return Err(Error::InvalidSchedule(format!(
+                "schedule {key:?}: the interval must be at least one second"
+            )));
+        }
+
         sqlx::query(
             "INSERT INTO stampede_schedules (key, queue, task, interval_secs, cron_expr) \
              VALUES ($1, $2, $3, $4, NULL) \
@@ -811,7 +830,7 @@ impl Queue {
         .bind(key)
         .bind(queue)
         .bind(task)
-        .bind(every.as_secs().max(1) as i64)
+        .bind(every.as_secs() as i64)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -835,6 +854,12 @@ impl Queue {
         timezone: &str,
         policy: Option<DstPolicy>,
     ) -> Result<()> {
+        if key.trim().is_empty() {
+            return Err(Error::InvalidSchedule(
+                "a schedule needs a key: it is the primary key and how you pause or remove it"
+                    .into(),
+            ));
+        }
         let cron = Cron::parse(expr).map_err(|e| Error::InvalidSchedule(e.to_string()))?;
         let tz = TimeZone::get(timezone)
             .map_err(|e| Error::InvalidSchedule(format!("unknown timezone {timezone:?}: {e}")))?;

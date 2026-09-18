@@ -2169,3 +2169,50 @@ async fn an_absurdly_large_payload_is_refused() {
     });
     assert!(q.enqueue(NewJob::new("default", "ok").args(normal)).await.is_ok());
 }
+
+#[tokio::test]
+async fn a_schedule_with_a_nonsense_interval_is_refused_not_clamped() {
+    // The first version did `.max(1)` to satisfy the CHECK, so asking for
+    // `every_secs: 0` silently produced a schedule firing EVERY SECOND -- an
+    // extreme value nobody asked for, from input that was plainly a mistake.
+    // Found by fuzzing the MCP tool, which then reported "set to every 0s"
+    // while storing 1.
+    //
+    // Silently coercing invalid input into an aggressive default is worse than
+    // rejecting it: the caller believes one thing and the system does another.
+    let q = q!();
+
+    let err = q
+        .upsert_schedule("tick", "default", "t", Duration::from_secs(0))
+        .await;
+    assert!(err.is_err(), "a zero interval must be refused");
+
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM stampede_schedules")
+        .fetch_one(q.pool())
+        .await
+        .unwrap();
+    assert_eq!(count, 0, "and nothing may be created");
+
+    // One second is aggressive but legitimate, and still works.
+    assert!(
+        q.upsert_schedule("tick", "default", "t", Duration::from_secs(1))
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn a_schedule_needs_a_key() {
+    // An empty key is a valid primary key and a useless one: it is how you
+    // pause, remove or find the schedule again.
+    let q = q!();
+
+    assert!(q.upsert_schedule("", "default", "t", Duration::from_secs(60)).await.is_err());
+    assert!(q.upsert_schedule("   ", "default", "t", Duration::from_secs(60)).await.is_err());
+    assert!(
+        q.upsert_cron_schedule("", "default", "t", "* * * * *", "UTC", None)
+            .await
+            .is_err(),
+        "the cron path needs the same guard"
+    );
+}

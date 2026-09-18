@@ -563,7 +563,10 @@ impl StampedeServer {
                         std::time::Duration::from_secs(secs),
                     )
                     .await
-                    .map_err(|e| ToolError::Internal(format!("upsert failed: {e}")))?;
+                    // InvalidArguments, not Internal: a zero interval or an
+                    // empty key is the caller's mistake, and saying "internal
+                    // error" would send them looking in the wrong place.
+                    .map_err(|e| ToolError::InvalidArguments(format!("{e}")))?;
                 Ok(ToolOutput::text(format!(
                     "schedule {:?} set to every {secs}s",
                     a.key
