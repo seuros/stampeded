@@ -46,7 +46,13 @@ module Stampede
 
     # Run until stopped.
     def run
-      conn = PG.connect(Stampede.config.database_url)
+      # Through Connection, NOT PG.connect(config.database_url). Inside Rails
+      # the app's database.yml is authoritative and usually has no url at all,
+      # so dialing an env var connects somewhere else -- which is exactly what
+      # happened: the worker claimed from a stale database, ran a job that
+      # lived there, and the app's own job sat `available` forever with nothing
+      # reporting an error.
+      conn = PG.connect(Connection.connection_params)
       worker_id = register_worker(conn)
       log "registered #{worker_id} on queue #{@queue}"
 

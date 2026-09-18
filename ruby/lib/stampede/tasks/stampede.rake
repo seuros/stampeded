@@ -23,7 +23,9 @@ namespace :stampede do
   desc "Run the daemon (scheduler, reaper, pruner, dashboard). Not the worker."
   task daemon: :environment do
     require "stampede/daemon"
-    args = ["--database-url", Stampede.config.database_url, "--no-worker"]
+    # The binary takes a URL, so build one from whatever Connection resolved --
+    # which inside Rails is the app's own database, not an env var.
+    args = ["--database-url", Stampede.database_url_for_daemon, "--no-worker"]
     args += ENV["STAMPEDE_ARGS"].to_s.split
     Stampede::Daemon.exec!(*args)
   end

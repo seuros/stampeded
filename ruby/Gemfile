@@ -2,5 +2,6 @@ source "https://rubygems.org"
 gemspec
 gem "activejob", "~> 8.0"
 gem "activerecord", "~> 8.0"
+gem "railties", "~> 8.0"
 gem "minitest", "~> 5.0"
 gem "rake"

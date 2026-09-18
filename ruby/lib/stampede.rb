@@ -43,6 +43,19 @@ module Stampede
       Client.enqueue(queue: queue, task: task, **opts)
     end
 
+    # A libpq URL for the daemon, which takes one on the command line.
+    #
+    # Built from whatever Connection resolved rather than from config, so the
+    # daemon and the workers cannot end up on different databases.
+    def database_url_for_daemon
+      params = Connection.connection_params
+      return params if params.is_a?(String)
+
+      user = [params[:user], params[:password]].compact.join(":")
+      host = [params[:host], params[:port]].compact.join(":")
+      "postgres://#{user}#{"@" unless user.empty?}#{host}/#{params[:dbname]}"
+    end
+
     # Provision a queue's own partition.
     #
     # Optional: an unprovisioned queue still works via the DEFAULT partition.

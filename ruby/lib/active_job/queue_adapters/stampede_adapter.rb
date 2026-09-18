@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "active_job"
 require "stampede"
 
 module ActiveJob
@@ -18,9 +19,9 @@ module ActiveJob
     # the caller's own connection, so it commits atomically with the data that
     # caused it and vanishes if the transaction rolls back. This adapter
     # therefore does NOT opt into after-commit enqueueing.
-    class StampedeAdapter < (defined?(AbstractAdapter) ? AbstractAdapter : Object)
+    class StampedeAdapter < AbstractAdapter
       def initialize(**options)
-        super() if defined?(AbstractAdapter)
+        super()
         @options = options
         @stopping = false
       end

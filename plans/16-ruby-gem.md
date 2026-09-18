@@ -194,9 +194,38 @@ The gem is a second expression of queue semantics (§1). Two rules hold it down:
 
 ## 6. Found while building it
 
-Two bugs that no unit test would have caught, both from running the thing
-end to end. Recorded because both are the same shape: a value that is
-structurally valid and semantically meaningless, so nothing errors.
+Five bugs, none of which a unit test caught, because every one of them is a
+bug about the SEAM between the gem and something else — Rails' loader, the
+app's database config, the daemon's view of a schedule row. Four of the five
+share a shape: a value that is structurally valid and semantically
+meaningless, so nothing errors.
+
+**From booting a real Rails app:**
+
+- **The adapter was never loaded.** `config.active_job.queue_adapter = :stampede`
+  goes through `ActiveJob::QueueAdapters.lookup`, which is a bare `const_get`:
+  autoload is registered for the built-in adapters only and nothing in that
+  path requires anything. A real app died at boot with "uninitialized constant
+  `ActiveJob::QueueAdapters::StampedeAdapter`", naming a class sitting right
+  there in the gem. The railtie now requires it inside `on_load(:active_job)`,
+  registered `before: "active_job.set_configs"` so it runs before the hook
+  that applies `queue_adapter=`.
+- **Jobs were written to the wrong database.** `Connection.with` only used
+  ActiveRecord when `ActiveRecord::Base.connected?` — and Rails connects
+  LAZILY, so the first call in a fresh process fell through to a private
+  connection built from `ENV["DATABASE_URL"]`. In a Rails app that variable
+  frequently points somewhere else. `stampede:install` reported success having
+  created the schema in the wrong database, `perform_later` returned an id for
+  a row in the wrong database, and the enqueue silently stopped being
+  transactional — which is the ONE property the whole design sells. Nothing
+  errored at any point. There is now exactly one answer to "which database":
+  ActiveRecord's own config, whenever ActiveRecord is present.
+- **The worker bypassed that fix.** `Worker#run` still called
+  `PG.connect(config.database_url)` directly, so it claimed from the stale
+  database, ran a job that happened to live there, and left the app's real job
+  `available` forever.
+
+**From firing a schedule:**
 
 - **A recurring ActiveJob job was discarded on every firing.** The daemon
   copies a schedule's `args` verbatim onto each occurrence and has no idea what
@@ -239,6 +268,5 @@ structurally valid and semantically meaningless, so nothing errors.
   matrix or `cross`, and neither exists yet.
 - **No Rails generator.** `stampede:install` applies the schema, but there is
   no `rails g stampede:install` to write an initializer.
-- **Nothing tests the gem against a REAL Rails app.** The suite uses bare
-  ActiveJob. The railtie, the rake tasks and the `database_configuration`
-  lookup are therefore unexercised.
+- ~~**Nothing tests the gem against a real Rails app.**~~ **CLOSED.** Doing it
+  found three bugs, all in §6.
