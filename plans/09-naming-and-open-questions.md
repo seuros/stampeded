@@ -76,22 +76,24 @@ read as source and which are documentation-only.
   Owner's call; he is rama's #3 contributor. See `14-rust-stack.md`. The
   follow-on question that replaces it: **how does MCP work on rama**, given
   `rmcp` is hyperium-native and rama carries no `http` dependency.
-- Is the dashboard served by the daemon or a separate binary?
-- Single daemon, or separate scheduler / executor / api processes?
+- ~~Is the dashboard served by the daemon or a separate binary?~~ The daemon,
+  behind `--http`.
+- ~~Single daemon, or separate processes?~~ **One binary, roles behind flags.**
+  And the split turned out to matter more than anticipated: `--no-worker` is
+  exactly what lets a Rails app run the scheduler, reaper and pruner in Rust
+  while its jobs stay in Ruby (`16-`).
 
 ### Schema and semantics
 
-- `jsonb` vs `bytea` for job args. Leaning **`jsonb`** — inspectable, queryable,
-  and it is what makes the MCP `job_search` tool useful. `bytea` would gut the
-  MCP surface.
-- Does Stampede store job **return values**? Temporal does, Sidekiq does not.
-  Changes retention and table size materially.
-- Multi-tenancy: schema-per-tenant vs `tenant_id` column + `throttle-machines`
-  fairness.
-- Completed-job retention and partitioning — **blocked on `pg_partman` being
-  absent from the current image** (see `03-postgres18.md`).
-- Unique jobs: Oban's `unique` option vs River's `unique_key`. Not yet studied —
-  next reading task.
+- ~~`jsonb` vs `bytea`~~ — jsonb. See `05-`.
+- ~~Return values~~ — fire-and-forget, with the one bounded exception of step
+  results (`17-`).
+- ~~Multi-tenancy~~ — `tenant_id` column plus GCRA fairness.
+- ~~Retention and partitioning~~ — resolved in `plans/README` §1: partition by
+  QUEUE, not state, because uniqueness and state-partitioning are mutually
+  exclusive. `pg_partman` not needed.
+- ~~Unique jobs~~ — studied in `10-`; a generated `dedup_key` plus a partial
+  unique index, with optional time bucketing.
 
 ### Delivery
 

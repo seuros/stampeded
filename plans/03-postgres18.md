@@ -94,6 +94,15 @@ Recurring jobs scheduled inside the database. The schedule then survives the
 workers being down entirely, which is a real reliability property, not a
 convenience.
 
+> **CORRECTED, per `13-retention-and-bloat.md` and confirmed twice while
+> building.** `GENERATED … VIRTUAL` is NOT a free replacement for a stored
+> column on the claim path, for two independent reasons: a virtual column
+> **cannot be indexed** (`ERROR: indexes on virtual generated columns are not
+> supported`), and a generation expression must be IMMUTABLE, so anything
+> involving `now()` is rejected outright. Both were hit in practice. Virtual
+> is fine for dashboard-facing derived fields and useless for the thing
+> Graphile uses a stored column for — being the index predicate.
+
 ## Verified NOT available
 
 - **`pg_partman` is absent from this image.** So are **`pg_repack`** and

@@ -1169,21 +1169,29 @@ worker-side code is identical. Record it so the option is not forgotten.
 
 ## Still open
 
-- **Single-row insert trigger overhead is unmeasured.** The 50 k bulk numbers are
-  clean; the 20 k-single-row runs were too noisy to quote. Transition-table setup
-  is per-statement and does not amortise there, so the common polyglot case
-  (one `INSERT`, one row) may cost proportionally more than +1.2 %. Measure on a
-  quiet box before committing.
-- **Async-queue exhaustion is untested.** `pg_notification_queue_usage()` exists
-  and reads 0; the failure mode (a LISTENing backend stuck in a long transaction
-  pinning the 8 GB queue) is documented behaviour we have not reproduced. Decide
-  whether the daemon exports it as a health metric — none of the surveyed
-  implementations do.
-- **GCRA parameters are guesses.** `emission_interval = 5 ms` is borrowed from
-  Oban's `dispatch_cooldown`. Our claim is a single `UPDATE … RETURNING OLD./NEW.`
-  rather than Oban's CTE, so the achievable floor is probably lower. Needs a
-  benchmark, and it interacts with the unresolved claim-batch-size question
-  (`04-…:121-122`).
+- ~~**Single-row insert trigger overhead is unmeasured.**~~ **MEASURED:
+  +3.5 %**, median of four alternating 20k-row runs on 18.6, against +1.2 % for
+  the 50k bulk case. The hypothesis in this note was right — transition-table
+  setup is per-statement and does not amortise over a single row — and the cost
+  is still small enough to keep the trigger. Caveat: the inserts ran in a
+  plpgsql loop on one connection, which isolates the trigger but is not quite
+  the polyglot shape of separate statements from a client.
+- ~~**Decide whether the daemon exports queue usage as a health metric.**~~
+  **It does**, as `stampede.notify.queue_usage`, with a warning past 50%. None
+  of the surveyed implementations export it, and the failure is worth the
+  gauge: once the queue fills every `NOTIFY` errors, and because the notify
+  trigger runs INSIDE the insert, enqueueing itself stops working — a symptom
+  nowhere near its cause. **Still untested**: reproducing it needs a backend
+  deliberately wedged in a long transaction.
+- ~~**GCRA parameters are guesses.**~~ **MEASURED, and the guess was 5x too
+  conservative.** One `stampede_claim` at batch 5 costs **668 us** on 18.6 with
+  60k available rows, so a worker sustains roughly **7,500 jobs/s**. A 5 ms
+  cooldown caps that at 1,000 — about a seventh. Exactly the effect this note
+  predicted: Oban's number paces Oban's CTE round trip, ours is a single
+  `UPDATE … RETURNING`. Default lowered to **1 ms**, which sits above the
+  measured claim cost so it does not bind in steady state while still bounding
+  a notification burst. One machine, one workload shape; a test pins the
+  relationship rather than the number.
 - **Does the sonar channel justify itself?** It is a second channel, a second
   timer and a status field, to detect a condition the operator usually already
   knows about. Oban ships it; River ships a flag instead. Cheaper alternative:
@@ -1191,7 +1199,9 @@ worker-side code is identical. Record it so the option is not forgotten.
   `src/db.ts:190-196`) — that catches subscription loss but *not* a pooler that
   accepts `LISTEN` and silently drops deliveries. Unresolved which failure we
   actually care about.
-- **Interaction with `pg_cron`** (`03-postgres18.md:51-56`). If recurring jobs are
+- ~~**Interaction with `pg_cron`.**~~ Recurring jobs are not `pg_cron`'s; the
+  schedule row is the due row and its row lock is the election. Superseded, and
+  the original note follows for context. If recurring jobs are
   inserted by `pg_cron` inside the database, the trigger fires for them too and
   the wakeup works with no daemon involvement at all. That is a genuine argument
   for the trigger over any client-side scheme, but it is unverified — `pg_cron`

@@ -116,3 +116,25 @@ async fn breakers_are_per_task_not_global() {
         "same task got two breakers"
     );
 }
+
+#[test]
+fn the_wakeup_cooldown_does_not_cap_the_claim() {
+    // MEASURED on Postgres 18.6: one stampede_claim at batch 5 costs 668 us,
+    // so a worker sustains roughly 7,500 jobs/s. The cooldown must sit ABOVE
+    // the claim cost or it becomes the bottleneck rather than a burst limiter
+    // -- Oban's borrowed 5 ms capped throughput at about a seventh of what the
+    // claim can do, because Oban is pacing a CTE round trip and this is a
+    // single UPDATE ... RETURNING.
+    let cfg = WorkerConfig::default();
+    const MEASURED_CLAIM: Duration = Duration::from_micros(668);
+
+    assert!(
+        cfg.wakeup_cooldown >= MEASURED_CLAIM,
+        "a cooldown below the claim cost paces nothing: {:?} < {MEASURED_CLAIM:?}",
+        cfg.wakeup_cooldown
+    );
+    assert!(
+        cfg.wakeup_cooldown <= Duration::from_millis(5),
+        "and above a few ms it caps throughput instead of bounding bursts"
+    );
+}

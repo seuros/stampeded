@@ -669,28 +669,29 @@ per-queue partitioning at v1.**
 
 ## Still open
 
-- **Measure the row-move cost.** A cross-partition UPDATE is internally
-  DELETE+INSERT across two heaps and two index sets. Against a non-partitioned
-  in-place UPDATE, at what completion rate does it stop paying for itself? This
-  is the one number the whole recommendation rests on and I have not measured
-  it. Benchmark before committing schema.
-- **40001 retry budget.** How often does the row-movement race actually fire
-  under `SKIP LOCKED` claiming plus a concurrent cancel/rescue? If it is rare
-  it is a `chrono_machines` footnote; if it is common the completion path needs
-  a different shape.
-- **Does the `_live` partition need its own `fillfactor` at all,** given that
-  claiming is never HOT-eligible anywhere (§5)? Oban's 85 is justified as
-  locality, not HOT. Worth an A/B — it may be cargo.
-- **Retention default.** 1 hour is a guess triangulated from Oban's 60 s and
-  River's 24 h. Pick it from the dashboard's actual introspection window.
+- ~~**Measure the row-move cost.**~~ **MOOT.** This assumed
+  `PARTITION BY LIST (state)`, which `plans/README` §1 superseded with
+  partitioning by QUEUE — uniqueness won. Completion is an in-place UPDATE, so
+  there are no cross-partition row moves to measure.
+- ~~**40001 retry budget.**~~ **MOOT**, same reason: no row movement, no
+  "tuple to be locked was already moved to another partition" race.
+- **Is `fillfactor = 85` cargo?** Still open, and now applies to every queue
+  partition rather than a `_live` one. Oban justifies 85 as locality rather
+  than HOT-eligibility, and claiming is never HOT-eligible here either. Worth
+  an A/B; it costs 15% of every partition's pages to be wrong.
+- **Retention default.** 1 hour for completed and 7 days for discarded, both
+  triangulated from Oban's 60 s and River's 24 h rather than measured. The
+  console can now show what it can see, so the introspection window is at least
+  observable — but nobody has run it long enough to say whether an hour is
+  right.
 - **`uuidv7` and btree deduplication.** pg-boss's 24 MB vs 19 MB at 500k rows
   is a v4-UUID number (`plans.ts:916-923`). Re-measure with v7; if
   deduplication works as expected, `id` becomes a free ordering tiebreaker and
   the fetch index can be simpler than pg-boss's.
-- **`pg_cron` for the sweep?** It is available but not installed. A schedule
-  that survives all workers being down is a genuine reliability property
-  (`03-postgres18.md:51-56`), but it splits the retention policy between the
-  daemon and the database. Probably no; decide explicitly.
+- ~~**`pg_cron` for the sweep?**~~ **No, decided.** It would split the
+  retention policy between the daemon and the database, and the daemon already
+  survives every worker being down — the pruner is a maintenance role, not a
+  worker role, and `--no-worker` runs it.
 - **`pgstattuple` cost.** It does a full relation scan. That is precisely the
   horizon-pinning pattern §7.6 forbids. Either restrict it to `pgstatindex` on
   small indexes, gate it behind the same naptime backoff, or keep it as an

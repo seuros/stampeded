@@ -88,15 +88,25 @@ rather than in daemon-side Rust.
 If this works, Stampede's pitch is not "our protocol is better than Faktory's".
 It is **"there is no protocol"** — you already know how to talk to it.
 
-## Open questions
+## Resolved by building
 
-- Job argument encoding: `jsonb` (queryable, indexable, inspectable in psql) vs
-  `bytea` (opaque, fast, language-native serialisation). Leaning `jsonb` —
-  inspectability is a feature, and it makes the MCP control plane far more useful.
-- Does `stampede_claim()` handle heartbeat registration, or is that a separate
-  call?
-- Result/return values: does Stampede store job return values at all, or is a
-  job fire-and-forget? (Temporal does; Sidekiq does not. Storing results changes
-  retention and table size significantly.)
-- Multi-tenancy: schema-per-tenant, or a `tenant_id` column with
-  `throttle-machines` enforcing fairness?
+- ~~Job argument encoding.~~ **`jsonb`.** Inspectable in psql and searchable
+  from `job_search`; `bytea` would have gutted the MCP surface.
+- ~~Does `stampede_claim()` register the heartbeat?~~ **No, separate.**
+  Registration is an `INSERT` into `stampede_workers` and the heartbeat is its
+  own function, so a worker's liveness is independent of whether it currently
+  holds a job — which is what lets the reaper distinguish "worker died" from
+  "worker idle".
+- ~~Return values.~~ **Fire-and-forget**, per `plans/README` §2. A job needing
+  to report a result writes to its own table. Note the one exception that grew
+  later: `steps` persist small step RESULTS, bounded at 8 KB, because a resumed
+  job that cannot see what its completed steps produced is a footgun (`17-`).
+- ~~Multi-tenancy.~~ **`tenant_id` column + GCRA fairness**, not
+  schema-per-tenant. Composes with partitioning, and `tenant_id` can form part
+  of `dedup_scope`.
+
+## Still open
+
+- **Daemon-mediated claiming** — option (2) above, handing work out over
+  HTTP/SSE for workers across a trust boundary. The SQL-function path covers
+  in-cluster workers, which is the common case, so this stayed unbuilt.

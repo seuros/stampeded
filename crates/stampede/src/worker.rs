@@ -236,9 +236,21 @@ pub struct WorkerConfig {
     /// matters. River puts a limiter on its client because River's client is
     /// what sends the notification; ours is the database.
     ///
-    /// 5 ms is Oban's `dispatch_cooldown`, giving a ceiling of (1000/5) x batch
-    /// jobs/s. River's 100 ms is 20x more conservative, but our claim is one
-    /// statement rather than a CTE round trip.
+    /// MEASURED, not borrowed. The first version used Oban's 5 ms
+    /// `dispatch_cooldown`, which `plans/12` flagged as a guess.
+    ///
+    /// On Postgres 18.6 with 60k available rows, one `stampede_claim` at
+    /// batch 5 costs **668 us**, so a worker can sustain roughly 7,500
+    /// jobs/s. A 5 ms cooldown caps that at 1,000 — about a seventh of what
+    /// the claim can do. Oban's number is calibrated for Oban's CTE round
+    /// trip; ours is a single `UPDATE … RETURNING`, which is exactly the
+    /// difference plans/12 predicted.
+    ///
+    /// 1 ms sits above the measured claim cost, so it does not bind in steady
+    /// state, while still coalescing a burst of notifications into a bounded
+    /// number of round trips — which is the only thing this gate is for.
+    ///
+    /// One machine, one shape of workload. Raise it if claims are competing.
     pub wakeup_cooldown: Duration,
 }
 
@@ -253,7 +265,7 @@ impl Default for WorkerConfig {
             max_concurrency: 10,
             tenant_limit: Some(TenantLimit::default()),
             breaker_failure_threshold: Some(10),
-            wakeup_cooldown: Duration::from_millis(5),
+            wakeup_cooldown: Duration::from_millis(1),
             shutdown_timeout: Duration::from_secs(25),
         }
     }

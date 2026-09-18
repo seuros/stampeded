@@ -761,18 +761,23 @@ wall-clock guess.
 
 ## Still open
 
-- **Error fingerprinting algorithm.** Normalise-and-hash is easy to describe
-  and easy to get wrong (numbers, UUIDs, IPs, file paths, line numbers). Does
-  it live in the daemon or in a SQL function? The polyglot argument says SQL;
-  the "strip a UUID with a regex" argument says the daemon. Unresolved.
-- **Is `destination` one column or a set?** A job may call two services. One
-  column is cheap and covers the 90% case; an array or a join table is correct
-  and complicates the breaker key and the index. Leaning one column plus an
-  escape hatch.
-- **Does a `breaker_open` reschedule count toward any budget at all?** If it
-  counts toward nothing, a permanently-open breaker parks jobs forever and the
-  queue silently grows. Probably needs a separate `deferrals` counter with its
-  own (generous) cap, which is a third counter — is that one too many?
+- ~~**Error fingerprinting algorithm.**~~ **In SQL**, as
+  `stampede_fingerprint` — the polyglot argument won, because a Python worker
+  will not run our Rust normalisation and two workers producing different
+  fingerprints for one incident defeats the clustering entirely. Strips UUIDs,
+  hex blobs and numbers, then hashes. IMMUTABLE, so it can move into an index
+  or a generated column later. Verified clustering three timeouts against
+  three hosts into one row.
+- ~~**Is `destination` one column or a set?**~~ **One column.** A job calling
+  two services can still record the one whose health matters for backpressure;
+  an array would have made the breaker key ambiguous and the index wider for a
+  case nobody has yet asked for.
+- ~~**Does a `breaker_open` reschedule count toward any budget?**~~ **It does
+  now, and this note was right that it had to.** Shipped without it first: a
+  permanently open circuit re-claimed and re-deferred the same job forever,
+  verified at twelve cycles against a `max_attempts` of 3 with `attempt` still
+  0. A third counter IS warranted — `deferrals`, cap 100, which at the capped
+  backoff is days of downtime. Not a retry budget and must never become one.
 - ~~**Graceful shutdown must not consume the interruption budget.**~~
   **CLOSED 2026-09-18.** Both workers drain: in-flight jobs finish and report
   their own outcome, so nothing is recorded as a worker death. Both drains are
@@ -788,20 +793,31 @@ wall-clock guess.
   (River's `EventKindJobInterrupted`, `event.go:26-29`) — so the budget only
   applies to *ungraceful* death, which argues for keeping it at 1. Needs the
   shutdown path designed first.
-- **Error-column budget.** que picks 500 / 10000 bytes
-  (`job_methods.rb:30-31`). solid_queue computes it from the column limit.
-  We have no column limit on `text`/`jsonb`, so the budget is a policy choice.
-  Default? Configurable per queue?
-- **Ring-buffer depth for `errors`.** River bounds `attempted_by` only, and
-  `max_attempted_by` is caller-supplied. Keep the first N and the last M
+- ~~**Error-column budget.**~~ **4,000 characters, CHECK-enforced**, plus
+  1,000 per entry in the ring buffer. In SQL rather than in client code, for
+  the same reason as the fingerprint: it is the only bound that survives a
+  polyglot worker. Not configurable per queue — nobody has needed it, and a
+  per-queue limit is a second thing that can disagree with the constraint.
+- ~~**Ring-buffer depth for `errors`.**~~ **Ten, newest kept.** Enough to see a
+  pattern; bounded, unlike River, which bounds `attempted_by` and appends
+  errors without limit — the half that actually leaks, since error text dwarfs
+  a worker id. The original note follows. Keep the first N and the last M
   (the first failure and the recent ones are what matter; the middle is
   noise) — or a flat last-N? The first-error-plus-last-N shape is not used by
   anyone in the survey, which is either an opportunity or a warning.
-- **Does the DLQ share the jobs table or get its own?** pg-boss re-inserts into
+- ~~**Does the DLQ share the jobs table or get its own?**~~ **Shares it**, as a
+  queue like any other — which is the point of pg-boss's design: re-drive is
+  just working that queue, so every existing tool applies. Original note
+  follows. pg-boss re-inserts into
   the same partitioned table; solid_queue uses a separate table. Partitioning
   is already blocked on the `pg_partman` question in `04-`, and this decision
   depends on it.
-- **Do we ship a Prometheus endpoint, an OTel exporter, or both?** asynq ships
+- ~~**Do we ship a Prometheus endpoint, an OTel exporter, or both?**~~
+  **Neither: a `Recorder` trait.** A queue library that hard-depends on one
+  telemetry vendor forces it on every application and takes a major version
+  every time the vendor breaks its API. A `TracingRecorder` ships as the
+  reference impl, so `RUST_LOG=stampede::metrics=debug` is a working feed with
+  no backend at all. Original note follows. asynq ships
   a separate `x/metrics` module rather than baking it in
   (`redis/asynq/x/metrics/metrics.go`) — a good pattern for keeping the core
   dependency-light, and it interacts with the "does the daemon serve the

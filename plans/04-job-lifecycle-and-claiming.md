@@ -162,11 +162,16 @@ back into Oban's bug without knowing why the fence was there.
 
 ## Still open
 
-- claim batch size and whether to claim per-queue or globally with fairness
-  (`throttle-machines` is the lever)
-- whether the claim is a SQL function (polyglot-callable, one round trip) or
-  daemon-side SQL. Leaning function — see `05-polyglot-protocol.md`.
-- `LISTEN/NOTIFY` for wakeup vs polling interval
+- ~~claim batch size / per-queue vs global~~ — **per-queue, configurable
+  batch**, with GCRA fairness applied AFTER claiming: claim order is by
+  priority and age, so a tenant's flood is legitimately first in line and
+  execution is the only honest place to intervene.
+- ~~SQL function vs daemon-side SQL~~ — **function.** It is what makes a Ruby
+  or Python worker a peer rather than a client, and it is why there is exactly
+  one implementation of the fence and the attempt accounting.
+- ~~`LISTEN/NOTIFY` vs polling~~ — **both** (`12-`). Polling is the correctness
+  mechanism and never switches off; the trigger is a latency accelerant that
+  can be dropped with one `DROP TRIGGER`.
 - ~~completed-job retention and partitioning (blocked on `pg_partman` absence)~~
   **answered in `13-retention-and-bloat.md`**: LIST-partition by state (two
   leaves), no `pg_partman`, no time partitioning. Note that completion becomes

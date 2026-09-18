@@ -487,25 +487,28 @@ contains no time term, for this reason.
 
 ## Still open
 
-- Promoter interval and batch size. Oban runs 1 s / 5 000
-  (`stager.ex:16-17`), River 5 s (`job_scheduler.go:26`). The look-ahead makes
-  the interval a throughput knob rather than a latency knob, but the batch size
-  interacts with the claim in `04-` and with `throttle-machines`.
-- Whether the schedule row and the enqueued job should live in one table (db-scheduler)
-  or two (solid_queue). One table means the cron row competes with jobs for the
-  claim index; two means an extra join for the dashboard. Leaning two.
-- Occurrence-ledger retention. It is narrow, but it is unbounded. It needs its own
-  horizon, and that horizon must be **longer than the longest `backfill` window**
-  or the backstop silently stops backstopping.
-- `LISTEN/NOTIFY` on promotion. River notifies only for jobs due within 5 ms
-  (`job_scheduler.go:194-202`); que and pg-boss suppress the insert-time NOTIFY
-  for future-dated jobs entirely (`que/lib/que/migrations/5/up.sql:19-22`,
-  `pg-boss/src/plans.ts:2282`). Interacts with the open NOTIFY-vs-polling question
-  in `04-`.
-- Whether `wall_clock` should be the default for *all* schedules with an explicit
-  hour, or only for those with period ≥ 1 day. The distinction matters for
-  `0 */6 * * *`-shaped expressions and I have not found prior art either way.
-- Clock skew between daemon and database. pg-boss measures it and warns above 60 s
-  (`src/timekeeper.ts:298-337`). With an injectable clock in the claim query we
-  can make the database authoritative instead — worth deciding deliberately rather
-  than by omission.
+- ~~Promoter interval and batch size.~~ **Moot: there is no promoter.** The
+  claim predicate reads `scheduled_at <= now()` directly, so a delayed job
+  becomes claimable without a separate pass that can fall behind or die. That
+  was the whole reason for choosing the predicate over a promotion pass.
+- ~~One table or two.~~ **Two.** The cron row would otherwise compete with jobs
+  for the claim index, and the dashboard's extra join is cheap by comparison.
+- ~~Occurrence-ledger retention.~~ **Done, and it was a live leak**:
+  `stampede_prune_occurrences` existed from the start and was called from
+  NOWHERE, so the ledger grew one row per firing forever — 525,600 a year for a
+  schedule running every minute. Now pruned on its own 30-day horizon, separate
+  from job retention, which is the entire reason it is a separate table.
+- ~~`LISTEN/NOTIFY` on promotion.~~ **Falls out of the design.** There is no
+  promotion step; the scheduler ENQUEUES, and the insert trigger notifies like
+  any other insert. pg-boss's `scheduled_at <= now()` gate is on our trigger
+  too, so a future-dated job wakes nobody — there is a test for it.
+- ~~`wall_clock` default for all explicit-hour schedules?~~ **Sharper rule
+  found:** it keys off whether the hour field is EXPLICIT (`3`, `3,15`, `9-17`)
+  rather than on the period. `0 */6 * * *` uses a step, so it gets `instant` —
+  which is right, because "every six hours" should run 5 times on a 25-hour day
+  rather than 4. That resolves the `*/6` case the note could not.
+- ~~Clock skew.~~ **Both**: the database is authoritative (retry delays are
+  durations it applies; the scheduler compares server-side), AND the skew is
+  measured and warned on past a minute, pg-boss style. It is a diagnostic here
+  rather than a correctness input — past a minute, job timestamps and log
+  timestamps stop lining up, which costs an hour during an incident.
