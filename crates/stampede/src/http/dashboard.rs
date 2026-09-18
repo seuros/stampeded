@@ -121,7 +121,10 @@ pub struct Params {
 
 impl Params {
     fn queue(&self) -> &str {
-        self.q.as_deref().filter(|q| !q.is_empty()).unwrap_or("default")
+        self.q
+            .as_deref()
+            .filter(|q| !q.is_empty())
+            .unwrap_or("default")
     }
 
     fn state(&self) -> Option<&str> {
@@ -250,7 +253,9 @@ pub(crate) fn wakeup_badge(status: WakeupStatus) -> (&'static str, &'static str)
 
 fn render_wakeups(state: &ApiState) -> Option<Event<PatchElements>> {
     let (class, text) = wakeup_badge(state.wakeups);
-    patch(format!(r#"<span id="wakeups" class="{class}">{text}</span>"#))
+    patch(format!(
+        r#"<span id="wakeups" class="{class}">{text}</span>"#
+    ))
 }
 
 async fn render_queues(state: &ApiState, p: &Params) -> Option<Event<PatchElements>> {
@@ -266,10 +271,10 @@ async fn render_queues(state: &ApiState, p: &Params) -> Option<Event<PatchElemen
 
     let ages = state.queue.oldest_available_age().await.unwrap_or_default();
 
-    let mut html = String::from(
-        r#"<div id="queues"><h2>queues</h2><table>"#,
+    let mut html = String::from(r#"<div id="queues"><h2>queues</h2><table>"#);
+    html.push_str(
+        r#"<tr><th>queue</th><th>state</th><th class="n">jobs</th><th class="n">oldest</th></tr>"#,
     );
-    html.push_str(r#"<tr><th>queue</th><th>state</th><th class="n">jobs</th><th class="n">oldest</th></tr>"#);
     if rows.is_empty() {
         html.push_str(r#"<tr><td colspan="4" class="dim">no jobs</td></tr>"#);
     }
@@ -284,7 +289,11 @@ async fn render_queues(state: &ApiState, p: &Params) -> Option<Event<PatchElemen
         } else {
             String::new()
         };
-        let on = if queue == p.queue() { r#" class="on""# } else { "" };
+        let on = if queue == p.queue() {
+            r#" class="on""#
+        } else {
+            ""
+        };
         html.push_str(&format!(
             r#"<tr><td><a{on} data-on-click="@get('{href}')">{q}</a></td><td>{st}</td><td class="n">{n}</td><td class="n dim">{age}</td></tr>"#,
             href = p.link(Some(&queue), None, Some("")),
@@ -402,7 +411,11 @@ async fn render_schedules(state: &ApiState) -> Option<String> {
 }
 
 async fn render_jobs(state: &ApiState, p: &Params) -> Option<Event<PatchElements>> {
-    let jobs = match state.queue.recent_jobs(p.queue(), p.state(), JOB_LIMIT).await {
+    let jobs = match state
+        .queue
+        .recent_jobs(p.queue(), p.state(), JOB_LIMIT)
+        .await
+    {
         Ok(jobs) => jobs,
         Err(e) => {
             // Almost certainly the statement timeout: a rare state on a large
@@ -419,8 +432,19 @@ async fn render_jobs(state: &ApiState, p: &Params) -> Option<Event<PatchElements
         r#"<div id="jobs"><h2>jobs <span class="dim">— {q}, newest first</span></h2><nav>"#,
         q = esc(p.queue())
     );
-    for s in ["", "available", "executing", "retryable", "discarded", "completed"] {
-        let on = if p.state().unwrap_or("") == s { r#" class="on""# } else { "" };
+    for s in [
+        "",
+        "available",
+        "executing",
+        "retryable",
+        "discarded",
+        "completed",
+    ] {
+        let on = if p.state().unwrap_or("") == s {
+            r#" class="on""#
+        } else {
+            ""
+        };
         html.push_str(&format!(
             r#"<a{on} data-on-click="@get('{href}')">{label}</a>"#,
             href = p.link(None, Some(s), Some("")),
@@ -506,7 +530,10 @@ async fn render_job(state: &ApiState, p: &Params) -> Option<Event<PatchElements>
         ));
     }
     if let Some(d) = &j.destination {
-        html.push_str(&format!(r#"<tr><th>destination</th><td colspan="3">{}</td></tr>"#, esc(d)));
+        html.push_str(&format!(
+            r#"<tr><th>destination</th><td colspan="3">{}</td></tr>"#,
+            esc(d)
+        ));
     }
     if let Some(src) = &j.source_queue {
         html.push_str(&format!(
@@ -669,17 +696,17 @@ async fn render_health(state: &ApiState) -> Option<String> {
     // Partitions that cannot wake anybody. Not an error -- those queues still
     // work -- but the symptom is silence: latency quietly becomes the poll
     // interval for one queue, and nothing else would ever say why.
-    if let Ok(silent) = state.queue.partitions_without_wakeup().await {
-        if !silent.is_empty() {
-            html.push_str(r#"<h2 class="warn">partitions without a wakeup trigger</h2><table>"#);
-            for p in &silent {
-                html.push_str(&format!(
+    if let Ok(silent) = state.queue.partitions_without_wakeup().await
+        && !silent.is_empty()
+    {
+        html.push_str(r#"<h2 class="warn">partitions without a wakeup trigger</h2><table>"#);
+        for p in &silent {
+            html.push_str(&format!(
                     r#"<tr><td>{}</td><td class="dim">created outside stampede_create_queue; jobs here are polled, not woken</td></tr>"#,
                     esc(p)
                 ));
-            }
-            html.push_str("</table>");
         }
+        html.push_str("</table>");
     }
 
     html.push_str(r#"<h2>workers</h2><table><tr><th>worker</th><th class="n">heartbeat</th></tr>"#);

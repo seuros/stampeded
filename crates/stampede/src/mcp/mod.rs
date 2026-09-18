@@ -13,11 +13,11 @@
 //! `mcp-host` evaluates `visible` per session, so a read-only session does not
 //! merely get refused — it never sees the destructive tools at all.
 
+use crate::Queue;
 use mcp_host::prelude::*;
 use mcp_host::registry::router::McpToolRouter;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use crate::Queue;
 use std::sync::Arc;
 
 mod tools;
@@ -34,7 +34,10 @@ pub struct StampedeServer {
 
 impl StampedeServer {
     pub fn new(queue: Queue) -> Self {
-        Self { queue: Arc::new(queue), allow_writes: false }
+        Self {
+            queue: Arc::new(queue),
+            allow_writes: false,
+        }
     }
 
     /// Expose the guarded write tools (`job_retry`, `job_cancel`).
@@ -186,13 +189,21 @@ mod tests {
         let read_only = names(false);
         let full = names(true);
 
-        let writes: std::collections::BTreeSet<String> = ["job_cancel", "job_retry", "schedule_pause", "schedule_upsert"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let writes: std::collections::BTreeSet<String> = [
+            "job_cancel",
+            "job_retry",
+            "schedule_pause",
+            "schedule_upsert",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
 
         for w in &writes {
-            assert!(!read_only.contains(w), "{w} is reachable without allow_writes");
+            assert!(
+                !read_only.contains(w),
+                "{w} is reachable without allow_writes"
+            );
             assert!(full.contains(w), "{w} vanished when writes are allowed");
         }
 
@@ -200,7 +211,9 @@ mod tests {
         // removes it from every read-only deployment, and nobody notices
         // because the tool simply is not advertised.
         assert_eq!(
-            full.difference(&read_only).cloned().collect::<std::collections::BTreeSet<_>>(),
+            full.difference(&read_only)
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
             writes,
             "the only difference between the two routers must be the write tools"
         );
@@ -219,8 +232,15 @@ mod tests {
             "failure_summary",
             "worker_status",
         ] {
-            assert!(read_only.contains(t), "{t} is missing from the read-only router");
+            assert!(
+                read_only.contains(t),
+                "{t} is missing from the read-only router"
+            );
         }
-        assert_eq!(read_only.len(), 7, "unexpected read tool count: {read_only:?}");
+        assert_eq!(
+            read_only.len(),
+            7,
+            "unexpected read tool count: {read_only:?}"
+        );
     }
 }

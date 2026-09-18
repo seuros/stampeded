@@ -7,8 +7,7 @@ use super::*;
 
 #[test]
 fn enqueue_request_requires_only_queue_and_task() {
-    let r: EnqueueRequest =
-        serde_json::from_str(r#"{"queue":"mail","task":"send"}"#).unwrap();
+    let r: EnqueueRequest = serde_json::from_str(r#"{"queue":"mail","task":"send"}"#).unwrap();
     assert_eq!(r.queue, "mail");
     assert_eq!(r.task, "send");
     assert!(r.unique.is_none());
@@ -35,7 +34,10 @@ fn deduplicated_enqueue_is_not_an_error() {
     // than a 409. Making it an error would push every caller into
     // distinguishing "already queued" from "failed", which is the ergonomic
     // problem the ON CONFLICT DO NOTHING design avoids.
-    let r = EnqueueResponse { id: None, created: false };
+    let r = EnqueueResponse {
+        id: None,
+        created: false,
+    };
     let v = serde_json::to_value(&r).unwrap();
     assert_eq!(v["created"], false);
     assert!(v["id"].is_null());

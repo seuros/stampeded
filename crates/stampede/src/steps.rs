@@ -95,7 +95,9 @@ impl StepState {
     pub fn complete<T: Serialize>(&mut self, name: &str, value: Option<&T>) -> Result<()> {
         if let Some(v) = value {
             let encoded = serde_json::to_value(v)?;
-            let size = serde_json::to_string(&encoded).map(|s| s.len()).unwrap_or(0);
+            let size = serde_json::to_string(&encoded)
+                .map(|s| s.len())
+                .unwrap_or(0);
             if size > MAX_VALUE_BYTES {
                 return Err(Error::InvalidSchedule(format!(
                     "step {name:?} returned {size} bytes; the limit is {MAX_VALUE_BYTES}. \

@@ -27,12 +27,10 @@ fn database_url_can_come_from_env() {
 
 #[test]
 fn flags_override_env() {
-    let c = Config::parse(args(&["--queue", "mail"]), |k| {
-        match k {
-            "STAMPEDE_DATABASE_URL" => Some("postgres://x/y".into()),
-            "STAMPEDE_QUEUE" => Some("from-env".into()),
-            _ => None,
-        }
+    let c = Config::parse(args(&["--queue", "mail"]), |k| match k {
+        "STAMPEDE_DATABASE_URL" => Some("postgres://x/y".into()),
+        "STAMPEDE_QUEUE" => Some("from-env".into()),
+        _ => None,
     })
     .unwrap();
     assert_eq!(c.queue, "mail");
@@ -87,7 +85,10 @@ fn rejects_unknown_options_rather_than_ignoring_them() {
 #[test]
 fn reports_missing_values_by_name() {
     let err = Config::parse(args(&["--database-url"]), no_env).unwrap_err();
-    assert!(err.contains("--database-url requires a value"), "got: {err}");
+    assert!(
+        err.contains("--database-url requires a value"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -144,5 +145,8 @@ fn a_fatal_error_prints_its_newlines() {
     let f = super::super::Fatal("first line\nsecond line".to_string());
 
     assert_eq!(format!("{f:?}"), "first line\nsecond line");
-    assert!(!format!("{f:?}").contains("\\n"), "escapes leaked into the output");
+    assert!(
+        !format!("{f:?}").contains("\\n"),
+        "escapes leaked into the output"
+    );
 }

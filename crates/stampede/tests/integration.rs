@@ -50,9 +50,7 @@ async fn setup() -> Option<Queue> {
         .await
         .expect("pool");
 
-    stampede::schema::migrate(&pool)
-        .await
-        .expect("migrate");
+    stampede::schema::migrate(&pool).await.expect("migrate");
     Some(Queue::new(pool))
 }
 
@@ -304,7 +302,10 @@ async fn reaper_reclaims_jobs_from_dead_workers_as_worker_missing() {
             .await
             .unwrap();
     assert_eq!(kind.as_deref(), Some("worker_missing"));
-    assert_eq!(interruptions, 1, "a reclaim charges the interruptions budget");
+    assert_eq!(
+        interruptions, 1,
+        "a reclaim charges the interruptions budget"
+    );
 
     // And it is claimable again, so the attempt budget can be spent.
     assert_eq!(q.claim("default", w, 1).await.unwrap().len(), 1);
@@ -1314,10 +1315,17 @@ async fn prune_reports_how_many_it_actually_deleted() {
     //
     // Nothing failed. The pruner just quietly did a fraction of its job.
     let q = q!();
-    let w = q.register_worker("h", 1, &["default".into()]).await.unwrap();
+    let w = q
+        .register_worker("h", 1, &["default".into()])
+        .await
+        .unwrap();
 
     for _ in 0..7 {
-        let id = q.enqueue(NewJob::new("default", "x")).await.unwrap().unwrap();
+        let id = q
+            .enqueue(NewJob::new("default", "x"))
+            .await
+            .unwrap()
+            .unwrap();
         let claimed = q.claim("default", w, 1).await.unwrap();
         q.complete(&claimed[0], w).await.unwrap();
         let _ = id;
@@ -1342,7 +1350,10 @@ async fn prune_stops_at_the_batch_limit_so_the_caller_can_loop() {
     // The other half of the same contract: a full batch is how the caller
     // learns there is more to do.
     let q = q!();
-    let w = q.register_worker("h", 1, &["default".into()]).await.unwrap();
+    let w = q
+        .register_worker("h", 1, &["default".into()])
+        .await
+        .unwrap();
 
     for _ in 0..5 {
         q.enqueue(NewJob::new("default", "x")).await.unwrap();
@@ -1368,7 +1379,10 @@ async fn prune_stops_at_the_batch_limit_so_the_caller_can_loop() {
             break;
         }
     }
-    assert_eq!(total, 5, "looping until a short batch must drain everything");
+    assert_eq!(
+        total, 5,
+        "looping until a short batch must drain everything"
+    );
 }
 
 #[tokio::test]
@@ -1384,9 +1398,16 @@ async fn a_permanently_open_circuit_eventually_gives_up() {
     // So deferrals are counted separately, with a cap generous enough that a
     // real outage never reaches it.
     let q = q!();
-    let w = q.register_worker("h", 1, &["default".into()]).await.unwrap();
+    let w = q
+        .register_worker("h", 1, &["default".into()])
+        .await
+        .unwrap();
 
-    let id = q.enqueue(NewJob::new("default", "calls_dead_api")).await.unwrap().unwrap();
+    let id = q
+        .enqueue(NewJob::new("default", "calls_dead_api"))
+        .await
+        .unwrap()
+        .unwrap();
     sqlx::query("UPDATE stampede_jobs SET max_deferrals = 3 WHERE id = $1")
         .bind(id)
         .execute(q.pool())
@@ -1396,7 +1417,9 @@ async fn a_permanently_open_circuit_eventually_gives_up() {
     let mut cycles = 0;
     for _ in 0..20 {
         let claimed = q.claim("default", w, 1).await.unwrap();
-        let Some(job) = claimed.into_iter().next() else { break };
+        let Some(job) = claimed.into_iter().next() else {
+            break;
+        };
         cycles += 1;
         q.fail(&job, w, FailureKind::BreakerOpen, "circuit open", None)
             .await
@@ -1425,7 +1448,11 @@ async fn an_ordinary_outage_does_not_exhaust_the_deferral_budget() {
     // if this default ever shrinks toward a retry-budget-sized number, the
     // refund rule stops meaning anything.
     let q = q!();
-    let id = q.enqueue(NewJob::new("default", "x")).await.unwrap().unwrap();
+    let id = q
+        .enqueue(NewJob::new("default", "x"))
+        .await
+        .unwrap()
+        .unwrap();
     let job = q.fetch("default", id).await.unwrap().unwrap();
     assert!(
         job.max_deferrals >= 100,
@@ -1445,7 +1472,11 @@ async fn a_graceful_shutdown_lets_jobs_finish_and_charges_nothing() {
     // in BOTH implementations; the Ruby side has had a test since the gem
     // landed and this is the Rust one.
     let q = q!();
-    let id = q.enqueue(NewJob::new("default", "slow")).await.unwrap().unwrap();
+    let id = q
+        .enqueue(NewJob::new("default", "slow"))
+        .await
+        .unwrap()
+        .unwrap();
 
     let started = Arc::new(tokio::sync::Notify::new());
     let ready = started.clone();
@@ -1480,8 +1511,15 @@ async fn a_graceful_shutdown_lets_jobs_finish_and_charges_nothing() {
         .expect("run");
 
     let job = q.fetch("default", id).await.unwrap().unwrap();
-    assert_eq!(job.state, JobState::Completed, "the in-flight job must be allowed to finish");
-    assert_eq!(job.interruptions, 0, "a graceful shutdown is not a worker death");
+    assert_eq!(
+        job.state,
+        JobState::Completed,
+        "the in-flight job must be allowed to finish"
+    );
+    assert_eq!(
+        job.interruptions, 0,
+        "a graceful shutdown is not a worker death"
+    );
     assert_eq!(job.attempt, 1, "and it must not have been retried");
 }
 
@@ -1545,11 +1583,20 @@ async fn a_job_resumes_from_its_checkpoint_after_its_worker_dies() {
     // River is the prior art here and its model is richer -- named steps,
     // fast-forwarded on resume (plans/17 §2). This is the single-cursor form.
     let q = q!();
-    q.enqueue(NewJob::new("default", "import")).await.unwrap().unwrap();
+    q.enqueue(NewJob::new("default", "import"))
+        .await
+        .unwrap()
+        .unwrap();
 
-    let w1 = q.register_worker("host-a", 1, &["default".into()]).await.unwrap();
+    let w1 = q
+        .register_worker("host-a", 1, &["default".into()])
+        .await
+        .unwrap();
     let first = q.claim("default", w1, 1).await.unwrap();
-    assert!(first[0].checkpoint.is_none(), "nothing to resume from on the first attempt");
+    assert!(
+        first[0].checkpoint.is_none(),
+        "nothing to resume from on the first attempt"
+    );
 
     q.checkpoint(&first[0], w1, &serde_json::json!({ "cursor": 50_000 }))
         .await
@@ -1563,7 +1610,10 @@ async fn a_job_resumes_from_its_checkpoint_after_its_worker_dies() {
         .unwrap();
     assert_eq!(q.reap(Duration::from_secs(300)).await.unwrap(), 1);
 
-    let w2 = q.register_worker("host-b", 2, &["default".into()]).await.unwrap();
+    let w2 = q
+        .register_worker("host-b", 2, &["default".into()])
+        .await
+        .unwrap();
     let second = q.claim("default", w2, 1).await.unwrap();
 
     let state: serde_json::Value = second[0].resume_from().expect("resume state survived");
@@ -1578,32 +1628,55 @@ async fn a_stale_worker_cannot_move_the_cursor_backwards() {
     // wakes up and writes 51k. Without the check, B's next attempt redoes 9,000
     // units -- or does them twice, if the job is not perfectly idempotent.
     let q = q!();
-    let id = q.enqueue(NewJob::new("default", "import")).await.unwrap().unwrap();
+    let id = q
+        .enqueue(NewJob::new("default", "import"))
+        .await
+        .unwrap()
+        .unwrap();
 
-    let a = q.register_worker("a", 1, &["default".into()]).await.unwrap();
-    let job_a = q.claim("default", a, 1).await.unwrap().remove(0);
-    q.checkpoint(&job_a, a, &serde_json::json!({ "cursor": 50_000 })).await.unwrap();
-
-    sqlx::query("UPDATE stampede_workers SET last_heartbeat = now() - interval '1 hour' WHERE id = $1")
-        .bind(a)
-        .execute(q.pool())
+    let a = q
+        .register_worker("a", 1, &["default".into()])
         .await
         .unwrap();
+    let job_a = q.claim("default", a, 1).await.unwrap().remove(0);
+    q.checkpoint(&job_a, a, &serde_json::json!({ "cursor": 50_000 }))
+        .await
+        .unwrap();
+
+    sqlx::query(
+        "UPDATE stampede_workers SET last_heartbeat = now() - interval '1 hour' WHERE id = $1",
+    )
+    .bind(a)
+    .execute(q.pool())
+    .await
+    .unwrap();
     q.reap(Duration::from_secs(300)).await.unwrap();
 
-    let b = q.register_worker("b", 2, &["default".into()]).await.unwrap();
+    let b = q
+        .register_worker("b", 2, &["default".into()])
+        .await
+        .unwrap();
     let job_b = q.claim("default", b, 1).await.unwrap().remove(0);
-    q.checkpoint(&job_b, b, &serde_json::json!({ "cursor": 60_000 })).await.unwrap();
+    q.checkpoint(&job_b, b, &serde_json::json!({ "cursor": 60_000 }))
+        .await
+        .unwrap();
 
     // A wakes up, still holding its stale handle.
     let stale = q
         .checkpoint(&job_a, a, &serde_json::json!({ "cursor": 51_000 }))
         .await
         .unwrap();
-    assert!(stale.is_none(), "a stale worker must be refused, and must learn it was");
+    assert!(
+        stale.is_none(),
+        "a stale worker must be refused, and must learn it was"
+    );
 
     let now = q.fetch("default", id).await.unwrap().unwrap();
-    assert_eq!(now.checkpoint.unwrap()["cursor"], 60_000, "the cursor must not go backwards");
+    assert_eq!(
+        now.checkpoint.unwrap()["cursor"],
+        60_000,
+        "the cursor must not go backwards"
+    );
 }
 
 #[tokio::test]
@@ -1614,21 +1687,43 @@ async fn progress_forgives_infrastructure_but_not_a_broken_job() {
     // otherwise a long job on a flaky afternoon is discarded having done 95% of
     // the work and never actually failed.
     let q = q!();
-    let id = q.enqueue(NewJob::new("default", "import")).await.unwrap().unwrap();
-    let w = q.register_worker("h", 1, &["default".into()]).await.unwrap();
-
-    let job = q.claim("default", w, 1).await.unwrap().remove(0);
-    q.fail_with_exit(&job, w, FailureKind::WorkerExited, "oom", Some(Duration::from_millis(1)), Some(137))
+    let id = q
+        .enqueue(NewJob::new("default", "import"))
+        .await
+        .unwrap()
+        .unwrap();
+    let w = q
+        .register_worker("h", 1, &["default".into()])
         .await
         .unwrap();
-    assert_eq!(q.fetch("default", id).await.unwrap().unwrap().interruptions, 1);
+
+    let job = q.claim("default", w, 1).await.unwrap().remove(0);
+    q.fail_with_exit(
+        &job,
+        w,
+        FailureKind::WorkerExited,
+        "oom",
+        Some(Duration::from_millis(1)),
+        Some(137),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        q.fetch("default", id).await.unwrap().unwrap().interruptions,
+        1
+    );
 
     tokio::time::sleep(Duration::from_millis(20)).await;
     let job = q.claim("default", w, 1).await.unwrap().remove(0);
-    q.checkpoint(&job, w, &serde_json::json!({ "cursor": 1 })).await.unwrap();
+    q.checkpoint(&job, w, &serde_json::json!({ "cursor": 1 }))
+        .await
+        .unwrap();
 
     let after = q.fetch("default", id).await.unwrap().unwrap();
-    assert_eq!(after.interruptions, 0, "demonstrated progress is not a poison job");
+    assert_eq!(
+        after.interruptions, 0,
+        "demonstrated progress is not a poison job"
+    );
     // But the total-work ceiling is untouched, so a job that progresses one
     // unit and then dies forever is still bounded.
     assert_eq!(after.attempt, 2, "attempt must NOT be refunded");
@@ -1643,13 +1738,22 @@ async fn a_checkpoint_is_also_a_heartbeat() {
     q.enqueue(NewJob::new("default", "slow").expires_in(Duration::from_secs(1)))
         .await
         .unwrap();
-    let w = q.register_worker("h", 1, &["default".into()]).await.unwrap();
+    let w = q
+        .register_worker("h", 1, &["default".into()])
+        .await
+        .unwrap();
     let job = q.claim("default", w, 1).await.unwrap().remove(0);
 
     for i in 0..3 {
         tokio::time::sleep(Duration::from_millis(400)).await;
-        q.checkpoint(&job, w, &serde_json::json!({ "cursor": i })).await.unwrap();
-        assert_eq!(q.expire(10).await.unwrap(), 0, "a checkpointing job must not expire");
+        q.checkpoint(&job, w, &serde_json::json!({ "cursor": i }))
+            .await
+            .unwrap();
+        assert_eq!(
+            q.expire(10).await.unwrap(),
+            0,
+            "a checkpointing job must not expire"
+        );
     }
 }
 
@@ -1658,14 +1762,30 @@ async fn the_checkpoint_is_cleared_on_success() {
     // Dead weight otherwise, on the one table that already has the bloat
     // problem -- and inconsistent with not storing results either.
     let q = q!();
-    let id = q.enqueue(NewJob::new("default", "import")).await.unwrap().unwrap();
-    let w = q.register_worker("h", 1, &["default".into()]).await.unwrap();
+    let id = q
+        .enqueue(NewJob::new("default", "import"))
+        .await
+        .unwrap()
+        .unwrap();
+    let w = q
+        .register_worker("h", 1, &["default".into()])
+        .await
+        .unwrap();
     let job = q.claim("default", w, 1).await.unwrap().remove(0);
 
-    q.checkpoint(&job, w, &serde_json::json!({ "cursor": 99 })).await.unwrap();
+    q.checkpoint(&job, w, &serde_json::json!({ "cursor": 99 }))
+        .await
+        .unwrap();
     q.complete(&job, w).await.unwrap();
 
-    assert!(q.fetch("default", id).await.unwrap().unwrap().checkpoint.is_none());
+    assert!(
+        q.fetch("default", id)
+            .await
+            .unwrap()
+            .unwrap()
+            .checkpoint
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -1674,15 +1794,32 @@ async fn an_oversized_checkpoint_is_refused_by_the_database() {
     // truncation. Someone will try to store the processed ids rather than a
     // cursor, and the row will be megabytes.
     let q = q!();
-    let id = q.enqueue(NewJob::new("default", "import")).await.unwrap().unwrap();
-    let w = q.register_worker("h", 1, &["default".into()]).await.unwrap();
+    let id = q
+        .enqueue(NewJob::new("default", "import"))
+        .await
+        .unwrap()
+        .unwrap();
+    let w = q
+        .register_worker("h", 1, &["default".into()])
+        .await
+        .unwrap();
     let job = q.claim("default", w, 1).await.unwrap().remove(0);
 
     let huge = serde_json::json!({ "ids": "x".repeat(70_000) });
-    assert!(q.checkpoint(&job, w, &huge).await.is_err(), "64 KB cap must hold");
+    assert!(
+        q.checkpoint(&job, w, &huge).await.is_err(),
+        "64 KB cap must hold"
+    );
 
     // And the job is untouched.
-    assert!(q.fetch("default", id).await.unwrap().unwrap().checkpoint.is_none());
+    assert!(
+        q.fetch("default", id)
+            .await
+            .unwrap()
+            .unwrap()
+            .checkpoint
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -1696,8 +1833,15 @@ async fn a_checkpoint_in_a_transaction_rolls_back_with_its_work() {
     // reading their implementation showed the plain version could not be made
     // atomic at all.
     let q = q!();
-    let id = q.enqueue(NewJob::new("default", "import")).await.unwrap().unwrap();
-    let w = q.register_worker("h", 1, &["default".into()]).await.unwrap();
+    let id = q
+        .enqueue(NewJob::new("default", "import"))
+        .await
+        .unwrap()
+        .unwrap();
+    let w = q
+        .register_worker("h", 1, &["default".into()])
+        .await
+        .unwrap();
     let job = q.claim("default", w, 1).await.unwrap().remove(0);
 
     let mut tx = q.pool().begin().await.unwrap();
@@ -1731,8 +1875,15 @@ async fn steps_run_once_and_skip_on_resume() {
     // workers have the same resume ergonomics rather than one having a step
     // model and the other a bare cursor.
     let q = q!();
-    let id = q.enqueue(NewJob::new("default", "checkout")).await.unwrap().unwrap();
-    let w = q.register_worker("h", 1, &["default".into()]).await.unwrap();
+    let id = q
+        .enqueue(NewJob::new("default", "checkout"))
+        .await
+        .unwrap()
+        .unwrap();
+    let w = q
+        .register_worker("h", 1, &["default".into()])
+        .await
+        .unwrap();
 
     let charges = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let renders = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1760,9 +1911,16 @@ async fn steps_run_once_and_skip_on_resume() {
             .unwrap();
         assert_eq!(path, "/tmp/receipt.pdf");
 
-        q.fail_with_exit(&job, w, FailureKind::WorkerExited, "killed", Some(Duration::from_millis(1)), Some(137))
-            .await
-            .unwrap();
+        q.fail_with_exit(
+            &job,
+            w,
+            FailureKind::WorkerExited,
+            "killed",
+            Some(Duration::from_millis(1)),
+            Some(137),
+        )
+        .await
+        .unwrap();
     }
 
     // Attempt two: both steps are skipped, and the render still yields its value.
@@ -1788,13 +1946,27 @@ async fn steps_run_once_and_skip_on_resume() {
             .await
             .unwrap();
 
-        assert_eq!(path, "/tmp/receipt.pdf", "a skipped step must return what it produced");
+        assert_eq!(
+            path, "/tmp/receipt.pdf",
+            "a skipped step must return what it produced"
+        );
         q.complete(&job, w).await.unwrap();
     }
 
-    assert_eq!(charges.load(std::sync::atomic::Ordering::SeqCst), 1, "the card must be charged once");
+    assert_eq!(
+        charges.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the card must be charged once"
+    );
     assert_eq!(renders.load(std::sync::atomic::Ordering::SeqCst), 1);
-    assert!(q.fetch("default", id).await.unwrap().unwrap().checkpoint.is_none());
+    assert!(
+        q.fetch("default", id)
+            .await
+            .unwrap()
+            .unwrap()
+            .checkpoint
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -1812,8 +1984,15 @@ async fn a_job_checkpointed_by_ruby_resumes_in_rust() {
     //
     // The Ruby side has the mirror of this test in steps_test.rb.
     let q = q!();
-    let id = q.enqueue(NewJob::new("default", "checkout")).await.unwrap().unwrap();
-    let w = q.register_worker("ruby-worker", 1, &["default".into()]).await.unwrap();
+    let id = q
+        .enqueue(NewJob::new("default", "checkout"))
+        .await
+        .unwrap()
+        .unwrap();
+    let w = q
+        .register_worker("ruby-worker", 1, &["default".into()])
+        .await
+        .unwrap();
     let job = q.claim("default", w, 1).await.unwrap().remove(0);
 
     let written_by_ruby = serde_json::json!({
@@ -1822,16 +2001,26 @@ async fn a_job_checkpointed_by_ruby_resumes_in_rust() {
         "values": { "render": "/tmp/receipt.pdf" },
         "cursors": { "email": 2 }
     });
-    q.checkpoint(&job, w, &written_by_ruby).await.unwrap().unwrap();
+    q.checkpoint(&job, w, &written_by_ruby)
+        .await
+        .unwrap()
+        .unwrap();
 
     // A Rust worker picks it up.
     let resumed = q.fetch("default", id).await.unwrap().unwrap();
     let ctx = q.context_for(&resumed, w);
     let steps = ctx.steps();
 
-    assert!(steps.completed("charge"), "Rust must see Ruby's completed steps");
+    assert!(
+        steps.completed("charge"),
+        "Rust must see Ruby's completed steps"
+    );
     assert_eq!(steps.value::<String>("render").unwrap(), "/tmp/receipt.pdf");
-    assert_eq!(steps.cursor::<i64>("email").unwrap(), 2, "and the in-progress cursor");
+    assert_eq!(
+        steps.cursor::<i64>("email").unwrap(),
+        2,
+        "and the in-progress cursor"
+    );
 
     // And running the same steps skips them rather than charging twice.
     let mut ran = false;
@@ -1877,14 +2066,20 @@ async fn the_cron_occurrence_ledger_is_pruned() {
     .await
     .unwrap();
 
-    let pruned = q.prune_occurrences(Duration::from_secs(30 * 24 * 3600)).await.unwrap();
+    let pruned = q
+        .prune_occurrences(Duration::from_secs(30 * 24 * 3600))
+        .await
+        .unwrap();
     assert_eq!(pruned, 50, "old occurrences should go");
 
     let left: i64 = sqlx::query_scalar("SELECT count(*) FROM stampede_cron_occurrences")
         .fetch_one(q.pool())
         .await
         .unwrap();
-    assert_eq!(left, 3, "recent ones are the idempotency backstop and must stay");
+    assert_eq!(
+        left, 3,
+        "recent ones are the idempotency backstop and must stay"
+    );
 }
 
 #[tokio::test]
@@ -1906,7 +2101,10 @@ async fn the_notification_queue_and_clock_skew_are_observable() {
     // loose on purpose -- this is a diagnostic, and a slow CI box should not
     // fail the suite.
     let skew = q.clock_skew().await.unwrap();
-    assert!(skew.abs() < 60.0, "skew against a local database was {skew}s");
+    assert!(
+        skew.abs() < 60.0,
+        "skew against a local database was {skew}s"
+    );
 }
 
 #[tokio::test]
@@ -1925,7 +2123,10 @@ async fn the_job_listing_is_bounded_by_a_statement_timeout() {
     for _ in 0..5 {
         q.enqueue(NewJob::new("default", "x")).await.unwrap();
     }
-    let jobs = q.recent_jobs("default", Some("available"), 40).await.unwrap();
+    let jobs = q
+        .recent_jobs("default", Some("available"), 40)
+        .await
+        .unwrap();
     assert_eq!(jobs.len(), 5);
 
     // Newest first, so uuidv7 ordering is actually being relied on.
@@ -1997,7 +2198,10 @@ async fn the_counters_stay_accurate_under_concurrent_transitions() {
     for w in workers {
         completed += w.await.unwrap();
     }
-    assert_eq!(completed, 200, "every job should have been claimed exactly once");
+    assert_eq!(
+        completed, 200,
+        "every job should have been claimed exactly once"
+    );
 
     // And the counters agree, without anyone aggregating.
     assert_eq!(depth_of(&q, "available").await, 0);
@@ -2029,7 +2233,11 @@ async fn counters_survive_a_rolled_back_enqueue() {
         .unwrap();
     tx.rollback().await.unwrap();
 
-    assert_eq!(depth_of(&q, "available").await, 1, "the rollback must uncount");
+    assert_eq!(
+        depth_of(&q, "available").await,
+        1,
+        "the rollback must uncount"
+    );
 }
 
 #[tokio::test]
@@ -2077,8 +2285,15 @@ async fn the_reaper_racing_a_finishing_worker_does_not_double_run_the_job() {
     // `stampede_complete` carries `claimed_by = p_worker_id`, so whichever
     // side loses learns it lost instead of writing over the winner.
     let q = q!();
-    let id = q.enqueue(NewJob::new("default", "once")).await.unwrap().unwrap();
-    let w = q.register_worker("h", 1, &["default".into()]).await.unwrap();
+    let id = q
+        .enqueue(NewJob::new("default", "once"))
+        .await
+        .unwrap()
+        .unwrap();
+    let w = q
+        .register_worker("h", 1, &["default".into()])
+        .await
+        .unwrap();
     let job = q.claim("default", w, 1).await.unwrap().remove(0);
 
     // Make the worker look dead, then have both act at once.
@@ -2088,8 +2303,15 @@ async fn the_reaper_racing_a_finishing_worker_does_not_double_run_the_job() {
         .unwrap();
 
     let (reap, complete) = tokio::join!(
-        { let q = q.clone(); async move { q.reap(Duration::from_secs(300)).await.unwrap() } },
-        { let q = q.clone(); let job = job.clone(); async move { q.complete(&job, w).await.unwrap() } },
+        {
+            let q = q.clone();
+            async move { q.reap(Duration::from_secs(300)).await.unwrap() }
+        },
+        {
+            let q = q.clone();
+            let job = job.clone();
+            async move { q.complete(&job, w).await.unwrap() }
+        },
     );
 
     let final_job = q.fetch("default", id).await.unwrap().unwrap();
@@ -2127,7 +2349,9 @@ async fn concurrent_schedulers_fire_an_occurrence_exactly_once() {
     let mut ticks = Vec::new();
     for _ in 0..6 {
         let q = q.clone();
-        ticks.push(tokio::spawn(async move { q.run_due_schedules(10).await.unwrap() }));
+        ticks.push(tokio::spawn(async move {
+            q.run_due_schedules(10).await.unwrap()
+        }));
     }
 
     let mut fired = 0;
@@ -2155,7 +2379,10 @@ async fn a_job_that_could_never_run_is_refused() {
     let err = q
         .enqueue(NewJob::new("default", "doomed").max_attempts(0))
         .await;
-    assert!(err.is_err(), "a job that can never be claimed must not be creatable");
+    assert!(
+        err.is_err(),
+        "a job that can never be claimed must not be creatable"
+    );
 
     // One is fine: it gets exactly one shot.
     let id = q
@@ -2163,7 +2390,10 @@ async fn a_job_that_could_never_run_is_refused() {
         .await
         .unwrap()
         .unwrap();
-    let w = q.register_worker("h", 1, &["default".into()]).await.unwrap();
+    let w = q
+        .register_worker("h", 1, &["default".into()])
+        .await
+        .unwrap();
     assert_eq!(q.claim("default", w, 5).await.unwrap().len(), 1);
     let _ = id;
 }
@@ -2178,7 +2408,9 @@ async fn an_absurdly_large_payload_is_refused() {
 
     let huge = serde_json::json!({ "blob": "x".repeat(2_000_000) });
     assert!(
-        q.enqueue(NewJob::new("default", "big").args(huge)).await.is_err(),
+        q.enqueue(NewJob::new("default", "big").args(huge))
+            .await
+            .is_err(),
         "a 2 MB payload must be refused"
     );
 
@@ -2187,7 +2419,11 @@ async fn an_absurdly_large_payload_is_refused() {
         "user_id": 42,
         "note": "x".repeat(10_000),
     });
-    assert!(q.enqueue(NewJob::new("default", "ok").args(normal)).await.is_ok());
+    assert!(
+        q.enqueue(NewJob::new("default", "ok").args(normal))
+            .await
+            .is_ok()
+    );
 }
 
 #[tokio::test]
@@ -2227,8 +2463,16 @@ async fn a_schedule_needs_a_key() {
     // pause, remove or find the schedule again.
     let q = q!();
 
-    assert!(q.upsert_schedule("", "default", "t", Duration::from_secs(60)).await.is_err());
-    assert!(q.upsert_schedule("   ", "default", "t", Duration::from_secs(60)).await.is_err());
+    assert!(
+        q.upsert_schedule("", "default", "t", Duration::from_secs(60))
+            .await
+            .is_err()
+    );
+    assert!(
+        q.upsert_schedule("   ", "default", "t", Duration::from_secs(60))
+            .await
+            .is_err()
+    );
     assert!(
         q.upsert_cron_schedule("", "default", "t", "* * * * *", "UTC", None)
             .await
@@ -2248,9 +2492,15 @@ async fn a_schedule_needs_a_key() {
 #[tokio::test]
 async fn a_handler_can_choose_its_own_retry_delay() {
     let q = q!();
-    let w = q.register_worker("test", 1, &["default".into()]).await.unwrap();
+    let w = q
+        .register_worker("test", 1, &["default".into()])
+        .await
+        .unwrap();
 
-    let id = q.enqueue(NewJob::new("default", "ratelimited").max_attempts(5)).await.unwrap();
+    let id = q
+        .enqueue(NewJob::new("default", "ratelimited").max_attempts(5))
+        .await
+        .unwrap();
     let jobs = q.claim("default", w, 1).await.unwrap();
     let job = jobs.first().expect("claimed");
 
@@ -2264,11 +2514,18 @@ async fn a_handler_can_choose_its_own_retry_delay() {
     .await
     .unwrap();
 
-    let row = q.fetch("default", id.expect("enqueued")).await.unwrap().expect("job");
+    let row = q
+        .fetch("default", id.expect("enqueued"))
+        .await
+        .unwrap()
+        .expect("job");
     let delay = row.scheduled_at - chrono::Utc::now();
 
     assert_eq!(row.state.as_str(), "retryable");
-    assert_eq!(row.attempt, 1, "a chosen delay must still charge the attempt");
+    assert_eq!(
+        row.attempt, 1,
+        "a chosen delay must still charge the attempt"
+    );
     assert!(
         delay.num_seconds() > 3000,
         "the chosen delay did not reach the database: {delay:?}"
@@ -2307,9 +2564,14 @@ async fn the_claim_never_plans_a_sort() {
     let q = q!();
 
     for i in 0..200 {
-        q.enqueue(NewJob::new("default", "t").priority(i % 3)).await.unwrap();
+        q.enqueue(NewJob::new("default", "t").priority(i % 3))
+            .await
+            .unwrap();
     }
-    sqlx::query("ANALYZE stampede_jobs_default").execute(q.pool()).await.ok();
+    sqlx::query("ANALYZE stampede_jobs_default")
+        .execute(q.pool())
+        .await
+        .ok();
 
     // The claim's own predicate and ordering, verbatim from 002_operations.sql.
     let plan: (serde_json::Value,) = sqlx::query_as(
@@ -2349,8 +2611,14 @@ async fn the_claim_never_plans_a_sort() {
 #[tokio::test]
 async fn a_growing_checkpoint_warns_but_a_merely_large_one_does_not() {
     let q = q!();
-    let w = q.register_worker("test", 1, &["default".into()]).await.unwrap();
-    q.enqueue(NewJob::new("default", "long")).await.unwrap().expect("enqueued");
+    let w = q
+        .register_worker("test", 1, &["default".into()])
+        .await
+        .unwrap();
+    q.enqueue(NewJob::new("default", "long"))
+        .await
+        .unwrap()
+        .expect("enqueued");
     let jobs = q.claim("default", w, 1).await.unwrap();
     let job = jobs.first().expect("claimed");
 
@@ -2388,8 +2656,18 @@ async fn a_growing_checkpoint_warns_but_a_merely_large_one_does_not() {
     assert!(!judge(&q, &big_stable, &big_stable).await);
 
     // And the function still works and still returns a sequence.
-    let seq = q.checkpoint(job, w, &serde_json::from_str::<serde_json::Value>(&cursor(50_000)).unwrap()).await.unwrap();
-    assert!(seq.is_some(), "checkpoint must still return its sequence number");
+    let seq = q
+        .checkpoint(
+            job,
+            w,
+            &serde_json::from_str::<serde_json::Value>(&cursor(50_000)).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        seq.is_some(),
+        "checkpoint must still return its sequence number"
+    );
 }
 
 /// A checkpoint resets `interruptions` and leaves `attempt` alone.
@@ -2411,8 +2689,15 @@ async fn a_growing_checkpoint_warns_but_a_merely_large_one_does_not() {
 #[tokio::test]
 async fn a_checkpoint_forgives_interruptions_but_not_attempts() {
     let q = q!();
-    let w = q.register_worker("test", 1, &["default".into()]).await.unwrap();
-    let id = q.enqueue(NewJob::new("default", "long")).await.unwrap().expect("enqueued");
+    let w = q
+        .register_worker("test", 1, &["default".into()])
+        .await
+        .unwrap();
+    let id = q
+        .enqueue(NewJob::new("default", "long"))
+        .await
+        .unwrap()
+        .expect("enqueued");
 
     let jobs = q.claim("default", w, 1).await.unwrap();
     let job = jobs.first().expect("claimed").clone();
@@ -2430,12 +2715,20 @@ async fn a_checkpoint_forgives_interruptions_but_not_attempts() {
             .fetch_one(q.pool())
             .await
             .unwrap();
-    assert_eq!(before, (1, 1), "precondition: one interruption, one attempt");
+    assert_eq!(
+        before,
+        (1, 1),
+        "precondition: one interruption, one attempt"
+    );
 
-    q.checkpoint(&job, w, &serde_json::json!({"v": 1, "cursors": {"rows": 50_000}}))
-        .await
-        .unwrap()
-        .expect("checkpoint accepted");
+    q.checkpoint(
+        &job,
+        w,
+        &serde_json::json!({"v": 1, "cursors": {"rows": 50_000}}),
+    )
+    .await
+    .unwrap()
+    .expect("checkpoint accepted");
 
     let after: (i16, i16) =
         sqlx::query_as("SELECT interruptions, attempt FROM stampede_jobs WHERE id = $1")
@@ -2444,7 +2737,10 @@ async fn a_checkpoint_forgives_interruptions_but_not_attempts() {
             .await
             .unwrap();
 
-    assert_eq!(after.0, 0, "progress must forgive interruptions (plans/17 §4)");
+    assert_eq!(
+        after.0, 0,
+        "progress must forgive interruptions (plans/17 §4)"
+    );
     assert_eq!(
         after.1, before.1,
         "progress must NOT refund an attempt, or a job that checkpoints once \
@@ -2477,7 +2773,11 @@ async fn backoff_can_be_set_when_enqueuing() {
             .await
             .unwrap();
 
-    assert_eq!(row, (5_000, 300_000), "the backoff policy did not reach the row");
+    assert_eq!(
+        row,
+        (5_000, 300_000),
+        "the backoff policy did not reach the row"
+    );
 
     // base is a smallint; clamping here beats an INSERT that fails with
     // "smallint out of range" and names neither the field nor the limit.
@@ -2486,12 +2786,11 @@ async fn backoff_can_be_set_when_enqueuing() {
         .await
         .unwrap()
         .expect("enqueued");
-    let (base,): (i16,) =
-        sqlx::query_as("SELECT backoff_base_ms FROM stampede_jobs WHERE id = $1")
-            .bind(id2)
-            .fetch_one(q.pool())
-            .await
-            .unwrap();
+    let (base,): (i16,) = sqlx::query_as("SELECT backoff_base_ms FROM stampede_jobs WHERE id = $1")
+        .bind(id2)
+        .fetch_one(q.pool())
+        .await
+        .unwrap();
     assert_eq!(base, i16::MAX, "an over-range base must clamp, not explode");
 }
 
@@ -2521,10 +2820,12 @@ async fn a_partition_without_the_wakeup_trigger_is_detected() {
     );
 
     // The unsupported way.
-    sqlx::query("CREATE TABLE stampede_jobs_silent PARTITION OF stampede_jobs FOR VALUES IN ('silent')")
-        .execute(q.pool())
-        .await
-        .unwrap();
+    sqlx::query(
+        "CREATE TABLE stampede_jobs_silent PARTITION OF stampede_jobs FOR VALUES IN ('silent')",
+    )
+    .execute(q.pool())
+    .await
+    .unwrap();
 
     let silent = q.partitions_without_wakeup().await.unwrap();
 

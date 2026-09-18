@@ -39,7 +39,10 @@ fn a_record_written_by_the_ruby_worker_reads_back() {
 
     assert!(state.completed("charge"));
     assert!(state.completed("render"));
-    assert!(!state.completed("email"), "a step with a cursor is in progress, not done");
+    assert!(
+        !state.completed("email"),
+        "a step with a cursor is in progress, not done"
+    );
     assert_eq!(state.value::<String>("render").unwrap(), "/tmp/receipt.pdf");
     assert_eq!(state.cursor::<i64>("email").unwrap(), 2);
 }
@@ -85,5 +88,8 @@ fn an_oversized_step_result_is_refused_with_advice() {
 
     let msg = err.to_string();
     assert!(msg.contains("20"), "should name the size: {msg}");
-    assert!(msg.contains("reference"), "should say what to do instead: {msg}");
+    assert!(
+        msg.contains("reference"),
+        "should say what to do instead: {msg}"
+    );
 }

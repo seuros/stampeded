@@ -6,17 +6,17 @@
 //! implementation of those over HTTP is exactly the drift the SQL-function
 //! design exists to prevent (plans/05).
 
+use crate::{NewJob, Period, Queue};
 use rama::futures::stream;
 use rama::http::StatusCode;
 use rama::http::header;
+use rama::http::service::web::Router;
+use rama::http::service::web::extract::body::Json as JsonBody;
+use rama::http::service::web::extract::{Path, State};
+use rama::http::service::web::response::{IntoResponse, Json, Sse};
 use rama::http::sse::Event;
 use rama::http::sse::server::KeepAlive;
-use rama::http::service::web::Router;
-use rama::http::service::web::extract::{Path, State};
-use rama::http::service::web::extract::body::Json as JsonBody;
-use rama::http::service::web::response::{IntoResponse, Json, Sse};
 use serde::{Deserialize, Serialize};
-use crate::{NewJob, Period, Queue};
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
@@ -271,7 +271,10 @@ async fn enqueue(
         // forces every caller to distinguish "already queued" from "failed".
         Ok(id) => (
             StatusCode::CREATED,
-            Json(EnqueueResponse { created: id.is_some(), id }),
+            Json(EnqueueResponse {
+                created: id.is_some(),
+                id,
+            }),
         )
             .into_response(),
         Err(e) => {
@@ -281,10 +284,7 @@ async fn enqueue(
     }
 }
 
-async fn depth(
-    State(state): State<ApiState>,
-    Path(queue): Path<String>,
-) -> impl IntoResponse {
+async fn depth(State(state): State<ApiState>, Path(queue): Path<String>) -> impl IntoResponse {
     match state.queue.depth(&queue).await {
         Ok(rows) => {
             let map: serde_json::Map<String, serde_json::Value> = rows
@@ -311,7 +311,9 @@ async fn job_status(
     let Ok(id) = uuid::Uuid::parse_str(&id) else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse { error: "id is not a UUID".into() }),
+            Json(ErrorResponse {
+                error: "id is not a UUID".into(),
+            }),
         )
             .into_response();
     };
@@ -320,7 +322,9 @@ async fn job_status(
         Ok(Some(job)) => Json(job_json(&job)).into_response(),
         Ok(None) => (
             StatusCode::NOT_FOUND,
-            Json(ErrorResponse { error: format!("no job {id} in queue {queue:?}") }),
+            Json(ErrorResponse {
+                error: format!("no job {id} in queue {queue:?}"),
+            }),
         )
             .into_response(),
         Err(e) => {
@@ -347,7 +351,9 @@ async fn job_events(
     let Ok(id) = uuid::Uuid::parse_str(&id) else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse { error: "id is not a UUID".into() }),
+            Json(ErrorResponse {
+                error: "id is not a UUID".into(),
+            }),
         )
             .into_response();
     };
@@ -427,7 +433,9 @@ fn parse_period(s: &str) -> Result<Period, String> {
 fn internal(msg: &str) -> rama::http::Response {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ErrorResponse { error: msg.to_string() }),
+        Json(ErrorResponse {
+            error: msg.to_string(),
+        }),
     )
         .into_response()
 }

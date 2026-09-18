@@ -71,22 +71,21 @@ impl Config {
             "  --no-maintenance       do not reap or prune\n",
             "  --migrate              apply the schema on startup\n",
             "  --http ADDR            serve the HTTP API on ADDR (e.g. 127.0.0.1:7878)\n",
-        "  --dashboard-token TOK  serve the dashboard, gated on this token\n",
-        "                         (without it the dashboard is NOT served)\n",
+            "  --dashboard-token TOK  serve the dashboard, gated on this token\n",
+            "                         (without it the dashboard is NOT served)\n",
             "  -h, --help             this message\n",
         )
     }
 
     pub fn from_args_and_env() -> Result<Self, String> {
-        Self::parse(std::env::args().skip(1).collect(), |k| std::env::var(k).ok())
+        Self::parse(std::env::args().skip(1).collect(), |k| {
+            std::env::var(k).ok()
+        })
     }
 
     /// Split out from `from_args_and_env` so it is testable without touching
     /// the process environment.
-    pub fn parse(
-        args: Vec<String>,
-        env: impl Fn(&str) -> Option<String>,
-    ) -> Result<Self, String> {
+    pub fn parse(args: Vec<String>, env: impl Fn(&str) -> Option<String>) -> Result<Self, String> {
         let mut c = Config {
             database_url: env("STAMPEDE_DATABASE_URL").unwrap_or_default(),
             ..Default::default()
@@ -108,13 +107,25 @@ impl Config {
                 }
                 "--database-url" => c.database_url = value("--database-url")?,
                 "--queue" => c.queue = value("--queue")?,
-                "--concurrency" => c.concurrency = parse_num(&value("--concurrency")?, "--concurrency")?,
-                "--batch-size" => c.batch_size = parse_num(&value("--batch-size")?, "--batch-size")?,
+                "--concurrency" => {
+                    c.concurrency = parse_num(&value("--concurrency")?, "--concurrency")?
+                }
+                "--batch-size" => {
+                    c.batch_size = parse_num(&value("--batch-size")?, "--batch-size")?
+                }
                 "--pool-size" => c.pool_size = parse_num(&value("--pool-size")?, "--pool-size")?,
-                "--poll-interval" => c.poll_interval = parse_secs(&value("--poll-interval")?, "--poll-interval")?,
-                "--job-timeout" => c.job_timeout = parse_secs(&value("--job-timeout")?, "--job-timeout")?,
-                "--dead-after" => c.dead_after = parse_secs(&value("--dead-after")?, "--dead-after")?,
-                "--retain-for" => c.retain_for = parse_secs(&value("--retain-for")?, "--retain-for")?,
+                "--poll-interval" => {
+                    c.poll_interval = parse_secs(&value("--poll-interval")?, "--poll-interval")?
+                }
+                "--job-timeout" => {
+                    c.job_timeout = parse_secs(&value("--job-timeout")?, "--job-timeout")?
+                }
+                "--dead-after" => {
+                    c.dead_after = parse_secs(&value("--dead-after")?, "--dead-after")?
+                }
+                "--retain-for" => {
+                    c.retain_for = parse_secs(&value("--retain-for")?, "--retain-for")?
+                }
                 "--no-worker" => c.worker = false,
                 "--no-maintenance" => c.maintenance = false,
                 "--migrate" => c.migrate = true,
@@ -159,7 +170,8 @@ impl Config {
 }
 
 fn parse_num<T: std::str::FromStr>(v: &str, name: &str) -> Result<T, String> {
-    v.parse().map_err(|_| format!("{name}: {v:?} is not a number"))
+    v.parse()
+        .map_err(|_| format!("{name}: {v:?} is not a number"))
 }
 
 fn parse_secs(v: &str, name: &str) -> Result<Duration, String> {

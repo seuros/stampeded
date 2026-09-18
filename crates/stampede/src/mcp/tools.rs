@@ -89,17 +89,17 @@ impl StampedeServer {
             .map_err(|_| ToolError::InvalidArguments(format!("{:?} is not a UUID", params.0.id)))?;
 
         let row: Option<JobRow> = sqlx::query_as(
-                "SELECT task, state::text AS state, attempt, max_attempts, \
+            "SELECT task, state::text AS state, attempt, max_attempts, \
                         failure_kind::text AS failure_kind, last_error, attempted_by, args, \
                         interruptions, max_interruptions, destination, deferrals, \
                         checkpoint, checkpoint_seq, dead_letter_queue, source_queue, errors \
                    FROM stampede_jobs WHERE queue = $1 AND id = $2",
-            )
-            .bind(&params.0.queue)
-            .bind(id)
-            .fetch_optional(self.queue().pool())
-            .await
-            .map_err(|e| ToolError::Internal(format!("query failed: {e}")))?;
+        )
+        .bind(&params.0.queue)
+        .bind(id)
+        .fetch_optional(self.queue().pool())
+        .await
+        .map_err(|e| ToolError::Internal(format!("query failed: {e}")))?;
 
         let Some(JobRow {
             task,
@@ -175,10 +175,14 @@ impl StampedeServer {
                 "worker_missing" => " (the worker vanished; not the job's fault)",
                 "heartbeat_lost" => " (stopped reporting progress; not the job's fault)",
                 "timed_out" => " (exceeded its time budget)",
-                "breaker_open" => " (WE declined to run it: downstream circuit open; \
-                                   no attempt was charged)",
-                "throttled" => " (WE declined to run it: tenant over its rate limit; \
-                                no attempt was charged)",
+                "breaker_open" => {
+                    " (WE declined to run it: downstream circuit open; \
+                                   no attempt was charged)"
+                }
+                "throttled" => {
+                    " (WE declined to run it: tenant over its rate limit; \
+                                no attempt was charged)"
+                }
                 "unrecoverable" => " (will never succeed; retries skipped)",
                 _ => "",
             };
@@ -336,7 +340,11 @@ impl StampedeServer {
 
         let mut out = format!("{} worker(s)\n", rows.len());
         for (host, pid, queues, age) in rows {
-            let flag = if age > 300.0 { "  STALE — jobs will be reclaimed" } else { "" };
+            let flag = if age > 300.0 {
+                "  STALE — jobs will be reclaimed"
+            } else {
+                ""
+            };
             out.push_str(&format!(
                 "  {host}:{pid:<8} queues={:<20} heartbeat {age:.0}s ago{flag}\n",
                 queues.join(",")
@@ -456,7 +464,10 @@ impl StampedeServer {
 
         match self.queue().sparse_indexes().await {
             Ok(idx) if idx.is_empty() => out.push_str("indexes: dense\n"),
-            Ok(idx) => out.push_str(&format!("indexes: sparse, worth rebuilding — {}\n", idx.join(", "))),
+            Ok(idx) => out.push_str(&format!(
+                "indexes: sparse, worth rebuilding — {}\n",
+                idx.join(", ")
+            )),
             Err(e) => out.push_str(&format!("indexes: unavailable ({e})\n")),
         }
 
@@ -535,7 +546,7 @@ impl StampedeServer {
             Some(other) => {
                 return Err(ToolError::InvalidArguments(format!(
                     "dst_policy must be \"wall_clock\" or \"instant\", got {other:?}"
-                )))
+                )));
             }
         };
 
@@ -591,7 +602,11 @@ impl StampedeServer {
         description = "Pause or resume a schedule by key without deleting it",
         visible = "ctx.has_role(\"operator\")"
     )]
-    async fn schedule_pause(&self, _ctx: Ctx<'_>, params: Parameters<ScheduleKeyArgs>) -> ToolResult {
+    async fn schedule_pause(
+        &self,
+        _ctx: Ctx<'_>,
+        params: Parameters<ScheduleKeyArgs>,
+    ) -> ToolResult {
         let n = sqlx::query(
             "UPDATE stampede_schedules SET paused = $2, updated_at = now() WHERE key = $1",
         )
@@ -617,16 +632,16 @@ impl StampedeServer {
 /// One schedule row as `schedule_list` reads it. Named for the same reason as
 /// `JobRow`: wide enough that a mis-ordered column would type-check.
 type ScheduleRow = (
-    String,          // key
-    String,          // queue
-    String,          // task
-    Option<String>,  // cron_expr
-    Option<i64>,     // interval_secs
-    String,          // timezone
-    String,          // dst_policy
-    bool,            // paused
-    String,          // next_run_at
-    Option<String>,  // last_run_at
+    String,         // key
+    String,         // queue
+    String,         // task
+    Option<String>, // cron_expr
+    Option<i64>,    // interval_secs
+    String,         // timezone
+    String,         // dst_policy
+    bool,           // paused
+    String,         // next_run_at
+    Option<String>, // last_run_at
 );
 
 /// Mount the read tools, and optionally the guarded write tools.

@@ -10,7 +10,10 @@ fn error_text_is_escaped() {
     // Queue and task names are operator-controlled, but ERROR TEXT is not: it
     // contains whatever a failing library put in a message, which can include
     // anything an attacker got into a request. It goes straight into the page.
-    assert_eq!(esc(r#"<script>alert(1)</script>"#), "&lt;script&gt;alert(1)&lt;/script&gt;");
+    assert_eq!(
+        esc(r#"<script>alert(1)</script>"#),
+        "&lt;script&gt;alert(1)&lt;/script&gt;"
+    );
     assert_eq!(esc(r#"a&b"c'd"#), "a&amp;b&quot;c&#39;d");
 }
 
@@ -19,16 +22,33 @@ fn the_token_cannot_break_out_of_the_stream_url() {
     // The token is echoed into a data-on-click attribute and is
     // attacker-chosen by construction -- they pick the query string.
     let nasty = esc(r#"'><script>alert(1)</script>"#);
-    assert!(!nasty.contains('\''), "single quote must be escaped: {nasty}");
-    assert!(!nasty.contains('<'), "angle bracket must be escaped: {nasty}");
+    assert!(
+        !nasty.contains('\''),
+        "single quote must be escaped: {nasty}"
+    );
+    assert!(
+        !nasty.contains('<'),
+        "angle bracket must be escaped: {nasty}"
+    );
 }
 
 #[test]
 fn the_page_has_a_target_for_every_panel() {
     // If an id drifts from the one a render_* emits, that panel silently stops
     // updating and the page looks merely quiet.
-    for id in ["wakeups", "queues", "destinations", "failures", "jobs", "schedules", "health"] {
-        assert!(INDEX.contains(&format!(r#"id="{id}""#)), "no target for {id}");
+    for id in [
+        "wakeups",
+        "queues",
+        "destinations",
+        "failures",
+        "jobs",
+        "schedules",
+        "health",
+    ] {
+        assert!(
+            INDEX.contains(&format!(r#"id="{id}""#)),
+            "no target for {id}"
+        );
     }
 }
 
@@ -39,7 +59,10 @@ fn the_placeholders_are_all_substituted() {
         .replace("__Q__", "mail")
         .replace("__S__", "")
         .replace("__J__", "");
-    assert!(!page.contains("__"), "an unsubstituted placeholder would break the stream URL");
+    assert!(
+        !page.contains("__"),
+        "an unsubstituted placeholder would break the stream URL"
+    );
     assert!(page.contains("token=t"));
     assert!(page.contains("q=mail"));
 }
@@ -78,7 +101,10 @@ fn a_link_swaps_one_field_and_keeps_the_rest() {
     let same_queue_all_states = p.link(None, Some(""), None);
     assert!(same_queue_all_states.contains("token=secret"));
     assert!(same_queue_all_states.contains("q=mail"));
-    assert!(same_queue_all_states.contains("s=&"), "state should be cleared");
+    assert!(
+        same_queue_all_states.contains("s=&"),
+        "state should be cleared"
+    );
 
     // Opening a job keeps the filters, so [close] returns to the same list.
     let opened = p.link(None, None, Some("abc"));
@@ -172,8 +198,10 @@ fn a_patch_is_always_one_sse_line() {
     // indentation shipped to every client every second and each frame's
     // correctness depended on a reassembly step nothing here can test without a
     // browser.
-    let ev = patch("<div id=\"x\">\n   <table>\n     <tr><td>a</td></tr>\n   </table>\n</div>".to_string())
-        .expect("should build");
+    let ev = patch(
+        "<div id=\"x\">\n   <table>\n     <tr><td>a</td></tr>\n   </table>\n</div>".to_string(),
+    )
+    .expect("should build");
 
     let rendered = format!("{ev:?}");
     assert!(
@@ -246,12 +274,18 @@ async fn a_stale_panel_is_re_rendered() {
         Some("<div id=\"health\">x</div>".to_string())
     };
 
-    cache.get("health", Duration::from_millis(30), render()).await;
-    cache.get("health", Duration::from_millis(30), render()).await;
+    cache
+        .get("health", Duration::from_millis(30), render())
+        .await;
+    cache
+        .get("health", Duration::from_millis(30), render())
+        .await;
     assert_eq!(renders.load(Ordering::SeqCst), 1, "still fresh");
 
     tokio::time::sleep(Duration::from_millis(50)).await;
-    cache.get("health", Duration::from_millis(30), render()).await;
+    cache
+        .get("health", Duration::from_millis(30), render())
+        .await;
     assert_eq!(renders.load(Ordering::SeqCst), 2, "expired, so re-rendered");
 }
 
@@ -266,7 +300,10 @@ async fn a_stale_panel_is_re_rendered() {
 #[test]
 fn no_worker_daemon_is_not_reported_as_degraded() {
     let (class, text) = wakeup_badge(WakeupStatus::NotApplicable);
-    assert_eq!(class, "dim", "a daemon with no workers is not a warning: {text}");
+    assert_eq!(
+        class, "dim",
+        "a daemon with no workers is not a warning: {text}"
+    );
     assert_ne!(class, "warn");
 
     // The genuinely degraded case must still be amber, or this fix would have
@@ -281,7 +318,11 @@ fn no_worker_daemon_is_not_reported_as_degraded() {
         wakeup_badge(WakeupStatus::NotApplicable).1,
     ];
     let unique: std::collections::BTreeSet<_> = texts.iter().collect();
-    assert_eq!(unique.len(), 3, "wakeup states must be distinguishable: {texts:?}");
+    assert_eq!(
+        unique.len(),
+        3,
+        "wakeup states must be distinguishable: {texts:?}"
+    );
 }
 
 /// A checkpoint containing non-ASCII must not panic the job panel.
@@ -296,7 +337,10 @@ fn no_worker_daemon_is_not_reported_as_degraded() {
 fn a_checkpoint_with_multibyte_characters_does_not_panic() {
     // Byte 48 falls inside the 'é' here -- the case found by searching for it.
     let raw = r#"{"file":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxé.pdf"}"#;
-    assert!(raw.len() > 48 && !raw.is_char_boundary(48), "fixture no longer exercises the bug");
+    assert!(
+        raw.len() > 48 && !raw.is_char_boundary(48),
+        "fixture no longer exercises the bug"
+    );
 
     let out = truncate_chars(raw, 48);
 

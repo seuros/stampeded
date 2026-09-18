@@ -201,7 +201,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if tasks.is_empty() {
-        eprintln!("error: nothing to do — all roles disabled\n\n{}", Config::usage());
+        eprintln!(
+            "error: nothing to do — all roles disabled\n\n{}",
+            Config::usage()
+        );
         std::process::exit(2);
     }
 
@@ -275,7 +278,10 @@ fn explain_connect_failure(e: &sqlx::Error, url: &str) -> Fatal {
         ""
     };
 
-    Fatal(format!("could not connect to {}: {detail}{hint}", redact(url)))
+    Fatal(format!(
+        "could not connect to {}: {detail}{hint}",
+        redact(url)
+    ))
 }
 
 #[cfg(unix)]

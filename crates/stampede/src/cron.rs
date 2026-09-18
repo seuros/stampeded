@@ -121,7 +121,12 @@ impl Field {
             return Err(CronError(format!("field {spec:?} matches nothing")));
         }
 
-        Ok(Self { bits, min, wildcard, explicit })
+        Ok(Self {
+            bits,
+            min,
+            wildcard,
+            explicit,
+        })
     }
 }
 
@@ -206,7 +211,9 @@ impl Cron {
 
         let dom_ok = self.dom.matches(date.day() as u8);
         // jiff: Monday = 1 ... Sunday = 7. Cron: Sunday = 0.
-        let dow_ok = self.dow.matches((date.weekday().to_monday_one_offset() % 7) as u8);
+        let dow_ok = self
+            .dow
+            .matches((date.weekday().to_monday_one_offset() % 7) as u8);
 
         match (self.dom.wildcard, self.dow.wildcard) {
             (true, true) => true,
@@ -251,7 +258,11 @@ impl Cron {
         // Four years covers the worst legitimate case, 29 February.
         for day in 0..=1_461 {
             if self.day_matches(date) {
-                let from_minute = if day == 0 { start.time() } else { Time::midnight() };
+                let from_minute = if day == 0 {
+                    start.time()
+                } else {
+                    Time::midnight()
+                };
                 if let Some(t) = self.first_time_on_or_after(from_minute) {
                     return resolve(date, t, tz);
                 }
@@ -273,7 +284,10 @@ impl Cron {
             return None;
         }
 
-        let AmbiguousOffset::Fold { before, after: later } = tz.to_ambiguous_zoned(dt).offset()
+        let AmbiguousOffset::Fold {
+            before,
+            after: later,
+        } = tz.to_ambiguous_zoned(dt).offset()
         else {
             return None;
         };
@@ -282,7 +296,10 @@ impl Cron {
             return None;
         }
 
-        let candidate = dt.to_zoned(TimeZone::fixed(later)).ok()?.with_time_zone(tz.clone());
+        let candidate = dt
+            .to_zoned(TimeZone::fixed(later))
+            .ok()?
+            .with_time_zone(tz.clone());
         (candidate.timestamp() > after.timestamp()).then_some(candidate)
     }
 
@@ -304,7 +321,6 @@ impl Cron {
         }
         None
     }
-
 }
 
 /// Turn a civil date+time into an instant.
@@ -316,7 +332,9 @@ impl Cron {
 /// cron's behaviour, and it is a documented guarantee here rather than whatever
 /// a chrono `LocalResult` happened to collapse to.
 fn resolve(date: Date, time: Time, tz: &TimeZone) -> Option<Zoned> {
-    tz.to_ambiguous_zoned(DateTime::from_parts(date, time)).compatible().ok()
+    tz.to_ambiguous_zoned(DateTime::from_parts(date, time))
+        .compatible()
+        .ok()
 }
 
 #[cfg(test)]

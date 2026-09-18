@@ -239,7 +239,11 @@ async fn prune_loop(
             Ok(0) => {}
             Ok(n) => {
                 info!(pruned = n, "pruner: deleted old cron occurrences");
-                metrics.count(names::MAINTENANCE_JOBS, n, &[label("outcome", "occurrences")]);
+                metrics.count(
+                    names::MAINTENANCE_JOBS,
+                    n,
+                    &[label("outcome", "occurrences")],
+                );
             }
             Err(e) => warn!(error = %e, "occurrence pruner failed"),
         }

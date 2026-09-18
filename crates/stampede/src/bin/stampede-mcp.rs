@@ -23,8 +23,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    let url = std::env::var("STAMPEDE_DATABASE_URL")
-        .map_err(|_| "STAMPEDE_DATABASE_URL is required")?;
+    let url =
+        std::env::var("STAMPEDE_DATABASE_URL").map_err(|_| "STAMPEDE_DATABASE_URL is required")?;
     let allow_writes = std::env::var("STAMPEDE_MCP_ALLOW_WRITES")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);

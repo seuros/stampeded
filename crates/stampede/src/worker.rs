@@ -23,11 +23,11 @@ use crate::job::{FailureKind, Job};
 use crate::metrics::{Metrics, label, names};
 use crate::queue::Queue;
 use crate::wakeup::{NextPoll, Wakeup};
-use serde::Serialize;
-use serde::de::DeserializeOwned;
 use breaker_machines::async_circuit::AsyncCircuitBreaker;
 use chrono::Utc;
 use chrono_machines::{BackoffPolicy, BackoffStrategy, ExponentialBackoff};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -102,7 +102,11 @@ impl JobContext {
     /// [`checkpoint_on`](JobContext::checkpoint_on) with your transaction
     /// instead and the question does not arise.
     pub async fn checkpoint<T: serde::Serialize>(&self, state: &T) -> Result<bool> {
-        Ok(self.queue.checkpoint(&self.job, self.worker_id, state).await?.is_some())
+        Ok(self
+            .queue
+            .checkpoint(&self.job, self.worker_id, state)
+            .await?
+            .is_some())
     }
 
     /// Save resume state inside the caller's transaction, so the cursor and
@@ -152,7 +156,9 @@ impl JobContext {
             let state = self.steps.lock().expect("step state poisoned");
             // A step with no stored value returns the type's default, which for
             // the common `()` case is exactly right.
-            state.completed(name).then(|| state.value(name).unwrap_or_default())
+            state
+                .completed(name)
+                .then(|| state.value(name).unwrap_or_default())
         } {
             return Ok(done);
         }

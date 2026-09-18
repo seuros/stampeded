@@ -52,7 +52,9 @@ async fn serve() -> Option<(String, Queue, watch::Sender<bool>)> {
 
     // Port 0 and then ask the OS what it gave us: a fixed port would make these
     // tests fail when run in parallel with anything else.
-    let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind probe");
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind probe");
     let addr = probe.local_addr().expect("addr").to_string();
     drop(probe);
 
@@ -127,7 +129,11 @@ async fn request(addr: &str, method: &str, path: &str, body: Option<&str>) -> (u
         .nth(1)
         .and_then(|c| c.parse().ok())
         .unwrap_or(0);
-    let body = text.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("").to_string();
+    let body = text
+        .split_once("\r\n\r\n")
+        .map(|(_, b)| b)
+        .unwrap_or("")
+        .to_string();
     (status, body)
 }
 
@@ -174,11 +180,20 @@ async fn unknown_job_is_404_and_a_bad_uuid_is_400() {
     let (addr, _q, tx) = server!();
 
     let missing = Uuid::now_v7();
-    let (status, _) = request(&addr, "GET", &format!("/queues/default/jobs/{missing}"), None).await;
+    let (status, _) = request(
+        &addr,
+        "GET",
+        &format!("/queues/default/jobs/{missing}"),
+        None,
+    )
+    .await;
     assert_eq!(status, 404);
 
     let (status, _) = request(&addr, "GET", "/queues/default/jobs/not-a-uuid", None).await;
-    assert_eq!(status, 400, "a malformed id is the caller's error, not a 500");
+    assert_eq!(
+        status, 400,
+        "a malformed id is the caller's error, not a 500"
+    );
 
     let _ = tx.send(true);
 }
@@ -213,9 +228,15 @@ async fn the_event_stream_ends_once_the_job_is_terminal() {
     .await;
 
     assert_eq!(status, 200);
-    assert!(started.elapsed() < Duration::from_secs(5), "stream did not close");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "stream did not close"
+    );
     assert!(body.contains("event: state"), "no state event: {body}");
-    assert!(body.contains("completed"), "terminal state not reported: {body}");
+    assert!(
+        body.contains("completed"),
+        "terminal state not reported: {body}"
+    );
 
     let _ = tx.send(true);
 }
@@ -224,7 +245,9 @@ async fn the_event_stream_ends_once_the_job_is_terminal() {
 async fn depth_reports_by_state() {
     let (addr, q, tx) = server!();
     for _ in 0..3 {
-        q.enqueue(NewJob::new("default", "x")).await.expect("enqueue");
+        q.enqueue(NewJob::new("default", "x"))
+            .await
+            .expect("enqueue");
     }
     let (status, body) = request(&addr, "GET", "/queues/default/depth", None).await;
     assert_eq!(status, 200, "{body}");
@@ -251,7 +274,10 @@ async fn the_dashboard_is_not_served_without_a_token() {
     // dashboard exists here at all.
     let (status, body) = request(&addr, "GET", "/dashboard?token=s3cret", None).await;
     assert_eq!(status, 200);
-    assert!(body.contains("Stampede"), "the real dashboard should render");
+    assert!(
+        body.contains("Stampede"),
+        "the real dashboard should render"
+    );
 
     let _ = tx.send(true);
 }
@@ -263,7 +289,10 @@ async fn the_dashboard_stream_is_gated_too() {
     let (addr, _q, tx) = server!();
 
     let (status, _) = request(&addr, "GET", "/dashboard/stream", None).await;
-    assert_eq!(status, 404, "the SSE stream must be gated as well as the page");
+    assert_eq!(
+        status, 404,
+        "the SSE stream must be gated as well as the page"
+    );
 
     let _ = tx.send(true);
 }
@@ -340,7 +369,10 @@ async fn a_bad_unique_period_is_rejected_rather_than_ignored() {
     )
     .await;
     assert_eq!(status, 400, "{body}");
-    assert!(body.contains("fortnight"), "the error should name the bad value: {body}");
+    assert!(
+        body.contains("fortnight"),
+        "the error should name the bad value: {body}"
+    );
 
     let _ = tx.send(true);
 }

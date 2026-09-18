@@ -631,7 +631,10 @@ impl Queue {
     /// to: how many jobs for a destination failed recently and how. A run of
     /// `breaker_open` means some worker's circuit IS open; a run of `raised`
     /// against one host means one is probably about to be.
-    pub async fn destination_health(&self, window: std::time::Duration) -> Result<Vec<DestinationHealth>> {
+    pub async fn destination_health(
+        &self,
+        window: std::time::Duration,
+    ) -> Result<Vec<DestinationHealth>> {
         sqlx::query_as::<_, DestinationHealth>(
             "SELECT destination, \
                     count(*) FILTER (WHERE failure_kind = 'breaker_open')::bigint AS refused, \
@@ -692,7 +695,12 @@ impl Queue {
     /// A dashboard panel that cannot answer quickly should give up and say so,
     /// not quietly consume a core. The caller renders the timeout as an empty
     /// panel with an explanation.
-    pub async fn recent_jobs(&self, queue: &str, state: Option<&str>, limit: i64) -> Result<Vec<Job>> {
+    pub async fn recent_jobs(
+        &self,
+        queue: &str,
+        state: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<Job>> {
         let mut conn = self.pool.acquire().await?;
 
         // LOCAL, so it reverts when the connection returns to the pool and

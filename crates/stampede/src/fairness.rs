@@ -33,7 +33,10 @@ impl Default for TenantLimit {
         // Deliberately generous: fairness should only bite under genuine
         // contention. A limit low enough to shape normal traffic would be a
         // throughput cap wearing a fairness costume.
-        Self { jobs_per_second: 100.0, burst: 50.0 }
+        Self {
+            jobs_per_second: 100.0,
+            burst: 50.0,
+        }
     }
 }
 
@@ -66,7 +69,10 @@ pub struct Fairness {
 
 impl Fairness {
     pub fn new(limit: TenantLimit) -> Self {
-        Self { limit, state: Mutex::new(HashMap::new()) }
+        Self {
+            limit,
+            state: Mutex::new(HashMap::new()),
+        }
     }
 
     /// Whether this tenant may start a job now.
@@ -91,7 +97,9 @@ impl Fairness {
         if decision.allowed {
             Admission::Allowed
         } else {
-            Admission::Throttled { retry_after_secs: decision.retry_after }
+            Admission::Throttled {
+                retry_after_secs: decision.retry_after,
+            }
         }
     }
 
