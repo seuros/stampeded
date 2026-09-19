@@ -81,32 +81,45 @@ module Stampeded
       log "registered #{worker_id} on queue #{@queue}"
 
       heartbeat = start_heartbeat(worker_id)
-      pool      = []
+
+      # A FIXED POOL fed through a bounded queue, not a thread per job.
+      #
+      # The old loop spawned a thread per job and, whenever the pool was full,
+      # slept 50 ms before looking again. That put a ceiling on throughput of
+      # `concurrency / 0.05` jobs per second regardless of how fast the jobs
+      # were: at concurrency 8 that is 160/s, and a load test against 226k real
+      # rows measured 138/s for a handler that did nothing at all.
+      #
+      # The bound on `inbox` IS the backpressure -- pushing blocks while every
+      # thread is busy -- so there is no sleep to tune and no ceiling.
+      #
+      # Persistent threads also make one connection per THREAD possible, where
+      # before it was one per JOB: PG.connect + close costs 3.65 ms against
+      # 0.2 ms for the query it carried, so 18x the work was connection setup.
+      inbox   = SizedQueue.new(@concurrency)
+      threads = Array.new(@concurrency) { worker_thread(inbox, worker_id) }
 
       install_signal_handlers
 
       until stopping?
-        pool.reject! { |t| !t.alive? }
-        free = @concurrency - pool.size
-
-        if free <= 0
-          sleep 0.05
-          next
-        end
-
-        jobs = claim(conn, worker_id, [free, @batch_size].min)
+        jobs = claim(conn, worker_id, @batch_size)
 
         if jobs.empty?
           sleep @poll_interval
           next
         end
 
-        jobs.each do |job|
-          pool << Thread.new { execute(job, worker_id) }
-        end
+        # Blocks once every thread is busy. A claimed job waiting here is
+        # already `executing` in the database, which is why `inbox` is bounded
+        # by concurrency rather than by batch size -- an unbounded handoff
+        # would let a big batch sit claimed and un-run while its lease ticked.
+        jobs.each { |job| inbox.push(job) }
       end
 
-      drain(pool)
+      # One sentinel per thread, so each wakes and exits rather than blocking
+      # on an empty queue forever.
+      @concurrency.times { inbox.push(:stop) }
+      drain(threads)
       heartbeat.kill
       deregister(conn, worker_id)
       log "stopped"
@@ -153,6 +166,24 @@ module Stampeded
       log "reconnect failed: #{e.message}"
     end
 
+    # One long-lived thread, one long-lived reporting connection.
+    def worker_thread(inbox, worker_id)
+      Thread.new do
+        conn = nil
+        loop do
+          job = inbox.pop
+          break if job == :stop
+
+          # Opened on first use so an idle worker holds nothing, then kept for
+          # the life of the thread.
+          conn ||= PG.connect(Connection.connection_params)
+          conn = execute(job, worker_id, conn)
+        end
+      ensure
+        conn&.close
+      end
+    end
+
     # One job, on its own connection.
     #
     # A connection per in-flight job rather than per worker, because the job
@@ -162,7 +193,7 @@ module Stampeded
     # of the job, which is underway's documented trap: a pinned pooled
     # connection per in-flight job exhausts max_connections with a handful of
     # processes.
-    def execute(job, worker_id)
+    def execute(job, worker_id, conn)
       @in_flight.add(job.id)
       started = now_monotonic
 
@@ -174,23 +205,31 @@ module Stampeded
         # expires a merely-slow job and hands it to another worker while this
         # thread is still running it.
         with_job_timeout(job) { handler.call(JobContext.new(job, worker_id)) }
-        report(:complete, job, worker_id)
+        conn = report(:complete, job, worker_id, conn: conn)
       rescue Exception => e # rubocop:disable Lint/RescueException
         # Exception, not StandardError: a job that raises SignalException or
         # NoMemoryError must still be reported, or it sits in `executing` until
         # the reaper's dead_after elapses. Re-raised below if it is not ours to
         # swallow.
-        report(:fail, job, worker_id, error: e)
+        conn = report(:fail, job, worker_id, conn: conn, error: e)
         raise if e.is_a?(SignalException) || e.is_a?(SystemExit)
       ensure
         @in_flight.delete(job.id)
         log format("%s %s in %.3fs", job.task, job.id, now_monotonic - started)
       end
+
+      conn
     end
 
-    def report(outcome, job, worker_id, error: nil)
-      Connection.own do |c|
-        case outcome
+    # Reports on the CALLER'S connection.
+    #
+    # This used to be `Connection.own`, which opens a fresh PG connection and
+    # closes it -- once per job. Measured at 3.65 ms against 0.2 ms for the
+    # query it carried, so 18x the work was connection setup. Returns the
+    # connection so a reconnect can be handed back to the thread.
+    def report(outcome, job, worker_id, conn:, error: nil)
+      c = conn
+      case outcome
         when :complete
           r = c.exec_params("SELECT * FROM stampeded_complete($1, $2, $3)",
                             [job.queue, job.id, worker_id])
@@ -220,13 +259,19 @@ module Stampeded
           # Which transition SQL should have made depends on whether there was
           # budget left, and SQL decides that -- so check against what it
           # reported rather than against what we guessed.
-          verify_transition(r, r.ntuples.positive? && r[0]["now_state"] == "discarded" ? :discard : :retry)
-        end
+        verify_transition(r, r.ntuples.positive? && r[0]["now_state"] == "discarded" ? :discard : :retry)
       end
+      conn
     rescue PG::Error => e
       # Losing the report is survivable: the reaper reclaims the job once this
       # worker stops heartbeating. Losing the WORKER over it is not.
+      #
+      # The connection may be the casualty, though, and it is now reused for
+      # every subsequent job on this thread -- so replace it rather than hand
+      # back a dead socket.
       log "could not report #{outcome} for #{job.id}: #{e.message}"
+      reconnect(conn)
+      conn
     end
 
     # Check what SQL actually did against the declared lifecycle.
