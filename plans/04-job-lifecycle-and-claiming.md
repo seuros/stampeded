@@ -173,6 +173,22 @@ back into Oban's bug without knowing why the fence was there.
   mechanism and never switches off; the trigger is a latency accelerant that
   can be dropped with one `DROP TRIGGER`.
 - ~~completed-job retention and partitioning (blocked on `pg_partman` absence)~~
-  **answered in `13-retention-and-bloat.md`**: LIST-partition by state (two
-  leaves), no `pg_partman`, no time partitioning. Note that completion becomes
-  a cross-partition row move, which can raise SQLSTATE 40001 and needs a retry.
+  **answered — but NOT the way this entry used to say.** It recorded
+  `13-retention-and-bloat.md`'s original recommendation, LIST-partition by
+  **state**, and warned that completion becomes a cross-partition row move
+  which can raise SQLSTATE 40001 and needs a retry.
+
+  **That design was superseded.** `plans/README` §1 partitions by **queue**
+  instead, because a unique index on a partitioned table must contain the
+  partition key and uniqueness won the argument (`10-`). The consequences
+  invert:
+
+  - completion is an **in-place UPDATE**, not a row move, so there is no
+    cross-partition hazard and **no 40001 to retry** — the entry's warning
+    described a risk this design does not have;
+  - nothing is pruned by dropping a partition, so the pruner and autovacuum
+    carry the whole retention load, which is why the vacuum detector exists.
+
+  Still no `pg_partman` and still no time partitioning. Retention costs are
+  measured in `13-` §above: 330 bytes per completed job, and completed rows are
+  absent from the claim index because it is partial.

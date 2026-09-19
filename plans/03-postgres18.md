@@ -123,8 +123,11 @@ convenience.
 - **`pg_partman` is absent from this image.** So are **`pg_repack`** and
   **`pg_squeeze`** (re-verified 18.6). **Resolved** in
   `13-retention-and-bloat.md`: we do not add the extension and we do not
-  time-partition. Two LIST partitions by state, created once at install, no
-  runtime partition DDL at all.
+  time-partition. **LIST partitions by QUEUE** — `13-` originally proposed two
+  partitions by *state*, which `plans/README` §1 superseded because a unique
+  index on a partitioned table must contain the partition key and uniqueness
+  won that argument. Partitions are created by `stampeded_create_queue`, so
+  there is partition DDL at runtime, but only when someone adds a queue.
 - **Indexes on virtual generated columns** — see the correction above.
 
 Also present: `pg_stat_statements` 1.12, `pg_trgm` 1.6, `pgcrypto` 1.4,

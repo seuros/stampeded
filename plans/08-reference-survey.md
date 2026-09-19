@@ -71,7 +71,33 @@ reinvented.
 services. A job processor's hard problems are storage, claiming, visibility and
 retry semantics — almost none of which are network-middleware problems.
 
-**Unresolved: what does `rama` buy over plain axum/tokio here?** It gives a nice
-server surface for the part that is not hard. Worth answering explicitly before
-committing, rather than adopting a framework whose strengths are orthogonal to
-the bottleneck.
+~~**Unresolved: what does `rama` buy over plain axum/tokio here?**~~
+**ANSWERED, and the framing above was wrong.**
+
+The question assumed rama's strengths are network-middleware ones, which are
+orthogonal to a job processor's bottleneck. That is true of most of rama and
+irrelevant, because the one thing we use it for is not middleware:
+**`rama::http::sse::datastar`** — first-class Datastar SSE, with
+`PatchElements` and `ElementPatchMode` as types rather than strings we format
+by hand.
+
+The dashboard is Datastar (`06-`). axum has SSE but knows nothing about
+Datastar, so on axum the patch protocol would be our own string formatting,
+which is exactly the sort of thing that is fine until the protocol version
+moves. That is not orthogonal to anything; it is the specific reason.
+
+What we actually import, all of it:
+
+```
+rama::http::sse::datastar::{ElementPatchMode, PatchElements}
+rama::http::sse::{Event, server::KeepAlive}
+rama::http::service::web::{extract, response}
+rama::http::header, rama::tcp::server, rama::layer, rama::rt
+rama::futures::stream, rama::utils::str
+```
+
+A thin HTTP surface plus the Datastar types. The honest summary: rama is not
+carrying the hard parts — storage, claiming, visibility and retry semantics are
+all in SQL, exactly as this section says — and it was never going to. It is
+carrying the dashboard's wire protocol, and it is the only Rust HTTP framework
+that does.

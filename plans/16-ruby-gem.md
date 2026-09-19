@@ -351,9 +351,11 @@ over:
 1. **`ruby/setup-ruby@v1` had no version to install.** It falls back to
    `.ruby-version` or `.tool-versions`; this repo has neither (it uses mise).
    The action fails immediately with *"input ruby-version needs to be
-   specified"*. Now an explicit matrix over **3.2, 3.3 and 3.4** — the gemspec
-   claims `required_ruby_version >= 3.2.0`, and testing only the newest would
-   leave that claim unbacked.
+   specified"*. Now an explicit `ruby-version`, and a matrix that matches
+   whatever `required_ruby_version` claims — a matrix exists to make that claim
+   true rather than to look thorough. (It was **3.2, 3.3, 3.4** when this was
+   written against `>= 3.2.0`; the gem now requires **Ruby 4.0+**, so the
+   matrix is `["4.0"]`.)
 2. **`bundle exec rake test` ran at the repo root**, which has no Gemfile.
    `working-directory:` on the `setup-ruby` step governs only that step. Fixed
    with a job-level `defaults.run.working-directory: ruby`.

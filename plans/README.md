@@ -22,7 +22,7 @@ claim came from executing something, the output is quoted.
 | `10-unique-jobs.md` | uniqueness/dedup. **Uniqueness must be enforced by the index**, or the polyglot INSERT defeats it |
 | `11-scheduling-and-cron.md` | delayed jobs, cron, leader election, DST, `pg_cron` verdict |
 | `12-wakeup-and-notify.md` | polling vs LISTEN/NOTIFY; **trigger cost measured on 18.6** |
-| `13-retention-and-bloat.md` | retention, autovacuum, index bloat, **partitioning decided** (LIST by state) |
+| `13-retention-and-bloat.md` | retention, autovacuum, index bloat, partitioning (proposes LIST by state — **superseded by queue**, §1) |
 | `14-rust-stack.md` | rama vs axum, connection pooling, underway as prior art |
 | `15-failure-and-observability.md` | retry, backoff, failure taxonomy, timeouts, metrics |
 | `16-ruby-gem.md` | the ActiveJob adapter + precompiled binary, and why the Rust daemon cannot run a Ruby job |

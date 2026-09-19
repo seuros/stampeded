@@ -368,9 +368,10 @@ the loser gets zero.
 Put it in a **separate narrow table**, not on the jobs table.
 good_job and solid_queue both put the key on the jobs table and both had to
 guarantee cron rows are never pruned (`job.rb:894`; solid_queue README). `04-`
-already has an unresolved retention/partitioning question and `03-` records that
-`pg_partman` is absent — coupling cron correctness to job retention would make
-that question load-bearing for correctness. procrastinate's separate ledger
+had an open retention/partitioning question at the time (since answered, and
+answered differently from how it was first recorded) and `03-` records that
+`pg_partman` is absent — coupling cron correctness to job retention would have
+made that question load-bearing for correctness. procrastinate's separate ledger
 (`sql/schema.sql:81-88`) is the right precedent; it is prunable on its own
 horizon.
 

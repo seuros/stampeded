@@ -564,6 +564,28 @@ SQLSTATE **40001** — a serialization failure, i.e. retryable, i.e. exactly wha
 
 ### Recommendation
 
+> **SUPERSEDED on the partitioning key. Read this as the argument, not the
+> outcome.**
+>
+> This section recommends `PARTITION BY LIST (state)` with two leaves and "no
+> per-queue partitioning at v1". **What shipped is `PARTITION BY LIST (queue)`**
+> — see `plans/README` §1. The reason is not in this file, because it comes
+> from `10-unique-jobs.md`: a unique index on a partitioned table must contain
+> the partition key, so partitioning by state made `dedup_key` uniqueness
+> impossible, and uniqueness won.
+>
+> Two consequences invert, and both matter more than the key itself:
+>
+> - completion is an **in-place UPDATE**, not a cross-partition row move, so
+>   the SQLSTATE 40001 hazard this file warns about **does not arise**;
+> - **nothing is pruned by dropping a partition.** The pruner and autovacuum
+>   carry the whole retention load — which is exactly the downside this section
+>   identifies for the no-partitioning option, and is why the vacuum detector
+>   and `stampeded_vacuum_health` exist.
+>
+> Everything below about autovacuum settings, the cleaner, bloat detection and
+> retention cost still stands; only the key changed.
+
 **Two partitions by state, plus River's cleaner, plus Oban's autovacuum
 settings, plus pg-boss's detection. No `pg_partman`, no time partitioning, no
 per-queue partitioning at v1.**
