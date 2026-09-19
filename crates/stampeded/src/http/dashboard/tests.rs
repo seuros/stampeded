@@ -360,3 +360,32 @@ fn truncation_is_safe_at_every_offset() {
         assert!(out.len() <= n || s.len() <= n, "too long at {n}");
     }
 }
+
+/// The operator console must not depend on the internet.
+///
+/// The dashboard used to `<script src>` jsdelivr, so the tool you open when
+/// production is unhappy needed a working CDN *and* egress from the browser of
+/// whoever was looking. An air-gapped deployment got a blank page.
+///
+/// plans/14 §1.5 cited rama's embedded Datastar as a reason to CHOOSE rama --
+/// "no Node toolchain in the deployment, verifiably rather than
+/// aspirationally" -- while the dashboard loaded from a CDN anyway. Arguing
+/// for a capability and not using it is how that gap survives review, so this
+/// asserts the property rather than trusting the intent.
+#[test]
+fn the_dashboard_loads_no_external_assets() {
+    let html = INDEX;
+
+    for host in ["http://", "https://", "//cdn.", "jsdelivr", "unpkg", "cdnjs"] {
+        assert!(
+            !html.contains(host),
+            "the dashboard references {host:?}; it must serve its own assets"
+        );
+    }
+
+    // And it must still load Datastar from somewhere, or the page is inert.
+    assert!(
+        html.contains("/dashboard/datastar.js"),
+        "the dashboard does not load Datastar at all"
+    );
+}

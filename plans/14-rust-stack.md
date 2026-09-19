@@ -182,10 +182,21 @@ against it:
 1. `rama-http-types/src/body/sse/datastar/` — typed events (`PatchElements`,
    `PatchSignals`, `ExecuteScript`), with a `ReadSignals` extractor
    (`rama-http/src/service/web/endpoint/extract/datastar.rs`) and
-   `DatastarScript`, which `include_str!`s datastar.js **1.0.3** straight into
-   the binary (`rama-http/src/service/web/endpoint/response/datastar.rs:16-22`).
-   That delivers `06-dashboard-and-mcp.md`'s "no Node toolchain in the
-   deployment" verifiably rather than aspirationally.
+   `DatastarScript`, which `include_str!`s datastar.js straight into the
+   binary (`rama-http-0.4.0/.../response/datastar.rs:17`; the embedded copy is
+   **1.0.2**, not 1.0.3 as first recorded). That delivers
+   `06-dashboard-and-mcp.md`'s "no Node toolchain in the deployment" verifiably
+   rather than aspirationally.
+
+   > **It was argued for and then not used, for weeks.** The dashboard shipped
+   > with `<script src="https://cdn.jsdelivr.net/...datastar@v1.0.0...">` — so
+   > the operator console needed a working CDN *and* browser egress, at the
+   > moment someone opened it because production was unhappy. Air-gapped
+   > deployments got a blank page. Fixed by serving
+   > `GET /dashboard/datastar.js` from `DatastarScript`, with a test asserting
+   > the page references no external host. Found by looking at the dashboard,
+   > which nobody had done — every check had been `curl -o /dev/null -w
+   > '%{http_code}'`, and a page that loads a broken script still returns 200.
 2. **A working Datastar dashboard in-repo: 7,681 lines**,
    `rama-cli/src/cmd/serve/proxy/dashboard/` — a live traffic inspector on the
    same Router + SSE + Datastar stack, with render coalescing

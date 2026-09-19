@@ -61,7 +61,7 @@ const INDEX: &str = r##"<!doctype html>
 <head>
 <meta charset="utf-8">
 <title>Stampeded</title>
-<script type="module" src="https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.0/bundles/datastar.js"></script>
+<script type="module" src="/dashboard/datastar.js"></script>
 <style>
   :root { color-scheme: dark light; --dim: color-mix(in srgb, currentColor 55%, transparent) }
   body { font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 1.5rem 2rem; max-width: 100rem }
@@ -256,6 +256,27 @@ fn render_wakeups(state: &ApiState) -> Option<Event<PatchElements>> {
     patch(format!(
         r#"<span id="wakeups" class="{class}">{text}</span>"#
     ))
+}
+
+/// Datastar itself, served from the binary.
+///
+/// It used to be a `<script src>` pointing at jsdelivr, which meant the
+/// operator console required internet access -- and required it from the
+/// browser of whoever was looking at it, at the moment they were looking.
+/// That is backwards for the tool you open when production is unhappy: an
+/// air-gapped deployment got a blank page, and a CDN outage took the
+/// dashboard with it.
+///
+/// `plans/14` §1.5 cited rama's embedded script as a REASON to choose rama --
+/// "no Node toolchain in the deployment, verifiably rather than
+/// aspirationally" -- and then the dashboard loaded from a CDN anyway. The
+/// capability was argued for and not used.
+///
+/// rama's copy is 1.0.2; the CDN pin was v1.0.0. Taking rama's keeps the
+/// client in step with the `PatchElements` encoder that generates the events,
+/// which is the version that actually has to match.
+pub async fn script() -> impl IntoResponse {
+    rama::http::service::web::response::DatastarScript::new()
 }
 
 async fn render_queues(state: &ApiState, p: &Params) -> Option<Event<PatchElements>> {
