@@ -5,7 +5,6 @@ ActiveJob adapter, a worker, and a launcher for the precompiled daemon.
 
 ```ruby
 gem "stampeded"
-gem "stampeded-daemon"   # optional: the precompiled binary
 ```
 
 ```ruby

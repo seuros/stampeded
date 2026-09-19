@@ -131,7 +131,7 @@ Rust handlers are registered in-process
 
 ```ruby
 gem "stampeded"
-gem "stampeded-daemon"   # optional: the precompiled binary
+# The daemon binary ships inside the gem, one build per platform.
 ```
 
 ```ruby
@@ -159,7 +159,6 @@ crates/stampeded/  one crate, features gate the weight
   src/mcp/        MCP control plane, on mcp-host              [feature: mcp]
   src/bin/        `stampeded` (daemon) and `stampeded-mcp`
 ruby/             the `stampeded` gem: ActiveJob adapter, worker, schedules
-ruby-daemon/      the `stampeded-daemon` gem: one binary per platform
 ```
 
 One crate rather than a workspace of four, because the four bought nothing:

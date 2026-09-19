@@ -53,13 +53,13 @@ jobs:
 
   ruby:
     runs-on: ubuntu-latest
-    # The gemspec claims `required_ruby_version >= 3.2.0`. Testing only the
-    # newest would make that claim unbacked, and 3.2 is where it would break
-    # first.
+    # The gemspec requires Ruby >= 4.0, so that is what gets tested. A matrix
+    # is what makes a required_ruby_version claim true rather than aspirational
+    # -- it exists to cover the supported range, not to look thorough.
     strategy:
       fail-fast: false
       matrix:
-        ruby: ["3.2", "3.3", "3.4"]
+        ruby: ["4.0"]
 
     # Every `run` in this job is in the gem directory. Without this the steps
     # execute at the repo root, which has no Gemfile -- `bundle exec` fails

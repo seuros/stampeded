@@ -34,7 +34,7 @@ SQL functions. §5 is about keeping that surface as small as possible.
 
 **The Rust daemon cannot execute an ActiveJob job.**
 
-An ActiveJob job is a Ruby class. `stampeded-daemon` executes handlers registered
+An ActiveJob job is a Ruby class. The daemon executes handlers registered
 in Rust via `Worker::register`. There is no arrangement in which a Rust process
 calls `UserMailer.welcome(42).deliver_now`.
 
@@ -74,37 +74,53 @@ Ruby and pays for it in a supervisor, a dispatcher and a scheduler process.
 
 ## 3. Gem layout
 
-Two gems, following the `tailwindcss-rails` / `tailwindcss-ruby` split
-(VERIFIED: both installed locally; `tailwindcss-ruby` 4.3.3 ships 9 platform
-gems — `arm64-darwin`, `x86_64-darwin`, `{aarch64,x86_64}-linux-{gnu,musl}`,
-`x64-mingw-ucrt`, `x64-mingw32`, and a plain `ruby` fallback).
+**One gem, built once per platform, with the daemon binary inside it.**
 
-- **`stampeded`** — pure Ruby, no platform. ActiveJob adapter, `Stampeded.enqueue`,
-  the worker loop, the Rails generator. Depends on `pg` (or `activerecord`).
-- **`stampeded-daemon`** — platform gems, one precompiled `stampeded` binary each,
-  resolved at runtime by `Gem::Platform.local`.
+~~Two gems, following the `tailwindcss-rails` / `tailwindcss-ruby` split~~ —
+that was the plan, and it is worth recording why it was reversed rather than
+quietly rewritten.
 
-Why split rather than fatten `stampeded` into platform variants: a deployment
-that already runs the daemon under systemd or in its own container should not
-download a 10 MB binary per app server to get `perform_later`. `tailwindcss-rails`
-makes exactly this split and `tailwindcss-ruby` is an optional dependency for
-the same reason.
+The argument for splitting was real: a deployment already running the daemon
+under systemd or in its own container should not download a ~10 MB binary on
+every app server just to get `perform_later`. `tailwindcss-rails` makes exactly
+this split for exactly this reason.
 
-**The binary-resolution shape is `tailwindcss-ruby`'s** (VERIFIED, read from
-`lib/tailwindcss/ruby.rb`): `exe/<platform>/<binary>` plus a shim, an
-`ExecutableNotFoundException` naming the platform when it is missing, and a
-`TAILWINDCSS_INSTALL_DIR` escape hatch. We want the escape hatch —
-`STAMPEDED_INSTALL_DIR` — because anyone building for a platform we do not ship
-needs a supported way in, and because it is what makes the gem testable against
-a locally-built debug binary.
+**Overruled on cost.** A second package is a second thing to publish, version,
+release-note and keep in step, and a version skew between them is a support
+burden that the split's benefit — a few megabytes — does not pay for. People
+who need the daemon have it; people who do not never run it. The binary sits
+on disk unused, which is the cheapest possible failure mode.
 
-**Cross-compilation:** the owner's own `breaker_machines` and `chrono_machines`
-already ship `aarch64-linux`, `arm64-darwin` and `x86_64-linux` platform gems
-(VERIFIED in this repo's `Gemfile.lock`), so the pipeline exists. Note the
-difference: those are **linked extensions** (`.bundle` per Ruby ABI under
-`lib/<name>_native/<abi>/`, VERIFIED — 3.4 and 4.0 side by side), whereas this
-is a **standalone executable** and therefore has no Ruby ABI dimension at all.
-One binary per platform, not per platform × Ruby version.
+What the single gem ships, per platform:
+
+```
+lib/                     the adapter, worker, generator, rake tasks
+schema/*.sql             STAGED from the repo root by `rake stage_schema`
+exe/<platform>/stampeded the daemon binary
+```
+
+Platforms: `{arm64,x86_64}-darwin` and `{aarch64,x86_64}-linux-{gnu,musl}`,
+plus a **platformless** build carrying no binary, which is what anyone on a
+platform we do not cross-compile for gets. `Daemon::executable` raises
+`DaemonNotFound` there, naming the platform and telling them to
+`cargo build --release` and point `STAMPEDED_INSTALL_DIR` at it.
+
+One binary per platform and **no Ruby-ABI dimension**: this is a standalone
+executable, not a linked extension. (`breaker_machines` and `chrono_machines`
+ship per platform AND per Ruby ABI because they are extensions; a daemon does
+not care which Ruby is running.)
+
+### The staging step is load-bearing
+
+`schema/` and `exe/` are not in git — they are copied in before `gem build`.
+That is not tidiness, it is a bug fix: `spec.files` listed `schema/*.sql`
+relative to `ruby/`, where no such directory existed, so **the gem shipped zero
+SQL files**. `Schema.install!` looks for them at `<gem_root>/schema` and falls
+back to the repo checkout, so every test passed and every real install would
+have failed at `stampeded:install` with "cannot find schema/*.sql".
+
+Caught by building the gem and listing its contents, which nothing had done.
+
 
 ## 4. The ActiveJob adapter
 
@@ -249,7 +265,7 @@ meaningless, so nothing errors.
 - **Six platforms**: `{arm64,x86_64}-darwin` and
   `{aarch64,x86_64}-linux-{gnu,musl}`. musl is not optional — most container
   images are Alpine, where a gnu binary fails at `exec` with a linker error.
-- **`stampeded-daemon` is optional**, matching `tailwindcss-rails`. The
+- **The daemon is optional.** The
   `DaemonNotFound` message names the platform, gives the gem line, gives the
   cargo command, and says the queue works without it — because "not found" on
   its own sends people reading source.

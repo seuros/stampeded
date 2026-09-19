@@ -9,3 +9,72 @@ Rake::TestTask.new(:test) do |t|
 end
 
 task default: :test
+
+# ---------------------------------------------------------------------------
+# Packaging.
+#
+# One gem, built once per platform, with the daemon binary inside it. This was
+# a second gem (`stampeded-daemon`); see the gemspec for why it is not any more.
+# ---------------------------------------------------------------------------
+
+require "fileutils"
+
+# Platforms we ship.
+#
+# musl is not optional: most container images are Alpine, and a gnu binary
+# there fails at exec with a linker error rather than anything actionable.
+PLATFORMS = {
+  "arm64-darwin"       => "aarch64-apple-darwin",
+  "x86_64-darwin"      => "x86_64-apple-darwin",
+  "aarch64-linux-gnu"  => "aarch64-unknown-linux-gnu",
+  "x86_64-linux-gnu"   => "x86_64-unknown-linux-gnu",
+  "aarch64-linux-musl" => "aarch64-unknown-linux-musl",
+  "x86_64-linux-musl"  => "x86_64-unknown-linux-musl"
+}.freeze
+
+WORKSPACE = File.expand_path("..", __dir__)
+
+desc "Copy schema/*.sql in from the repo root, ready to package"
+task :stage_schema do
+  # NOT a symlink: `gem build` from an exported tarball would dangle. The Rust
+  # side applies these same files, so the repo root is the one definition and
+  # this is a copy of it.
+  dest = File.join(__dir__, "schema")
+  FileUtils.mkdir_p(dest)
+  FileUtils.cp(Dir[File.join(WORKSPACE, "schema", "*.sql")], dest)
+  puts "staged #{Dir[File.join(dest, '*.sql')].size} schema file(s)"
+end
+
+desc "Build the daemon binary for one rubygems platform"
+task :build_binary, [:platform] do |_t, args|
+  platform = args[:platform] or abort "usage: rake build_binary[arm64-darwin]"
+  target = PLATFORMS.fetch(platform) { abort "unknown platform #{platform}" }
+
+  sh "cargo build --release --bin stampeded --target #{target} " \
+     "--manifest-path #{WORKSPACE}/Cargo.toml"
+
+  dest = File.join(__dir__, "exe", platform)
+  FileUtils.mkdir_p(dest)
+  FileUtils.cp(File.join(WORKSPACE, "target", target, "release", "stampeded"),
+               File.join(dest, "stampeded"))
+  FileUtils.chmod(0o755, File.join(dest, "stampeded"))
+end
+
+desc "Package the gem for one platform, binary included"
+task :package, [:platform] => :stage_schema do |_t, args|
+  platform = args[:platform] or abort "usage: rake package[arm64-darwin]"
+  Rake::Task["build_binary"].invoke(platform)
+  ENV["STAMPEDED_GEM_PLATFORM"] = platform
+  sh "gem build stampeded.gemspec"
+end
+
+desc "Package the platformless gem: no binary, for platforms we do not build"
+task package_generic: :stage_schema do
+  ENV.delete("STAMPEDED_GEM_PLATFORM")
+  sh "gem build stampeded.gemspec"
+end
+
+desc "List shippable platforms"
+task :platforms do
+  PLATFORMS.each { |gem_plat, rust| puts format("  %-20s %s", gem_plat, rust) }
+end

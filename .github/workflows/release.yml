@@ -75,26 +75,26 @@ jobs:
       - uses: actions/download-artifact@v4
         with: { path: artifacts }
 
+      # One gem per platform, binary inside. `rake stage_schema` copies
+      # schema/*.sql in from the repo root -- without it the gem ships no
+      # schema and every install fails at stampeded:install.
       - name: Assemble platform gems
-        working-directory: ruby-daemon
+        working-directory: ruby
         run: |
           set -euo pipefail
+          bundle exec rake stage_schema
           for dir in ../artifacts/stampeded-*; do
             plat="${dir#../artifacts/stampeded-}"
             mkdir -p "exe/$plat"
             cp "$dir/stampeded" "exe/$plat/stampeded"
             chmod +x "exe/$plat/stampeded"
-            STAMPEDED_GEM_PLATFORM="$plat" gem build stampeded-daemon.gemspec
+            STAMPEDED_GEM_PLATFORM="$plat" gem build stampeded.gemspec
           done
+          # And the platformless one, for platforms we do not cross-compile.
+          bundle exec rake package_generic
           ls -la ./*.gem
-
-      - name: Build the pure-Ruby gem
-        working-directory: ruby
-        run: gem build stampeded.gemspec
 
       - uses: actions/upload-artifact@v4
         with:
           name: gems
-          path: |
-            ruby-daemon/*.gem
-            ruby/*.gem
+          path: ruby/*.gem

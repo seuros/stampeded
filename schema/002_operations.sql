@@ -1,40 +1,8 @@
--- Stampeded — operations
---
--- The semantics live here. 001 encodes the decisions; this file encodes the
--- rules that make them correct.
---
--- Everything is a FUNCTION rather than daemon-side SQL, deliberately: one round
--- trip, atomic, and callable from any language with a Postgres driver. That is
--- the polyglot story in plans/05 — a Python worker calls stampeded_claim() and
--- gets the same fence, the same attempt accounting and the same transition
--- rules as the Rust daemon, because there is only one implementation.
-
--- ---------------------------------------------------------------------------
--- CLAIM
---
--- Two things in here are load-bearing and will look like noise to a reader:
---
--- (1) `AS MATERIALIZED` on the CTE. This is Oban's "optimization fence"
---     (basic.ex:119): without it the planner may nested-loop the LIMIT subquery
---     and update MORE ROWS THAN LIMIT, pushing attempt past max_attempts. Note
---     Oban's own comment predates PG12 — since PG12 a plain CTE is INLINED by
---     default, which defeats the fence entirely. On 18 the keyword is required,
---     not optional. An earlier draft of plans/04 claimed RETURNING OLD./NEW.
---     made the fence unnecessary; that was wrong. You still need to pick N rows,
---     which still needs a LIMIT subquery, which still needs the fence.
---
--- (2) `attempt = attempt + 1` HERE, at claim, not at failure. plans/04: half of
---     twelve surveyed implementations have an unbounded poison loop, and this is
---     the difference. A job that segfaults its worker has already spent the
---     attempt, so max_attempts is eventually reached. If the increment moves to
---     the failure path, a worker-killing job is re-claimed forever.
--- ---------------------------------------------------------------------------
 CREATE FUNCTION stampeded_claim(
     p_queue     text,
     p_worker_id uuid,
     p_limit     integer DEFAULT 1,
-    -- Injectable clock (River's `coalesce($now, now())`). Makes scheduling
-    -- testable without sleeping.
+
     p_now       timestamptz DEFAULT NULL
 ) RETURNS SETOF stampeded_jobs
 LANGUAGE sql AS $$
@@ -89,18 +57,6 @@ LANGUAGE sql AS $$
     RETURNING j.*;
 $$;
 
--- ---------------------------------------------------------------------------
--- COMPLETE
---
--- Returns the prior state via PG18 `RETURNING OLD.`. This is where that feature
--- earns its place (plans/03): the caller learns atomically whether it actually
--- owned the transition, so a worker that lost its job to the reaper mid-flight
--- finds out instead of silently completing a job someone else is running.
---
--- `dedup_scope = NULL` releases the uniqueness slot as part of the SAME update
--- (plans/10). Keys can only LEAVE the index, so no transition can ever raise
--- 23505 — River's whole conflict-CTE and its shipped bug are designed out.
--- ---------------------------------------------------------------------------
 CREATE FUNCTION stampeded_complete(
     p_queue     text,
     p_id        uuid,
@@ -122,27 +78,6 @@ LANGUAGE sql AS $$
     RETURNING OLD.state, NEW.state, true;
 $$;
 
--- ---------------------------------------------------------------------------
--- FAIL
---
--- One entry point for every failure, with the KIND recorded separately from the
--- count. plans/15: only BullMQ and solid_queue distinguish "the worker died"
--- from "the job raised", and it is the thing that makes poison jobs diagnosable.
---
--- Backoff is NOT computed here. chrono-machines owns it (full jitter by
--- default, which not one of thirteen surveyed implementations does) and passes
--- the resulting instant in. Putting the formula in SQL would fork it.
--- ---------------------------------------------------------------------------
--- Error fingerprint: the normalisation that makes failures CLUSTER.
---
--- "connection to 10.0.0.7:5432 timed out after 30012ms" and
--- "connection to 10.0.0.9:5432 timed out after 29998ms" are one incident, but
--- as raw strings they are two. Strip the parts that vary per occurrence —
--- UUIDs, hex blobs, numbers — and hash what survives. Nobody in the survey
--- does this, which is why every `failure_summary` equivalent lists instances
--- instead of causes.
---
--- IMMUTABLE so it can be computed in an index or a generated column later.
 CREATE FUNCTION stampeded_fingerprint(p_error text) RETURNS bytea
 LANGUAGE sql IMMUTABLE AS $$
     SELECT sha256(convert_to(
@@ -156,41 +91,15 @@ LANGUAGE sql IMMUTABLE AS $$
         'UTF8')::bytea);
 $$;
 
--- ---------------------------------------------------------------------------
--- FAIL
---
--- Three outcomes, decided by WHY the job failed rather than only by how many
--- times it has (plans/15).
---
---   breaker_open      -- our backpressure. REFUNDS the attempt.
---   worker-death      -- charges `interruptions`, a separate and much tighter
---                        budget than `attempt`.
---   everything else   -- charges `attempt`, which was already spent at claim.
---
--- On a terminal outcome the job dead-letters if a queue is configured, because
--- pg-boss is right that the DLQ should be a QUEUE: re-drive is then just
--- working it, and every tool that understands jobs already understands it.
--- ---------------------------------------------------------------------------
 CREATE FUNCTION stampeded_fail(
     p_queue        text,
     p_id           uuid,
     p_worker_id    uuid,
     p_kind         text,
     p_error        text,
-    -- A DELAY, not an instant.
-    --
-    -- Taking an absolute timestamptz computed on the caller makes retry timing
-    -- depend on the app server and the database agreeing about the time. A
-    -- server 30s ahead delays every retry by 30s; a fleet with mixed skew
-    -- behaves inconsistently; and it is invisible in development, where skew is
-    -- a few milliseconds. Measured at 3ms locally -- enough to make a retry
-    -- scheduled for "now" not ready yet.
-    --
-    -- The database applies its own clock, so there is nothing to agree about.
+
     p_retry_delay_ms bigint DEFAULT NULL,
-    -- Exit status, when the daemon supervises the worker process and saw it
-    -- die. 137 is OOM. plans/15 calls this the cheapest, highest-signal
-    -- artefact in the survey, and it is thrown away everywhere else.
+
     p_exit_status  integer DEFAULT NULL
 ) RETURNS TABLE (was text, now_state text, dead_lettered boolean)
 LANGUAGE plpgsql AS $$
@@ -302,14 +211,6 @@ BEGIN
 END;
 $$;
 
--- ---------------------------------------------------------------------------
--- TOUCH — a long job proving it is alive
---
--- Layer 3 of the timeout stack (plans/15), pg-boss's touchJobs. The worker
--- heartbeat says the PROCESS is alive; this says this particular JOB is still
--- progressing. Without it a legitimately long job and a wedged one look
--- identical, and the only available response is to guess a timeout.
--- ---------------------------------------------------------------------------
 CREATE FUNCTION stampeded_touch(p_queue text, p_id uuid, p_worker_id uuid)
 RETURNS boolean
 LANGUAGE sql AS $$
@@ -319,50 +220,6 @@ LANGUAGE sql AS $$
     RETURNING true;
 $$;
 
--- ---------------------------------------------------------------------------
--- CHECKPOINT — save resume state
---
--- plans/17. Returns the new sequence number, or NULL if this worker no longer
--- owns the job.
---
--- THE OWNERSHIP CHECK IS NOT A FORMALITY HERE. The sequence that makes it
--- matter: worker A checkpoints at 50k and its host wedges; the reaper decides A
--- is dead and returns the job; worker B claims it, resumes from 50k and
--- checkpoints at 60k; then A WAKES UP and writes 51k. Without the predicate,
--- A's stale write moves the cursor BACKWARDS and B's next attempt redoes 9,000
--- units of work -- or does them twice, if the job is not perfectly idempotent.
---
--- It also sets heartbeat_at: a job that just saved progress is demonstrably
--- alive, and requiring a separate stampeded_touch would be asking the caller to
--- say the same thing twice. Forgetting that second call would let a job which
--- is plainly working get expired out from under itself.
---
--- AND IT RESETS `interruptions`, which is the interesting decision (plans/17
--- §4). The two counters mean different things: `interruptions` exists to stop a
--- job that KILLS WORKERS from walking the fleet one process at a time, and a
--- job that checkpointed at 50k and then died is demonstrably not that job -- it
--- ran, it worked, something else killed it. `attempt` is untouched and still
--- increments at claim, so a job that progresses one unit and then dies forever
--- is still discarded at max_attempts. Progress buys tolerance of
--- INFRASTRUCTURE failure and buys nothing against a job that is simply broken.
--- ---------------------------------------------------------------------------
--- Warn when a checkpoint looks like a result set rather than a cursor.
---
--- The 64 KB CHECK is a hard stop that catches only the pathological case, and
--- it catches it by failing the job -- at which point the work is already lost.
--- The misuse it exists for is gradual: storing the 100,000 processed ids
--- instead of "I have done 100,000". That has a SHAPE, and the shape is
--- detectable. A cursor ADVANCES, so it stays about the same size while its
--- value changes. A result set ACCUMULATES, so it grows on every write.
---
--- So: warn when the checkpoint is both large and still growing. Neither
--- condition alone means anything -- a big constant checkpoint is fine, and a
--- small growing one has room -- but together they are a job heading for the
--- cap, and the warning arrives with thousands of writes left to act on.
---
--- A WARNING, never an ERROR. The job is working, and the 64 KB CHECK is
--- already the enforcement; turning a heuristic into a hard failure would
--- discard jobs over a guess about intent.
 CREATE FUNCTION stampeded_checkpoint(
     p_queue     text,
     p_id        uuid,
@@ -418,17 +275,6 @@ BEGIN
 END;
 $$;
 
--- ---------------------------------------------------------------------------
--- EXPIRE — the timeout that fires when nobody is alive to fire it
---
--- Layer 2 of the three. The in-process tokio timeout cannot fire if the worker
--- is dead, and the reaper only helps once the worker has stopped heartbeating
--- entirely -- a worker that is alive and healthy but stuck on one job is
--- invisible to both. This catches exactly that.
---
--- Routes through the NORMAL fail path so it consumes a retry, backs off and
--- dead-letters like any other failure. pg-boss's failJobsByTimeout.
--- ---------------------------------------------------------------------------
 CREATE FUNCTION stampeded_expire(p_limit integer DEFAULT 100)
 RETURNS TABLE (out_id uuid, out_queue text, out_worker uuid)
 LANGUAGE plpgsql AS $$
@@ -454,18 +300,6 @@ BEGIN
 END;
 $$;
 
--- ---------------------------------------------------------------------------
--- REAP — orphan recovery
---
--- plans/04: heartbeat, NOT a time lease. Every other Postgres queue surveyed
--- uses a lease (Oban OSS 60 min, Graphile 4 h, pg-boss 15 min); solid_queue is
--- the exception and the prior art. A lease turns a slow job into duplicate
--- execution because correctness depends on guessing maximum job duration.
---
--- The attempt was already spent at claim, so a job whose worker keeps dying
--- walks its attempt budget down and eventually discards itself. That is the
--- poison-job brake, and it costs nothing here.
--- ---------------------------------------------------------------------------
 CREATE FUNCTION stampeded_reap(
     p_dead_after interval DEFAULT interval '5 minutes'
 ) RETURNS TABLE (id uuid, queue text, worker_id uuid)
@@ -504,28 +338,6 @@ LANGUAGE sql AS $$
     RETURNING j.id, j.queue, d.id;
 $$;
 
--- ---------------------------------------------------------------------------
--- PRUNE
---
--- plans/13: River's cleaner shape — bounded batch, never an unbounded DELETE.
--- With partitioning by queue there is no state partition to drop, so pruning
--- and autovacuum are the ONLY defence against unbounded growth. A single
--- unbounded DELETE on a large table holds locks and bloats worse than what it
--- reclaims.
---
--- Returns the count so the caller can loop until it returns < p_limit, which is
--- how River avoids both a long transaction and an unfinished sweep.
--- ---------------------------------------------------------------------------
--- TWO retention clocks, not one (pg-boss's shape).
---
--- A completed job is evidence nobody will read; a discarded one is evidence
--- somebody is about to be paged about. Keeping them for the same duration means
--- either drowning in successes or deleting failures before anyone can look at
--- them -- and Oban's 60-second default does exactly the latter, destroying the
--- evidence before the alert has fired.
---
--- Defaults: 1 hour for completed (between Oban's 60s and River's 24h), 7 days
--- for discarded and cancelled (River's number).
 CREATE FUNCTION stampeded_prune(
     p_older_than interval DEFAULT interval '1 hour',
     p_limit      integer  DEFAULT 10000,
@@ -564,20 +376,6 @@ LANGUAGE sql AS $$
     SELECT count(*)::int FROM deleted;
 $$;
 
--- ---------------------------------------------------------------------------
--- VACUUM HEALTH
---
--- plans/13 item 5: pg-boss's #checkVacuum is the single most valuable
--- operational feature in the survey, because it converts the queue's
--- characteristic death spiral from "mysterious slow backlog" into a named
--- cause. A queue table is the pathological autovacuum case -- constant UPDATEs
--- over a small hot set -- and when autovacuum falls behind, everything simply
--- gets slower with no error anywhere.
---
--- Returns one row per partition: dead tuples, the threshold autovacuum will
--- actually use for THAT table (its own reloptions, not the global defaults --
--- which is the whole reason a naive n_dead_tup alert misfires), and when it
--- last ran.
 CREATE FUNCTION stampeded_vacuum_health()
 RETURNS TABLE (
     relname       text,
@@ -623,19 +421,6 @@ LANGUAGE sql AS $$
      ORDER BY s.n_dead_tup DESC;
 $$;
 
--- ---------------------------------------------------------------------------
--- INDEX DENSITY
---
--- plans/13 item 4: reindex on a MEASUREMENT, not on a schedule. River rebuilds
--- everything at midnight; pg-boss computes entries-per-page and only rebuilds
--- what is actually sparse. The heuristic is pg-boss's (minPages 128, and an
--- index is suspect below ~5 entries per page).
---
--- pg-boss calibrated its numbers against v4 UUIDs and notes that random keys
--- defeat btree deduplication. Ours are uuidv7 and time-ordered, so healthy
--- density should be HIGHER and this gate should hold with more margin --
--- inferred, not measured, so treat a positive as a prompt to look rather than
--- as a verdict.
 CREATE FUNCTION stampeded_index_density()
 RETURNS TABLE (
     indexname   text,
@@ -670,35 +455,11 @@ LANGUAGE sql AS $$
      ORDER BY 4;
 $$;
 
--- ---------------------------------------------------------------------------
--- HEARTBEAT
--- ---------------------------------------------------------------------------
 CREATE FUNCTION stampeded_heartbeat(p_worker_id uuid) RETURNS void
 LANGUAGE sql AS $$
     UPDATE stampeded_workers SET last_heartbeat = now() WHERE id = p_worker_id;
 $$;
 
--- ---------------------------------------------------------------------------
--- Partitions that would enqueue silently.
---
--- The wakeup trigger is FOR EACH STATEMENT with a transition table, and
--- Postgres does NOT clone statement-level triggers to partitions -- verified
--- on 18.6: a `CREATE TABLE ... PARTITION OF stampeded_jobs` gets zero triggers,
--- and an INSERT straight into it notifies nobody. (Row-level triggers ARE
--- cloned, including to partitions created later, but a row-level wakeup costs
--- +3.5% per row against +1.2% for the statement form -- measured in plans/12 --
--- which is why the statement trigger was chosen.)
---
--- `stampeded_create_queue` attaches the trigger, so every partition made the
--- supported way is covered. This catches the unsupported way. The symptom it
--- prevents is nasty and quiet: jobs enqueued into that queue are CORRECT and
--- claimed on the poll interval, so nothing breaks -- latency just silently
--- becomes seconds instead of milliseconds, for one queue, for ever.
---
--- Detection rather than prevention, deliberately. An event trigger could
--- enforce it, at the cost of more plpgsql running on every DDL statement in
--- the database (03-postgres18 resists exactly that), to stop a mistake this
--- reports in one query.
 CREATE FUNCTION stampeded_partition_health()
 RETURNS TABLE (
     partition      text,

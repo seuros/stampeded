@@ -12,9 +12,12 @@ module Stampeded
   # Binary resolution follows tailwindcss-ruby: exe/<platform>/<binary>, with
   # an install-dir escape hatch so a platform we do not ship, or a locally
   # built debug binary, has a supported way in.
+  #
+  # The binary lives in THIS gem. It used to be a separate `stampeded-daemon`
+  # gem; one package is simpler to publish and version, and the binary is a
+  # few MB.
   module Daemon
-    GEM_NAME = "stampeded-daemon"
-    BINARY   = "stampeded"
+    BINARY = "stampeded"
 
     module_function
 
@@ -37,11 +40,9 @@ module Stampeded
       raise DaemonNotFound, <<~MSG
         Could not find the stampeded daemon for #{platform}.
 
-        The daemon ships as a platform-specific gem. Add it:
-
-          gem "stampeded-daemon"
-
-        If there is no gem for #{platform}, build it from source and point at it:
+        The gem ships a binary for each platform it is built for, so this means
+        there is no build for #{platform} -- you have the platformless gem.
+        Build the daemon and point at it:
 
           cargo build --release
           export STAMPEDED_INSTALL_DIR=/path/to/stampeded/target/release
@@ -52,11 +53,14 @@ module Stampeded
       MSG
     end
 
+    # Relative to this file rather than via Gem::Specification.
+    #
+    # __dir__ is <root>/lib/stampeded, so ../.. is the gem root in an installed
+    # gem and the `ruby/` directory in a checkout -- one expression that works
+    # for both. Looking the gem up by name only worked installed, which is the
+    # case nobody tests.
     def bundled_path
-      spec = Gem::Specification.find_by_name(GEM_NAME)
-      File.join(spec.gem_dir, "exe", platform, BINARY)
-    rescue Gem::LoadError
-      nil
+      File.expand_path(File.join("../..", "exe", platform, BINARY), __dir__)
     end
 
     def available?

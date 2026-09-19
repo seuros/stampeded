@@ -32,8 +32,15 @@ class DaemonTest < Minitest::Test
       error = assert_raises(Stampeded::DaemonNotFound) { Stampeded::Daemon.executable }
 
       assert_match(/#{Regexp.escape(Stampeded::Daemon.platform)}/, error.message)
-      assert_match(/gem "stampeded-daemon"/, error.message)
+      # The binary ships in THIS gem now, so there is no second gem to suggest
+      # -- reaching this error means there is no build for your platform, and
+      # the only way out is to build one.
+      assert_match(/no build for/, error.message)
+      refute_match(/gem "stampeded-daemon"/, error.message,
+                   "there is no separate daemon gem any more")
       assert_match(/cargo build --release/, error.message)
+      assert_match(/STAMPEDED_INSTALL_DIR/, error.message,
+                   "must say how to point at the binary once built")
       assert_match(/OPTIONAL/, error.message,
                    "must say the queue works without it, or people will think it is required")
     end

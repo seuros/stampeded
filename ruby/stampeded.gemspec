@@ -21,11 +21,49 @@ Gem::Specification.new do |spec|
   spec.homepage = "https://github.com/seuros/stampeded"
   spec.license  = "BSD-3-Clause"
 
-  spec.required_ruby_version = ">= 3.2.0"
+  # Ruby 4.0+ only. Deliberately narrow rather than "whatever still parses":
+  # supporting a version means testing it, and the CI matrix is the honest
+  # statement of what is supported.
+  spec.required_ruby_version = ">= 4.0"
+  # ONE gem, with the binary in it.
+  #
+  # This was two gems -- `stampeded` pure Ruby and `stampeded-daemon` shipping
+  # the binary per platform, following the tailwindcss-rails/tailwindcss-ruby
+  # split. The argument was that a deployment already running the daemon
+  # elsewhere should not download a binary per app server just to get
+  # `perform_later`. Not worth a second package to publish, version and keep in
+  # step for a few MB: people who need the daemon have it, people who do not
+  # never run it.
+  #
+  # One binary per platform, and NO Ruby-ABI dimension: this is a standalone
+  # executable, not a linked extension. (breaker_machines and chrono_machines
+  # ship per platform AND per Ruby ABI because they are extensions; a daemon
+  # does not care which Ruby is running.)
+  #
+  # `schema/` and `exe/` are STAGED into this directory by `rake stage` before
+  # `gem build` -- they are not in git. The schema lives at the repo root
+  # because the Rust side applies the same files; copying rather than
+  # symlinking keeps `gem build` working from a tarball.
+  #
+  # The schema staging is load-bearing and was missing: `Dir["schema/*.sql"]`
+  # matched nothing, so the published gem shipped ZERO .sql files while
+  # Schema.install! looked for them at <gem_root>/schema. It worked in
+  # development only because that lookup falls back to the repo checkout, so
+  # every test passed and every gem user would have hit
+  # "cannot find schema/*.sql" on install.
+  spec.files = Dir["lib/**/*.rb", "lib/**/*.rake", "lib/generators/**/*",
+                   "schema/*.sql", "README.md", "LICENSE"]
 
-  spec.files = Dir["lib/**/*.rb", "lib/**/*.rake", "lib/generators/**/*", "schema/*.sql", "README.md", "LICENSE"]
+  if (gem_platform = ENV.fetch("STAMPEDED_GEM_PLATFORM", nil))
+    spec.platform = gem_platform
+    spec.files += Dir["exe/#{gem_platform}/*"]
+  end
   spec.require_paths = ["lib"]
 
+  # ActiveJob is optional at runtime -- the plain-Ruby worker needs none of it
+  # -- so it is not a hard dependency. But where the adapter DOES touch
+  # ActiveJob it targets 8.1+, which is what the railtie and the adapter are
+  # written and tested against.
   spec.add_dependency "pg", ">= 1.4"
   # The lifecycle is declared, not compared against string literals. Mirrors
   # crates/stampeded/src/lifecycle.rs so the two workers cannot disagree.
