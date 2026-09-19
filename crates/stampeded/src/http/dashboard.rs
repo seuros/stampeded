@@ -88,13 +88,23 @@ const INDEX: &str = r##"<!doctype html>
        color: var(--cyan-500) }
   h2 { font-size: .72rem; letter-spacing: .12em; text-transform: uppercase;
        color: var(--chrome-300); margin: 1.6rem 0 .35rem; font-weight: 600 }
-  table { border-collapse: collapse; width: 100% }
+  /* Size to content, not to the viewport.
+     `width: 100%` on a four-column table across a wide window puts `queue` at
+     the far left and its count 700px away, which is unreadable: the eye has to
+     travel to pair a label with its number. Tables here are narrow by nature --
+     a queue name and a count -- so they should be narrow. */
+  table { border-collapse: collapse; width: auto; max-width: 100% }
   th { text-align: left; font-weight: 600; color: var(--chrome-500);
        border-bottom: 1px solid var(--void-100);
-       padding: .2rem .9rem .2rem 0; font-size: .7rem; letter-spacing: .06em; text-transform: uppercase }
-  td { padding: .22rem .9rem .22rem 0; border-bottom: 1px solid var(--void-300);
+       padding: .2rem 1.75rem .2rem 0; font-size: .7rem; letter-spacing: .06em; text-transform: uppercase }
+  td { padding: .22rem 1.75rem .22rem 0; border-bottom: 1px solid var(--void-300);
        white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
   tbody tr:hover td { background: var(--void-400) }
+  th:last-child, td:last-child { padding-right: 0 }
+  /* Each table scrolls in its own box. Without this a wide table (jobs,
+     schedules) pushes the whole PAGE sideways on a narrow window, so the
+     header and nav slide out of view to read one error column. */
+  .t { overflow-x: auto; max-width: 100% }
   .n { text-align: right; font-variant-numeric: tabular-nums }
   /* Severity carries meaning, so it gets the saturated end of the palette. */
   .bad { color: var(--magenta-500) } .warn { color: var(--yellow-500) } .ok { color: var(--green-500) }
@@ -330,7 +340,7 @@ async fn render_queues(state: &ApiState, p: &Params) -> Option<Event<PatchElemen
 
     let ages = state.queue.oldest_available_age().await.unwrap_or_default();
 
-    let mut html = String::from(r#"<div id="queues"><h2>queues</h2><table>"#);
+    let mut html = String::from(r#"<div id="queues"><h2>queues</h2><div class="t"><table>"#);
     html.push_str(
         r#"<tr><th>queue</th><th>state</th><th class="n">jobs</th><th class="n">oldest</th></tr>"#,
     );
@@ -360,7 +370,7 @@ async fn render_queues(state: &ApiState, p: &Params) -> Option<Event<PatchElemen
             st = esc(&st),
         ));
     }
-    html.push_str("</table></div>");
+    html.push_str("</table></div></div>");
     patch(html)
 }
 
@@ -383,7 +393,7 @@ async fn render_destinations(state: &ApiState) -> Option<String> {
     }
 
     let mut html = String::from(
-        r#"<div id="destinations"><h2>destinations <span class="dim">— observed from job rows, last hour</span></h2><table><tr><th>destination</th><th class="n">refused</th><th class="n">throttled</th><th class="n">failed</th><th class="n">waiting</th><th>state</th></tr>"#,
+        r#"<div id="destinations"><h2>destinations <span class="dim">— observed from job rows, last hour</span></h2><div class="t"><table><tr><th>destination</th><th class="n">refused</th><th class="n">throttled</th><th class="n">failed</th><th class="n">waiting</th><th>state</th></tr>"#,
     );
     for r in rows {
         let (class, label) = if r.refused > 0 {
@@ -402,7 +412,7 @@ async fn render_destinations(state: &ApiState) -> Option<String> {
             wait = r.waiting,
         ));
     }
-    html.push_str("</table></div>");
+    html.push_str("</table></div></div>");
     Some(html)
 }
 
@@ -413,7 +423,7 @@ async fn render_failures(state: &ApiState) -> Option<String> {
     }
 
     let mut html = String::from(
-        r#"<div id="failures"><h2>failures <span class="dim">— clustered by fingerprint</span></h2><table><tr><th class="n">n</th><th>kind</th><th>error</th><th>destination</th></tr>"#,
+        r#"<div id="failures"><h2>failures <span class="dim">— clustered by fingerprint</span></h2><div class="t"><table><tr><th class="n">n</th><th>kind</th><th>error</th><th>destination</th></tr>"#,
     );
     for r in rows {
         let kind = r.failure_kind.unwrap_or_default();
@@ -433,7 +443,7 @@ async fn render_failures(state: &ApiState) -> Option<String> {
             dest = esc(r.destination.as_deref().unwrap_or("")),
         ));
     }
-    html.push_str("</table></div>");
+    html.push_str("</table></div></div>");
     Some(html)
 }
 
@@ -444,7 +454,7 @@ async fn render_schedules(state: &ApiState) -> Option<String> {
     }
 
     let mut html = String::from(
-        r#"<div id="schedules"><h2>schedules</h2><table><tr><th>key</th><th>rule</th><th>task</th><th>next</th><th>last</th></tr>"#,
+        r#"<div id="schedules"><h2>schedules</h2><div class="t"><table><tr><th>key</th><th>rule</th><th>task</th><th>next</th><th>last</th></tr>"#,
     );
     for r in rows {
         let rule = match (&r.cron_expr, r.interval_secs) {
@@ -465,7 +475,7 @@ async fn render_schedules(state: &ApiState) -> Option<String> {
                 .unwrap_or_else(|| "never".into()),
         ));
     }
-    html.push_str("</table></div>");
+    html.push_str("</table></div></div>");
     Some(html)
 }
 
@@ -510,7 +520,7 @@ async fn render_jobs(state: &ApiState, p: &Params) -> Option<Event<PatchElements
             label = if s.is_empty() { "all" } else { s },
         ));
     }
-    html.push_str(r#"</nav><table><tr><th>id</th><th>task</th><th class="n">try</th><th>state</th><th>progress</th><th>error</th></tr>"#);
+    html.push_str(r#"</nav><div class="t"><table><tr><th>id</th><th>task</th><th class="n">try</th><th>state</th><th>progress</th><th>error</th></tr>"#);
 
     if jobs.is_empty() {
         html.push_str(r#"<tr><td colspan="6" class="dim">nothing here</td></tr>"#);
@@ -534,7 +544,7 @@ async fn render_jobs(state: &ApiState, p: &Params) -> Option<Event<PatchElements
             err = esc(j.last_error.as_deref().unwrap_or("")),
         ));
     }
-    html.push_str("</table></div>");
+    html.push_str("</table></div></div>");
     patch(html)
 }
 
@@ -559,7 +569,7 @@ async fn render_job(state: &ApiState, p: &Params) -> Option<Event<PatchElements>
     };
 
     let mut html = format!(
-        r#"<div id="job"><h2>job {id} <a class="dim" data-on-click="@get('{back}')">[close]</a></h2><table>"#,
+        r#"<div id="job"><h2>job {id} <a class="dim" data-on-click="@get('{back}')">[close]</a></h2><div class="t"><table>"#,
         back = p.link(None, None, Some("")),
     );
 
@@ -607,7 +617,7 @@ async fn render_job(state: &ApiState, p: &Params) -> Option<Event<PatchElements>
             describe_progress(&j)
         ));
     }
-    html.push_str("</table>");
+    html.push_str("</table></div>");
 
     // The remaining retry schedule, from the policy ON THE ROW.
     //
@@ -618,7 +628,7 @@ async fn render_job(state: &ApiState, p: &Params) -> Option<Event<PatchElements>
     // somewhere below this. Saying "in 4m" when the truth is "in up to 4m"
     // would be a lie an operator would plan around.
     if !j.state.is_terminal() && j.attempt < j.max_attempts {
-        html.push_str(r#"<h2>retry schedule <span class="dim">— upper bound; the worker jitters below it</span></h2><table><tr><th>attempt</th><th>at most</th></tr>"#);
+        html.push_str(r#"<h2>retry schedule <span class="dim">— upper bound; the worker jitters below it</span></h2><div class="t"><table><tr><th>attempt</th><th>at most</th></tr>"#);
         for n in j.attempt..j.max_attempts.min(j.attempt + 6) {
             let ceiling = (j.backoff_base_ms as u64)
                 .saturating_mul(2u64.saturating_pow(n.max(1) as u32 - 1))
@@ -629,7 +639,7 @@ async fn render_job(state: &ApiState, p: &Params) -> Option<Event<PatchElements>
                 format_age(ceiling as f64 / 1000.0)
             ));
         }
-        html.push_str("</table>");
+        html.push_str("</table></div>");
     }
 
     // The failure history: the structured ring buffer, not a formatted blob.
@@ -637,7 +647,7 @@ async fn render_job(state: &ApiState, p: &Params) -> Option<Event<PatchElements>
     // a glance -- River bounds attempted_by but appends errors unbounded, so it
     // cannot show this without unbounded growth.
     if let Some(errors) = j.errors.as_array().filter(|e| !e.is_empty()) {
-        html.push_str(r#"<h2>history</h2><table><tr><th>attempt</th><th>kind</th><th>when</th><th>error</th></tr>"#);
+        html.push_str(r#"<h2>history</h2><div class="t"><table><tr><th>attempt</th><th>kind</th><th>when</th><th>error</th></tr>"#);
         for e in errors {
             let exit = match e["exit_status"].as_i64() {
                 // The single highest-signal artefact in the survey, and thrown
@@ -654,7 +664,7 @@ async fn render_job(state: &ApiState, p: &Params) -> Option<Event<PatchElements>
                 m = esc(e["message"].as_str().unwrap_or("")),
             ));
         }
-        html.push_str("</table>");
+        html.push_str("</table></div>");
     }
 
     html.push_str("</div>");
@@ -740,7 +750,7 @@ async fn render_health(state: &ApiState) -> Option<String> {
     let mut html = String::from(r#"<div id="health">"#);
 
     if !behind.is_empty() {
-        html.push_str(r#"<h2 class="bad">autovacuum is behind</h2><table>"#);
+        html.push_str(r#"<h2 class="bad">autovacuum is behind</h2><div class="t"><table>"#);
         for r in behind {
             html.push_str(&format!(
                 r#"<tr><td>{t}</td><td class="n">{d} dead</td><td class="dim">threshold {th:.0}</td></tr>"#,
@@ -749,7 +759,7 @@ async fn render_health(state: &ApiState) -> Option<String> {
                 th = r.autovac_threshold,
             ));
         }
-        html.push_str("</table>");
+        html.push_str("</table></div>");
     }
 
     // Partitions that cannot wake anybody. Not an error -- those queues still
@@ -758,17 +768,17 @@ async fn render_health(state: &ApiState) -> Option<String> {
     if let Ok(silent) = state.queue.partitions_without_wakeup().await
         && !silent.is_empty()
     {
-        html.push_str(r#"<h2 class="warn">partitions without a wakeup trigger</h2><table>"#);
+        html.push_str(r#"<h2 class="warn">partitions without a wakeup trigger</h2><div class="t"><table>"#);
         for p in &silent {
             html.push_str(&format!(
                     r#"<tr><td>{}</td><td class="dim">created outside stampeded_create_queue; jobs here are polled, not woken</td></tr>"#,
                     esc(p)
                 ));
         }
-        html.push_str("</table>");
+        html.push_str("</table></div>");
     }
 
-    html.push_str(r#"<h2>workers</h2><table><tr><th>worker</th><th class="n">heartbeat</th></tr>"#);
+    html.push_str(r#"<h2>workers</h2><div class="t"><table><tr><th>worker</th><th class="n">heartbeat</th></tr>"#);
     if workers.is_empty() {
         html.push_str(r#"<tr><td colspan="2" class="dim">none registered</td></tr>"#);
     }
@@ -782,7 +792,7 @@ async fn render_health(state: &ApiState) -> Option<String> {
             age = format_age(age),
         ));
     }
-    html.push_str("</table></div>");
+    html.push_str("</table></div></div>");
     Some(html)
 }
 
