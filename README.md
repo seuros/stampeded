@@ -555,6 +555,71 @@ retention.
 | 100 | 119 MB | 2.9 GB | 20 GB |
 | 1,000 | 1.2 GB | 29 GB | 200 GB |
 
+## Performance, measured honestly
+
+Run against a real 8.7 GB database, one million jobs generated from 226k real
+rows. **Read the durability column before the number.**
+
+The first thing to know is that most of these numbers are not about the queue:
+
+| job body | threads | durable? | jobs/sec |
+|---|---|---|---|
+| nothing (hash lookup) | 8 | no | 5,887 |
+| one real `SELECT` | 8 | no | 3,971 |
+| 10 ms of IO | 8 | no | 526 |
+| 10 ms of IO | 64 | no | 4,890 |
+| 10 ms of IO | 8 | **yes** | 566 |
+| 10 ms of IO | 64 | **yes** | **825** |
+
+The no-op row is queue overhead and nothing else: **~0.17 ms per job**. It is
+useful for exactly one thing — knowing the queue is not your bottleneck — and
+it is not a throughput you will ever see, because your jobs do something.
+
+### The number that actually sizes a deployment
+
+**A durable deployment on this hardware tops out around 800 jobs/sec, whatever
+the jobs do and however many threads you give them.** Look at the last two
+rows: eight times the threads bought 1.5x the throughput, because the wall is
+not the worker.
+
+Every completed job is a durable commit. This storage does ~320 such commits
+per second on one connection, and ~800 with group commit across many. An
+autocommit `INSERT` costs 3.13 ms here against 9 µs inside a transaction. That
+is the whole story.
+
+So before tuning concurrency, measure your commit rate:
+
+```sql
+-- in psql, against your queue's database
+\timing on
+CREATE TABLE fsync_probe(x int);
+INSERT INTO fsync_probe VALUES (1);   -- this is what one job costs you
+DROP TABLE fsync_probe;
+```
+
+If that is milliseconds, threads will not help and neither will more worker
+processes. The levers are: faster storage, `synchronous_commit = off` (you
+already accept at-least-once, so a lost completion means a re-run), or an
+unlogged queue — see *Unlogged queues*.
+
+### Worker processes
+
+With the ceiling lifted, one million jobs from real rows:
+
+| | time | jobs/sec |
+|---|---|---|
+| 1 worker × 8 threads | 288 s | 3,472 |
+| 4 workers × 8 threads | 113 s | 8,849 |
+
+Both drained exactly 1,000,000, zero lost and zero failed, across 32
+concurrent threads in four processes.
+
+IO-bound work scales with threads, holding about 75% of the theoretical
+`threads / latency` ceiling up to 64 — so a job waiting 100 ms on an API wants
+far more than the default 5 threads. CPU-bound work does not scale on the pool
+at all; use more processes, which is the same advice Sidekiq gives and for the
+same reason.
+
 ## What this does not do
 
 **Every worker needs database credentials.** The tables are the protocol: a
