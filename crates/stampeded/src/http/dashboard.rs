@@ -101,6 +101,19 @@ const INDEX: &str = r##"<!doctype html>
        white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
   tbody tr:hover td { background: var(--void-400) }
   th:last-child, td:last-child { padding-right: 0 }
+  /* Masonry, via multi-column: as many columns as fit at 24rem, panels kept
+     whole. CSS grid has no masonry in any shipping browser, and a fixed
+     column count would leave a 760px window with two 12rem columns or a 2000px
+     one with acres of empty right-hand side.
+
+     33rem is not arbitrary: it is the widest panel that lives here
+     (destinations, ~520px). Narrower columns clip its last two headings, which
+     is how the first attempt lost WAITING and STATE. */
+  .cols { columns: 33rem; column-gap: 3rem }
+  .cols > div { break-inside: avoid-column; margin-bottom: .4rem }
+  /* A column's first heading must not be pushed down by its own top margin,
+     or the columns start at different heights and look misaligned. */
+  .cols > div:first-child h2 { margin-top: 0 }
   /* Each table scrolls in its own box. Without this a wide table (jobs,
      schedules) pushes the whole PAGE sideways on a narrow window, so the
      header and nav slide out of view to read one error column. */
@@ -120,13 +133,23 @@ const INDEX: &str = r##"<!doctype html>
 </head>
 <body data-init="@get('/dashboard/stream?token=__TOKEN__&amp;q=__Q__&amp;s=__S__&amp;j=__J__')">
   <header><h1>Stampeded</h1><span id="wakeups"></span></header>
-  <div id="queues">connecting…</div>
-  <div id="destinations"></div>
-  <div id="failures"></div>
+  <!-- The summary panels are narrow by nature -- a name and a count -- so they
+       flow into as many columns as the window fits rather than stacking in one
+       column with the right half of the screen empty. The jobs list and the
+       job detail stay full width: they are the working area, and they are wide. -->
   <div id="job"></div>
-  <div id="jobs"></div>
+  <div class="cols">
+    <div id="queues">connecting…</div>
+    <div id="destinations"></div>
+    <div id="failures"></div>
+    <div id="health"></div>
+  </div>
+  <!-- Full width, both of them: schedules needs ~770px for a cron rule plus a
+       timezone and a DST policy, and the jobs list is the working area.
+       Squeezing either into a column just moves the content behind a
+       scrollbar. -->
   <div id="schedules"></div>
-  <div id="health"></div>
+  <div id="jobs"></div>
   <footer>live over server-sent events · read-only</footer>
 </body>
 </html>"##;
