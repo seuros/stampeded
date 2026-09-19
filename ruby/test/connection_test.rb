@@ -117,4 +117,44 @@ class NoRailsTest < Minitest::Test
     refute_includes declared, "activejob",
                     "the adapter file requires active_job; the gem itself must not"
   end
+
+end
+
+# config.connection_class -- which database the queue lives in.
+class ConnectionClassTest < Minitest::Test
+  def teardown
+    Stampeded.config.connection_class = nil
+    Object.send(:remove_const, :StampededTestRecord) if Object.const_defined?(:StampededTestRecord)
+  end
+
+  # Rails 8 encourages a separate jobs database and both GoodJob and
+  # solid_queue default to one; GoodJob does it with
+  # `GoodJob.active_record_parent_class`. Without an equivalent, Stampeded puts
+  # its six tables in the app's primary schema whether you want them there or
+  # not -- which is what it did until someone tried to install it in a real
+  # multi-database app.
+  def test_connection_class_names_the_class_whose_connection_is_used
+    Object.const_set(:StampededTestRecord, Class.new)
+
+    Stampeded.config.connection_class = "StampededTestRecord"
+
+    assert_equal StampededTestRecord, Stampeded::Connection.ar_class
+  end
+
+  # This file deliberately exercises the no-Rails path too, so only assert the
+  # default where ActiveRecord actually exists.
+  def test_the_default_is_the_primary_database
+    skip "ActiveRecord not loaded in this file" unless defined?(::ActiveRecord::Base)
+
+    assert_equal ::ActiveRecord::Base, Stampeded::Connection.ar_class
+  end
+
+  # A typo would otherwise surface as a NameError from deep inside enqueue.
+  def test_a_missing_connection_class_is_named_in_the_error
+    Stampeded.config.connection_class = "NoSuchRecordClass"
+
+    err = assert_raises(Stampeded::Error) { Stampeded::Connection.ar_class }
+
+    assert_match(/NoSuchRecordClass/, err.message)
+  end
 end

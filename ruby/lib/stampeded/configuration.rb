@@ -32,6 +32,33 @@ module Stampeded
     # How long to let in-flight jobs finish on shutdown before giving up.
     attr_accessor :shutdown_timeout
 
+    # Which ActiveRecord class owns the queue's connection.
+    #
+    # A string, resolved lazily, so an initializer can name a class that is not
+    # loaded yet. Default: ActiveRecord::Base, i.e. the primary database.
+    #
+    # Set it when the queue lives in a SEPARATE database, which Rails 8
+    # encourages and which GoodJob and solid_queue both default to:
+    #
+    #   class StampededRecord < ApplicationRecord
+    #     self.abstract_class = true
+    #     connects_to database: { writing: :jobs, reading: :jobs }
+    #   end
+    #
+    #   Stampeded.config.connection_class = "StampededRecord"
+    #
+    # KNOW WHAT THIS COSTS. Stampeded's headline property is that enqueue is an
+    # INSERT on the caller's own connection, so it commits or rolls back with
+    # the work that created it. A separate database is a separate connection,
+    # and that property is gone: the job can commit while the transaction that
+    # created it rolls back. GoodJob and solid_queue have the same hole and it
+    # is the reason they need a "wait for the record to exist" dance.
+    #
+    # Keep the queue in the primary database unless you have a specific reason
+    # not to. The reason is usually schema tidiness, and transactional enqueue
+    # is worth more than that.
+    attr_accessor :connection_class
+
     # Per-job execution timeout -- layer 1 of the three in plans/15, and the
     # Ruby counterpart of the Rust worker's `job_timeout`.
     #
@@ -57,6 +84,7 @@ module Stampeded
       @poll_interval      = 1.0
       @heartbeat_interval = 30.0
       @shutdown_timeout   = 25.0
+      @connection_class   = nil
       # 15 minutes, matching the Rust worker, and comfortably under the 1 hour
       # `expire_seconds` default so layer 1 always fires first.
       @job_timeout        = 900.0

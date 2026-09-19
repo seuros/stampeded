@@ -37,7 +37,7 @@ module Stampeded
     # which is exactly what we want and what the check was preventing.
     def with(&block)
       if active_record?
-        ActiveRecord::Base.connection.raw_connection.then(&block)
+        ar_class.connection.raw_connection.then(&block)
       else
         own(&block)
       end
@@ -68,7 +68,7 @@ module Stampeded
       explicit = Stampeded.config.database_url
 
       if active_record?
-        cfg = ActiveRecord::Base.connection_db_config.configuration_hash
+        cfg = ar_class.connection_db_config.configuration_hash
         # PG wants its own key names; ActiveRecord's differ.
         return {
           host: cfg[:host] || "localhost",
@@ -99,6 +99,16 @@ module Stampeded
       raise SchemaMissing, e if e.message.include?("stampeded_")
 
       raise
+    end
+
+    # The class whose connection the queue uses. See config.connection_class.
+    def ar_class
+      name = Stampeded.config.connection_class
+      return ActiveRecord::Base if name.nil?
+
+      Object.const_get(name.to_s)
+    rescue NameError
+      raise Error, "Stampeded.config.connection_class is #{name.inspect}, which does not exist"
     end
 
     def active_record?
