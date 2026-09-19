@@ -376,3 +376,36 @@ async fn a_bad_unique_period_is_rejected_rather_than_ignored() {
 
     let _ = tx.send(true);
 }
+
+/// Whatever the dashboard's assets advertise must actually resolve.
+///
+/// datastar.js ends with `//# sourceMappingURL=datastar.js.map`, so any
+/// browser with devtools open requests the map. Serving the script from the
+/// binary without the map turned that into a 404 in the console of the person
+/// debugging the dashboard — noise that sends an operator looking for a
+/// problem that is not there.
+///
+/// This asserts the relationship rather than the two routes: if the embedded
+/// script ever stops advertising a map, or advertises a different name, the
+/// test follows it.
+#[tokio::test]
+async fn the_dashboard_assets_resolve_including_whatever_they_advertise() {
+    let (addr, _q, tx) = server!();
+
+    let (status, js) = request(&addr, "GET", "/dashboard/datastar.js", None).await;
+    assert_eq!(status, 200, "the dashboard cannot load Datastar");
+    assert!(js.len() > 1000, "datastar.js looks truncated: {} bytes", js.len());
+
+    // Follow what the script itself asks for.
+    if let Some(line) = js.lines().rev().find(|l| l.contains("sourceMappingURL=")) {
+        let name = line.rsplit("sourceMappingURL=").next().unwrap().trim();
+        let (status, map) = request(&addr, "GET", &format!("/dashboard/{name}"), None).await;
+        assert_eq!(status, 200, "datastar.js advertises {name}, which 404s");
+        assert!(
+            map.trim_start().starts_with('{'),
+            "the source map should be JSON"
+        );
+    }
+
+    let _ = tx.send(true);
+}

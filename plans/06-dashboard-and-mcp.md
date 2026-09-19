@@ -194,3 +194,43 @@ write tool fails until someone says which side it belongs on, and it asserts
 the two routers differ by *exactly* that set — which also catches the reverse
 mistake of gating a read tool, whose only symptom is that it quietly stops
 being advertised.
+
+## The dashboard did not work in a browser, and nothing noticed
+
+Three defects, all in the page rather than the server, all found within ten
+minutes of the owner asking to *see* the dashboard:
+
+1. **`data-on-load` is not a Datastar attribute.** The `on` plugin binds a DOM
+   event listener, and `load` fires on `window`, never on `<body>` — verified
+   against the Datastar source, where `on.ts` special-cases nothing and
+   `init.ts` is documented as *"runs an expression when the element is loaded
+   into the DOM"*. So the expression that opens the SSE stream never ran. The
+   page sat on "connecting…" for ever. It is `data-init`.
+2. **Datastar loaded from a CDN**, so the console needed internet and an
+   air-gapped deployment got a blank page — while `plans/14` §1.5 cited rama's
+   embedded copy as a *reason to choose rama*.
+3. **`/favicon.ico` and `datastar.js.map` 404'd**, putting errors in the
+   console of an ops tool at first glance. rama embeds the source map;
+   the favicon is now an inline data URI.
+
+### Why every check missed it
+
+Every verification of this dashboard, for weeks, was one of:
+
+```
+curl -o /dev/null -w '%{http_code}' /dashboard        # 200
+curl -N /dashboard/stream?token=...                   # 32 events
+```
+
+Both pass, and both would still pass today with `data-on-load` restored,
+**because the server was never the broken part.** The page simply never asked
+for the stream. `curl` does not run JavaScript, so it cannot tell a working
+dashboard from an HTML file that happens to parse.
+
+The tests now assert the two properties that matter and that curl cannot see:
+every `data-*` attribute on the page is a real Datastar plugin, and no `src`
+or `href` fetches from the network. The first fails with `data-on-load`
+restored; the second with the CDN restored.
+
+**The general lesson, which cost the most to learn here:** a status code is not
+a rendering. For anything whose output is a page, the check has to run the page.

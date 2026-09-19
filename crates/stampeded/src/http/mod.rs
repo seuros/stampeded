@@ -51,7 +51,8 @@ pub async fn serve(
             .with_get("/dashboard", dashboard::index)
             .with_get("/dashboard/stream", dashboard::stream)
             // Datastar served from the binary, not a CDN. See dashboard::script.
-            .with_get("/dashboard/datastar.js", dashboard::script),
+            .with_get("/dashboard/datastar.js", dashboard::script)
+            .with_get("/dashboard/datastar.js.map", dashboard::script_map),
     );
     // The guard is what makes `serve` return: it cancels when the signal
     // future resolves, which here is our own shutdown channel rather than a

@@ -61,6 +61,10 @@ const INDEX: &str = r##"<!doctype html>
 <head>
 <meta charset="utf-8">
 <title>Stampeded</title>
+<!-- Inline, so the console of an ops tool is not the first thing that
+     shows a 404. A browser requests /favicon.ico unprompted; a data URI
+     answers it with no route and no extra request. -->
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3' fill='%23111'/><path d='M3 5h7M2 8h9M4 11h7' stroke='%23e8e8e8' stroke-width='1.6' stroke-linecap='round'/></svg>">
 <script type="module" src="/dashboard/datastar.js"></script>
 <style>
   :root { color-scheme: dark light; --dim: color-mix(in srgb, currentColor 55%, transparent) }
@@ -84,7 +88,7 @@ const INDEX: &str = r##"<!doctype html>
   footer { color: var(--dim); margin-top: 2.5rem; font-size: .72rem }
 </style>
 </head>
-<body data-on-load="@get('/dashboard/stream?token=__TOKEN__&amp;q=__Q__&amp;s=__S__&amp;j=__J__')">
+<body data-init="@get('/dashboard/stream?token=__TOKEN__&amp;q=__Q__&amp;s=__S__&amp;j=__J__')">
   <header><h1>Stampeded</h1><span id="wakeups"></span></header>
   <div id="queues">connecting…</div>
   <div id="destinations"></div>
@@ -277,6 +281,20 @@ fn render_wakeups(state: &ApiState) -> Option<Event<PatchElements>> {
 /// which is the version that actually has to match.
 pub async fn script() -> impl IntoResponse {
     rama::http::service::web::response::DatastarScript::new()
+}
+
+/// The Datastar source map.
+///
+/// datastar.js ends with `//# sourceMappingURL=datastar.js.map`, so a browser
+/// with devtools open asks for this whether or not we serve it. Without the
+/// route that is a 404 in the console of the person debugging the dashboard,
+/// which is a bad first impression for an operator tool and sends them looking
+/// for a problem that is not there.
+///
+/// rama embeds the map next to the script (`DatastarSourceMap`, 185 KB). It is
+/// only fetched when devtools are open, so it costs nothing at runtime.
+pub async fn script_map() -> impl IntoResponse {
+    rama::http::service::web::response::DatastarSourceMap::new()
 }
 
 async fn render_queues(state: &ApiState, p: &Params) -> Option<Event<PatchElements>> {

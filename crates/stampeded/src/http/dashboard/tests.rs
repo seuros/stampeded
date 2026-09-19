@@ -376,11 +376,25 @@ fn truncation_is_safe_at_every_offset() {
 fn the_dashboard_loads_no_external_assets() {
     let html = INDEX;
 
-    for host in ["http://", "https://", "//cdn.", "jsdelivr", "unpkg", "cdnjs"] {
-        assert!(
-            !html.contains(host),
-            "the dashboard references {host:?}; it must serve its own assets"
-        );
+    // Check what the browser would FETCH, not every string that looks like a
+    // URL. The first version of this test grepped for "http://" and then
+    // failed on the favicon's own `xmlns="http://www.w3.org/2000/svg"` -- an
+    // XML namespace identifier, which is never requested. A test that cannot
+    // tell a namespace from a network call will be silenced rather than fixed.
+    for attr in ["src=\"", "href=\""] {
+        for (i, _) in html.match_indices(attr) {
+            let value: String = html[i + attr.len()..]
+                .chars()
+                .take_while(|c| *c != '"')
+                .collect();
+            let external = value.starts_with("http://")
+                || value.starts_with("https://")
+                || value.starts_with("//");
+            assert!(
+                !external,
+                "the dashboard fetches {value:?} from the network; it must serve its own assets"
+            );
+        }
     }
 
     // And it must still load Datastar from somewhere, or the page is inert.
@@ -388,4 +402,53 @@ fn the_dashboard_loads_no_external_assets() {
         html.contains("/dashboard/datastar.js"),
         "the dashboard does not load Datastar at all"
     );
+}
+
+/// Every `data-*` attribute on the page must be a real Datastar plugin.
+///
+/// The dashboard shipped with `data-on-load`, which Datastar has no plugin
+/// for: `on` binds a DOM event listener, and `load` fires on `window`, never
+/// on `<body>`. So the expression that opens the SSE stream never ran and the
+/// page sat on "connecting…" for ever. The attribute to run something when an
+/// element enters the DOM is `data-init`.
+///
+/// **This was invisible to every test and every check made for weeks**, all of
+/// which curled `/dashboard/stream` directly — which works, because the server
+/// is fine. The page just never asked. A dashboard returning HTTP 200 says
+/// nothing about whether it renders.
+///
+/// The list is from the Datastar source (`library/src/plugins/attributes/`),
+/// so a plugin rename shows up here rather than as a blank panel.
+#[test]
+fn every_datastar_attribute_on_the_page_exists() {
+    const PLUGINS: &[&str] = &[
+        "attr", "bind", "class", "computed", "effect", "indicator", "init",
+        "json-signals", "on", "on-intersect", "on-interval", "on-signal-patch",
+        "ref", "show", "signals", "style", "text",
+    ];
+
+    let mut seen = 0;
+    for (i, _) in INDEX.match_indices("data-") {
+        let rest = &INDEX[i + 5..];
+        let attr: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_lowercase() || *c == '-')
+            .collect();
+        if attr.is_empty() {
+            continue;
+        }
+        seen += 1;
+
+        // `data-on-click` is the `on` plugin with a DOM event; anything with a
+        // recognised prefix is fine. Otherwise it must be a plugin outright.
+        let ok = PLUGINS.contains(&attr.as_str())
+            || attr.strip_prefix("on-").is_some_and(|ev| {
+                !ev.is_empty() && !PLUGINS.contains(&format!("on-{ev}").as_str()) || PLUGINS.contains(&format!("on-{ev}").as_str())
+            });
+
+        assert!(ok, "data-{attr} is not a Datastar attribute plugin");
+        // The specific regression: `load` is not a DOM event on <body>.
+        assert_ne!(attr, "on-load", "data-on-load never fires; use data-init");
+    }
+    assert!(seen > 0, "the page uses no Datastar attributes at all");
 }
