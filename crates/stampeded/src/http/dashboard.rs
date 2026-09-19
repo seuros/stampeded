@@ -64,27 +64,47 @@ const INDEX: &str = r##"<!doctype html>
 <!-- Inline, so the console of an ops tool is not the first thing that
      shows a 404. A browser requests /favicon.ico unprompted; a data URI
      answers it with no route and no extra request. -->
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3' fill='%23111'/><path d='M3 5h7M2 8h9M4 11h7' stroke='%23e8e8e8' stroke-width='1.6' stroke-linecap='round'/></svg>">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3' fill='%230d0e14'/><path d='M3 5h7M2 8h9M4 11h7' stroke='%2300f0ff' stroke-width='1.6' stroke-linecap='round'/></svg>">
 <script type="module" src="/dashboard/datastar.js"></script>
 <style>
-  :root { color-scheme: dark light; --dim: color-mix(in srgb, currentColor 55%, transparent) }
-  body { font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 1.5rem 2rem; max-width: 100rem }
+  /* Palette from cybercore-css v0.3.0 (MIT, sebyx07/cybercore-css) -- the
+     tokens only, not the framework. The framework is 74 KB minified against
+     this file's ~2 KB and styles `body` and `code` out of the box; everything
+     else needs its component classes on the markup. The colours are the part
+     that carries the identity, so those are what we took. */
+  :root {
+    color-scheme: dark;
+    --void-500: #0d0e14; --void-400: #12141d; --void-300: #181a25;
+    --void-100: #2a2d3a;
+    --chrome-100: #f0f1f5; --chrome-300: #b2b7c7; --chrome-500: #747d99;
+    --cyan-500: #00f0ff; --magenta-500: #ff2a6d;
+    --yellow-500: #fcee0a; --green-500: #05ffa1;
+    --dim: var(--chrome-500);
+  }
+  body { font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 1.5rem 2rem;
+         max-width: 100rem; background: var(--void-500); color: var(--chrome-100) }
   header { display: flex; align-items: baseline; gap: 1.5rem; margin-bottom: 1rem }
-  h1 { font-size: 1rem; letter-spacing: .18em; text-transform: uppercase; margin: 0 }
+  h1 { font-size: 1rem; letter-spacing: .18em; text-transform: uppercase; margin: 0;
+       color: var(--cyan-500) }
   h2 { font-size: .72rem; letter-spacing: .12em; text-transform: uppercase;
-       color: var(--dim); margin: 1.6rem 0 .35rem; font-weight: 600 }
+       color: var(--chrome-300); margin: 1.6rem 0 .35rem; font-weight: 600 }
   table { border-collapse: collapse; width: 100% }
-  th { text-align: left; font-weight: 600; color: var(--dim); border-bottom: 1px solid var(--dim);
+  th { text-align: left; font-weight: 600; color: var(--chrome-500);
+       border-bottom: 1px solid var(--void-100);
        padding: .2rem .9rem .2rem 0; font-size: .7rem; letter-spacing: .06em; text-transform: uppercase }
-  td { padding: .22rem .9rem .22rem 0; border-bottom: 1px solid color-mix(in srgb, currentColor 8%, transparent);
+  td { padding: .22rem .9rem .22rem 0; border-bottom: 1px solid var(--void-300);
        white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
+  tbody tr:hover td { background: var(--void-400) }
   .n { text-align: right; font-variant-numeric: tabular-nums }
-  .bad { color: #d33 } .warn { color: #c80 } .ok { color: #2a2 }
+  /* Severity carries meaning, so it gets the saturated end of the palette. */
+  .bad { color: var(--magenta-500) } .warn { color: var(--yellow-500) } .ok { color: var(--green-500) }
   .dim { color: var(--dim) }
   .wide { white-space: normal; max-width: 38rem }
   nav { margin: .5rem 0 }
-  nav a { cursor: pointer; margin-right: .9rem; text-decoration: none; border-bottom: 1px dotted }
-  nav a.on { font-weight: 700; border-bottom: 2px solid }
+  nav a { cursor: pointer; margin-right: .9rem; text-decoration: none;
+          border-bottom: 1px dotted var(--void-100); color: var(--chrome-300) }
+  nav a:hover { color: var(--cyan-500) }
+  nav a.on { font-weight: 700; color: var(--cyan-500); border-bottom: 2px solid var(--cyan-500) }
   footer { color: var(--dim); margin-top: 2.5rem; font-size: .72rem }
 </style>
 </head>

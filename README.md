@@ -605,6 +605,12 @@ by the *interruptions* budget long before `max_attempts`, a rescheduled job not
 vacating its own dedup window, a bulk insert of 500 rows producing exactly one
 notification, and both DST transitions against `America/New_York`.
 
+## Credits
+
+The dashboard palette is from
+[cybercore-css](https://github.com/sebyx07/cybercore-css) v0.3.0 (MIT,
+© sebyx07) — the design tokens only, not the framework.
+
 ## Licence
 
 BSD-3-Clause.
