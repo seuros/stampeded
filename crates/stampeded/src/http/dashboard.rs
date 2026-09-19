@@ -109,7 +109,7 @@ const INDEX: &str = r##"<!doctype html>
      33rem is not arbitrary: it is the widest panel that lives here
      (destinations, ~520px). Narrower columns clip its last two headings, which
      is how the first attempt lost WAITING and STATE. */
-  .cols { columns: 33rem; column-gap: 3rem }
+  .cols { columns: 26rem; column-gap: 2.5rem; margin-top: 1.6rem }
   .cols > div { break-inside: avoid-column; margin-bottom: .4rem }
   /* A column's first heading must not be pushed down by its own top margin,
      or the columns start at different heights and look misaligned. */
@@ -138,9 +138,15 @@ const INDEX: &str = r##"<!doctype html>
        column with the right half of the screen empty. The jobs list and the
        job detail stay full width: they are the working area, and they are wide. -->
   <div id="job"></div>
+  <!-- destinations is a health band, not a column panel: one row per
+       dependency, six columns wide. In the masonry it was the widest item and
+       so set the width of EVERY column, forcing two fat columns where three
+       fit -- and at three it lost its last two headings behind a scrollbar.
+       Out here it costs nothing and the columns size to what actually lives
+       in them. -->
+  <div id="destinations"></div>
   <div class="cols">
     <div id="queues">connecting…</div>
-    <div id="destinations"></div>
     <div id="failures"></div>
     <div id="health"></div>
   </div>
@@ -446,7 +452,7 @@ async fn render_failures(state: &ApiState) -> Option<String> {
     }
 
     let mut html = String::from(
-        r#"<div id="failures"><h2>failures <span class="dim">— clustered by fingerprint</span></h2><div class="t"><table><tr><th class="n">n</th><th>kind</th><th>error</th><th>destination</th></tr>"#,
+        r#"<div id="failures"><h2>failures <span class="dim">— clustered by fingerprint</span></h2><div class="t"><table><tr><th class="n">n</th><th>kind</th><th>destination</th><th>error</th></tr>"#,
     );
     for r in rows {
         let kind = r.failure_kind.unwrap_or_default();
@@ -459,11 +465,11 @@ async fn render_failures(state: &ApiState) -> Option<String> {
             _ => "bad",
         };
         html.push_str(&format!(
-            r#"<tr><td class="n">{n}</td><td class="{class}">{kind}</td><td class="wide dim">{err}</td><td class="dim">{dest}</td></tr>"#,
+            r#"<tr><td class="n">{n}</td><td class="{class}">{kind}</td><td class="dim">{dest}</td><td class="wide dim">{err}</td></tr>"#,
             n = r.n,
             kind = esc(&kind),
-            err = esc(r.sample.as_deref().unwrap_or("")),
             dest = esc(r.destination.as_deref().unwrap_or("")),
+            err = esc(r.sample.as_deref().unwrap_or("")),
         ));
     }
     html.push_str("</table></div></div>");
