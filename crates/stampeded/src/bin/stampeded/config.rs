@@ -74,6 +74,7 @@ impl Config {
             "  --dashboard-token TOK  serve the dashboard, gated on this token\n",
             "                         (without it the dashboard is NOT served)\n",
             "  -h, --help             this message\n",
+            "  -V, --version          print the version and exit\n",
         )
     }
 
@@ -103,6 +104,14 @@ impl Config {
             match arg.as_str() {
                 "-h" | "--help" => {
                     println!("{}", Self::usage());
+                    std::process::exit(0);
+                }
+                // Every daemon has this, and the first thing anyone does when
+                // a deployment misbehaves is ask what is actually running.
+                // Without it the answer was "read the HTTP health endpoint",
+                // which needs the daemon to be working.
+                "-V" | "--version" => {
+                    println!("stampeded {}", env!("CARGO_PKG_VERSION"));
                     std::process::exit(0);
                 }
                 "--database-url" => c.database_url = value("--database-url")?,

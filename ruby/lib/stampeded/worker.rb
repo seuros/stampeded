@@ -289,7 +289,7 @@ module Stampeded
       return if Lifecycle.verify(was, now, event)
 
       log "DRIFT: the database did #{was} -> #{now} on #{event}, which lifecycle.rb " \
-          "does not declare. schema/002_operations.sql and the state machine disagree."
+          "does not declare. schema/schema.sql and the state machine disagree."
     end
 
     # Bound the handler, and warn if the bound cannot do its job.

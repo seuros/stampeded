@@ -8,7 +8,10 @@ module Stampeded
   # be a SECOND definition of the schema, on its own release cycle, free to
   # drift from the one the Rust daemon is built against (plans/16 §5).
   module Schema
-    FILES = %w[001_initial.sql 002_operations.sql 003_schedules.sql].freeze
+    # One file. It was three, numbered like migrations, which they never were:
+    # the whole thing is applied to a fresh database in one transaction, and
+    # this method concatenated them before sending them anyway.
+    FILES = %w[schema.sql].freeze
 
     module_function
 

@@ -1,5 +1,5 @@
 //! The queue — thin, deliberate wrappers over the SQL functions in
-//! `schema/002_operations.sql`.
+//! `schema/schema.sql`.
 //!
 //! These functions do NOT reimplement claim semantics in Rust. The fence, the
 //! attempt accounting and the transition rules live in SQL precisely so that a
@@ -124,7 +124,7 @@ impl Transition {
             _ => warn!(
                 %was, %now, event = %described,
                 "the database performed a transition the lifecycle does not declare; \
-                 schema/002_operations.sql and lifecycle.rs have drifted"
+                 schema/schema.sql and lifecycle.rs have drifted"
             ),
         }
     }

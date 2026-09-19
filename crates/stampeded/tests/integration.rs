@@ -2590,7 +2590,7 @@ async fn the_claim_never_plans_a_sort() {
         .await
         .ok();
 
-    // The claim's own predicate and ordering, verbatim from 002_operations.sql.
+    // The claim's own predicate and ordering, verbatim from schema.sql.
     let plan: (serde_json::Value,) = sqlx::query_as(
         "EXPLAIN (FORMAT JSON) \
          SELECT id FROM stampeded_jobs \

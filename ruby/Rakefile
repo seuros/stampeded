@@ -34,12 +34,21 @@ PLATFORMS = {
 
 WORKSPACE = File.expand_path("..", __dir__)
 
-desc "Copy schema/*.sql in from the repo root, ready to package"
+desc "Copy schema/*.sql and LICENSE in from the repo root, ready to package"
 task :stage_schema do
+  # A real copy, not a symlink: `gem build` warns that symlinks are not
+  # supported on all platforms, and a gem that unpacks without its licence on
+  # Windows is not BSD-3 compliant.
+  FileUtils.cp(File.join(WORKSPACE, "LICENSE"), File.join(__dir__, "LICENSE"))
   # NOT a symlink: `gem build` from an exported tarball would dangle. The Rust
   # side applies these same files, so the repo root is the one definition and
   # this is a copy of it.
   dest = File.join(__dir__, "schema")
+  # Cleared first. Staging is a copy of the repo root, and leaving whatever a
+  # previous run put here means a renamed or deleted file lingers in the gem
+  # -- which is how the package ended up carrying both schema.sql and the
+  # three numbered files it replaced.
+  FileUtils.rm_rf(dest)
   FileUtils.mkdir_p(dest)
   FileUtils.cp(Dir[File.join(WORKSPACE, "schema", "*.sql")], dest)
   puts "staged #{Dir[File.join(dest, '*.sql')].size} schema file(s)"

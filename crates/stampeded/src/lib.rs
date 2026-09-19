@@ -1,7 +1,7 @@
 //! Stampeded — a Postgres-backed, polyglot job processor.
 //!
 //! The database is the authority. Claim semantics, attempt accounting and
-//! transition rules live in SQL (`schema/002_operations.sql`) so that a worker
+//! transition rules live in SQL (`schema/schema.sql`) so that a worker
 //! in any language gets identical behaviour; this crate is the Rust worker and
 //! a thin typed wrapper, not a second implementation.
 //!
@@ -47,15 +47,17 @@ pub use worker::{Worker, WorkerConfig};
 /// The embedded schema, so a host application can migrate without shipping
 /// .sql files alongside its binary.
 pub mod schema {
-    pub const INITIAL: &str = include_str!("../../../schema/001_initial.sql");
-    pub const OPERATIONS: &str = include_str!("../../../schema/002_operations.sql");
-    pub const SCHEDULES: &str = include_str!("../../../schema/003_schedules.sql");
+    /// One file.
+    ///
+    /// It was three -- 001_initial, 002_operations, 003_schedules -- which
+    /// read as a migration sequence it never was: the whole thing is applied
+    /// to a fresh database in one transaction, never incrementally, and both
+    /// loaders concatenated the files before sending them anyway. The numbers
+    /// invited someone to add `004_add_column.sql` and expect it to migrate.
+    pub const SCHEMA: &str = include_str!("../../../schema/schema.sql");
 
-    /// Apply both files in order.
     pub async fn migrate(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
-        sqlx::raw_sql(INITIAL).execute(pool).await?;
-        sqlx::raw_sql(OPERATIONS).execute(pool).await?;
-        sqlx::raw_sql(SCHEDULES).execute(pool).await?;
+        sqlx::raw_sql(SCHEMA).execute(pool).await?;
         Ok(())
     }
 }

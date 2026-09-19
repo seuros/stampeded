@@ -152,7 +152,7 @@ at claim, which would make every attempt column read 1. Use
 
 ```
 plans/     design notes — what was measured, and why each decision was made
-schema/    001_initial, 002_operations, 003_schedules  (PG18+ only)
+schema/    schema.sql, NOTES.md  (PG18+ only)
 crates/stampeded/  one crate, features gate the weight
   src/            queue, worker, lifecycle, cron, wakeup, maintenance, metrics
   src/http/       enqueue API + Datastar dashboard, on rama   [feature: http]

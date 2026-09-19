@@ -1,6 +1,6 @@
 //! Job types and lifecycle states.
 //!
-//! The state set mirrors the CHECK constraint in `schema/001_initial.sql`. If
+//! The state set mirrors the CHECK constraint in `schema/schema.sql`. If
 //! you add a variant here, add it there — the database is the authority, and a
 //! state it rejects is a runtime error rather than a compile error.
 
@@ -11,7 +11,7 @@ use uuid::Uuid;
 /// Job lifecycle.
 ///
 /// `Retryable` is claimable once its backoff has elapsed — see the claim
-/// predicate in `schema/002_operations.sql`. Treating it as terminal is the
+/// predicate in `schema/schema.sql`. Treating it as terminal is the
 /// poison-job bug described there: a crashed job parks in `Retryable`, never
 /// gets re-claimed, never spends its attempt budget, and never reaches
 /// `max_attempts`.

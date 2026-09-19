@@ -48,7 +48,7 @@ const WAKEUP_BUFFER: usize = 256;
 const SONAR_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Channel suffixes. Names are global per database, so both are prefixed with
-/// the schema — see the trigger in 001_initial.sql.
+/// the schema — see the trigger in schema.sql.
 const INSERT_CHANNEL: &str = "stampeded_insert";
 const SONAR_CHANNEL: &str = "stampeded_sonar";
 

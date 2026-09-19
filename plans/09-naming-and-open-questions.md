@@ -137,3 +137,20 @@ read as source and which are documentation-only.
   boundary (`05-`)
 - Resilience comes from the four `*-machines` crates, not new code (`02-`)
 - Lifecycle authoritative in Rust; triggers only for what the DB alone can do (`03-`)
+
+## The schema is one file now
+
+`001_initial.sql` / `002_operations.sql` / `003_schedules.sql` became
+`schema.sql` (971 lines).
+
+The numbers read as a migration sequence, which they never were: the whole
+thing is applied to a fresh database in one transaction, never incrementally,
+and **both loaders concatenated the files before sending them anyway** — the
+database only ever saw one script. The numbering's only real effect was to
+invite someone to add `004_add_column.sql` and expect it to migrate.
+
+Verified by diffing `pg_dump --schema-only` before and after: byte-identical,
+so not one database object moved.
+
+The prose that used to live in those files is in `schema/NOTES.md`, keyed by
+the statement it described.

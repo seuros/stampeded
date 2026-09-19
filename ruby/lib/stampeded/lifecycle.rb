@@ -21,7 +21,7 @@ module Stampeded
   #
   # **SQL REMAINS AUTHORITATIVE.** A polyglot worker calls the SQL functions
   # directly and never loads this file, so the transitions in
-  # `002_operations.sql` are what actually happen. This is the Ruby side's
+  # `schema.sql` are what actually happen. This is the Ruby side's
   # statement of what it BELIEVES those functions will do — used for
   # predicates, for guarding operator actions before a round trip, and for
   # noticing when the two have drifted.

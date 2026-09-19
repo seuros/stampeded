@@ -10,7 +10,7 @@
 //! `completed → retryable` (running a finished job again) get added by accident.
 //!
 //! Here the transitions are declared once, in the macro below, and the database
-//! CHECK constraint plus the WHERE clauses in `002_operations.sql` enforce the
+//! CHECK constraint plus the WHERE clauses in `schema.sql` enforce the
 //! same shape. Two enforcement points is deliberate: the SQL functions are what
 //! a polyglot worker calls, so SQL has to be authoritative, and this is what
 //! keeps the Rust side honest about what those functions will accept.
