@@ -72,32 +72,38 @@ services. A job processor's hard problems are storage, claiming, visibility and
 retry semantics — almost none of which are network-middleware problems.
 
 ~~**Unresolved: what does `rama` buy over plain axum/tokio here?**~~
-**ANSWERED, and the framing above was wrong.**
+**ANSWERED — in `14-rust-stack.md`, which exists because of this line.** That
+file is the memo; this is the resolution, and the question's premise was false.
 
-The question assumed rama's strengths are network-middleware ones, which are
-orthogonal to a job processor's bottleneck. That is true of most of rama and
-irrelevant, because the one thing we use it for is not middleware:
-**`rama::http::sse::datastar`** — first-class Datastar SSE, with
-`PatchElements` and `ElementPatchMode` as types rather than strings we format
-by hand.
-
-The dashboard is Datastar (`06-`). axum has SSE but knows nothing about
-Datastar, so on axum the patch protocol would be our own string formatting,
-which is exactly the sort of thing that is fine until the protocol version
-moves. That is not orthogonal to anything; it is the specific reason.
-
-What we actually import, all of it:
+**It was never rama *or* axum. `mcp-host` is built on rama**, so rama is linked
+either way. Verified:
 
 ```
-rama::http::sse::datastar::{ElementPatchMode, PatchElements}
-rama::http::sse::{Event, server::KeepAlive}
-rama::http::service::web::{extract, response}
-rama::http::header, rama::tcp::server, rama::layer, rama::rt
-rama::futures::stream, rama::utils::str
+$ cargo tree -i rama
+rama v0.4.0
+├── mcp-host v0.3.2
+└── stampeded v0.1.0
 ```
 
-A thin HTTP surface plus the Datastar types. The honest summary: rama is not
-carrying the hard parts — storage, claiming, visibility and retry semantics are
-all in SQL, exactly as this section says — and it was never going to. It is
-carrying the dashboard's wire protocol, and it is the only Rust HTTP framework
-that does.
+`mcp-host`'s HTTP transport re-exports rama's own SSE type
+(`transport/http.rs:63`, `pub use rama::http::sse::Event`). Choosing axum for
+the dashboard would therefore have put **two HTTP stacks in one binary** — two
+connection layers, two type systems, two CVE surfaces — to avoid the one the
+control plane already links.
+
+That also resolves the memo's §2.1, which made MCP the deciding row and then
+concluded rama made MCP painful. It reached that by evaluating **`rmcp`**, the
+hyperium-native official SDK — the wrong crate, as the memo's own header
+records. With `mcp-host` the deciding row still decides, and decides the other
+way.
+
+**Do not lead with Datastar.** An earlier version of this answer did, and §1.5
+dissolved that argument: rama has typed Datastar events and a 7,681-line
+reference dashboard in-repo, but the official `datastar` SDK is axum-native, so
+the row is a wash rather than a reason. Convenience once rama is a given, not
+the justification.
+
+**This section's own framing was the error.** "rama's strengths are orthogonal
+to the bottleneck" is true — storage, claiming, visibility and retry semantics
+are all in SQL — but it was used as an argument against adoption, when the
+alternative was never *no framework*, only *a second one alongside it*.

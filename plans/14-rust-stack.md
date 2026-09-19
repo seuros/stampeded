@@ -262,6 +262,12 @@ hand-rolling it is the per-ecosystem client-library tax of
 `05-polyglot-protocol.md:8-14` — paid by us instead of by users, which is worse,
 not better.
 
+> **Read with the header correction.** This row concluded that MCP is the
+> deciding factor AND that rama makes MCP painful — the second half by
+> evaluating `rmcp`, the hyperium-native SDK. Stampeded uses **`mcp-host`,
+> which is built on rama** (`cargo tree -i rama` lists it as a dependent).
+> The deciding row still decides; it decides the other way.
+
 This closes old Still-Open item 3.
 
 ---
