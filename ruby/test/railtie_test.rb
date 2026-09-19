@@ -102,4 +102,19 @@ class RailtieTest < Minitest::Test
     assert ok, err
     assert_equal "stampeded:install,stampeded:work,stampeded:daemon", out
   end
+
+  # A worker started from the app's own process, not from the rake task.
+  #
+  # The railtie required the adapter and the DSL but not the worker, so
+  # `Stampeded::ActiveJobWorker` was only defined if you went through
+  # `rake stampeded:work`. A deployment that runs a worker from a Kamal role,
+  # a systemd unit or a script got `uninitialized constant` -- and nothing in
+  # the gem hinted that the rake task was load-bearing rather than a
+  # convenience. Found running a worker inside a real app.
+  def test_the_activejob_worker_is_available_without_the_rake_task
+    out, err, ok = boot('puts Stampeded::ActiveJobWorker.name')
+
+    assert ok, "booting failed: #{err}"
+    assert_equal "Stampeded::ActiveJobWorker", out.strip
+  end
 end

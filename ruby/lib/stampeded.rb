@@ -16,6 +16,19 @@ require_relative "stampeded/schedule"
 require_relative "stampeded/worker"
 require_relative "stampeded/daemon"
 
+module Stampeded
+  # Resolvable whenever it is referenced, rather than whenever ActiveJob
+  # happens to have been loaded.
+  #
+  # The railtie requires this inside `on_load(:active_job)`, which only fires
+  # when ActiveJob::Base is first touched. A worker script that goes straight
+  # to `Stampeded::ActiveJobWorker.new` never touches it, so in a lazily-loaded
+  # development app the constant did not exist -- while the identical code
+  # worked in production, where eager loading had already pulled ActiveJob in.
+  # Found running a worker inside a real Rails app.
+  autoload :ActiveJobWorker, File.expand_path("stampeded/active_job_worker", __dir__)
+end
+
 require_relative "stampeded/railtie" if defined?(Rails::Railtie)
 
 # Stampeded — a polyglot job processor on Postgres 18+.

@@ -24,6 +24,12 @@ module Stampeded
         # order, so ours has to be registered first.
         require "active_job/queue_adapters/stampeded_adapter"
         require "stampeded/active_job_ext"
+        # The worker too. It was required only by `rake stampeded:work`, so a
+        # deployment that runs a worker from its own process -- a Kamal role, a
+        # systemd unit, a script -- got `uninitialized constant
+        # Stampeded::ActiveJobWorker`. Nothing in the gem hinted that the rake
+        # task was load-bearing rather than a convenience.
+        require "stampeded/active_job_worker"
         include Stampeded::ActiveJobExt
       end
     end
