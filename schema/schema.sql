@@ -251,6 +251,16 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION stampeded_count_truncate() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    DELETE FROM stampeded_queue_counts;
+    INSERT INTO stampeded_queue_counts (queue, state, n)
+    SELECT queue, state, count(*) FROM stampeded_jobs GROUP BY queue, state;
+    RETURN NULL;
+END;
+$$;
+
 CREATE FUNCTION stampeded_attach_counters(p_table text) RETURNS void
 LANGUAGE plpgsql AS $$
 BEGIN
@@ -266,6 +276,9 @@ BEGIN
         'CREATE TRIGGER stampeded_count_del_trg AFTER DELETE ON %I'
         '  REFERENCING OLD TABLE AS removed'
         '  FOR EACH STATEMENT EXECUTE FUNCTION stampeded_count_delta()', p_table);
+    EXECUTE format(
+        'CREATE TRIGGER stampeded_count_trunc_trg AFTER TRUNCATE ON %I'
+        '  FOR EACH STATEMENT EXECUTE FUNCTION stampeded_count_truncate()', p_table);
 END;
 $$;
 

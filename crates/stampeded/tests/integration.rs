@@ -2906,3 +2906,63 @@ async fn a_stale_execution_cannot_complete_a_job_its_own_worker_has_since_reclai
         t.owned
     );
 }
+
+#[tokio::test]
+async fn truncating_the_jobs_table_does_not_leave_the_counters_lying() {
+    let q = q!();
+    q.create_queue("trunc_a").await.unwrap();
+
+    for _ in 0..7 {
+        q.enqueue(NewJob::new("trunc_a", "t")).await.unwrap();
+    }
+    for _ in 0..3 {
+        q.enqueue(NewJob::new("default", "t")).await.unwrap();
+    }
+
+    let counted = |q: Queue, queue: &'static str| async move {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT coalesce(sum(n),0)::bigint FROM stampeded_queue_counts WHERE queue = $1",
+        )
+        .bind(queue)
+        .fetch_one(q.pool())
+        .await
+        .unwrap()
+    };
+
+    assert_eq!(counted(q.clone(), "trunc_a").await, 7);
+    assert_eq!(counted(q.clone(), "default").await, 3);
+
+    // TRUNCATE never fires row-level or transition-table triggers, so the
+    // INSERT/UPDATE/DELETE counter triggers do not see it. Without an AFTER
+    // TRUNCATE trigger the counters keep reporting rows that no longer exist --
+    // forever, since nothing recomputes them. Observed for real: a soak DB
+    // cleaned with TRUNCATE between runs reported 41,038 completed jobs that
+    // were not there, and the dashboard believed it.
+    sqlx::query("TRUNCATE stampeded_jobs_trunc_a")
+        .execute(q.pool())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        counted(q.clone(), "trunc_a").await,
+        0,
+        "counters still claim rows after truncating the partition"
+    );
+    assert_eq!(
+        counted(q.clone(), "default").await,
+        3,
+        "truncating one partition must not disturb another queue's counters"
+    );
+
+    // And the parent, which cascades to every partition.
+    sqlx::query("TRUNCATE stampeded_jobs")
+        .execute(q.pool())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        counted(q.clone(), "default").await,
+        0,
+        "counters still claim rows after truncating the parent table"
+    );
+}
