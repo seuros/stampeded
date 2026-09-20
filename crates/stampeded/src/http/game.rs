@@ -493,14 +493,46 @@ pub async fn stream(State(state): State<ApiState>, Query(p): Query<GameParams>) 
 
 type QueueState = (i64, i64, i64, i64, i64, i64, Option<i32>);
 
+/// Run a read on a connection carrying the dashboard's statement_timeout.
+///
+/// Every /game/stream connection re-runs these every 500ms, so an unbounded
+/// read here is worse than on the dashboard: a slow query does not just stall
+/// one page load, it pins a pool connection per viewer and keeps doing it.
+/// SET LOCAL needs an explicit transaction to mean anything -- see
+/// Queue::recent_jobs, where issuing it on an autocommit connection made it a
+/// silent no-op.
+async fn timed_read<T>(state: &ApiState, sql: &'static str) -> Vec<T>
+where
+    T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
+{
+    let Ok(mut tx) = state.queue.pool().begin().await else {
+        return Vec::new();
+    };
+    if sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SET LOCAL statement_timeout = {}",
+        crate::queue::DASHBOARD_QUERY_TIMEOUT.as_millis()
+    )))
+    .execute(&mut *tx)
+    .await
+    .is_err()
+    {
+        return Vec::new();
+    }
+    let rows = sqlx::query_as::<_, T>(sql)
+        .fetch_all(&mut *tx)
+        .await
+        .unwrap_or_default();
+    let _ = tx.commit().await;
+    rows
+}
+
 async fn build_world_state(state: &ApiState) -> GameWorld {
     // Fetch queue depth information
-    let queue_rows: Vec<(String, String, i64)> = sqlx::query_as(
+    let queue_rows: Vec<(String, String, i64)> = timed_read(
+        state,
         "SELECT queue, state, n FROM stampeded_queue_counts WHERE n <> 0 ORDER BY queue, state",
     )
-    .fetch_all(state.queue.pool())
-    .await
-    .unwrap_or_default();
+    .await;
 
     let ages = state.queue.oldest_available_age().await.unwrap_or_default();
 
@@ -548,16 +580,15 @@ async fn build_world_state(state: &ApiState) -> GameWorld {
     }
 
     // Fetch worker information
-    let worker_rows: Vec<(String, String, i32)> = sqlx::query_as(
+    let worker_rows: Vec<(String, String, i32)> = timed_read(
+        state,
         "SELECT id::text, queues::text, EXTRACT(EPOCH FROM (NOW() - heartbeat_at))::int as secs_ago
          FROM stampeded_workers
          WHERE alive
          ORDER BY heartbeat_at DESC
          LIMIT 20",
     )
-    .fetch_all(state.queue.pool())
-    .await
-    .unwrap_or_default();
+    .await;
 
     let mut workers = Vec::new();
     let mut w_offset = 0.0;
