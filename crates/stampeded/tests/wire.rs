@@ -416,7 +416,7 @@ async fn the_game_world_assets_fetch_nothing_from_the_network() {
     let (addr, _q, tx) = server!();
 
     // Verify the game page itself loads
-    let (status, html) = request(&addr, "GET", "/game?token=s3cret", None).await;
+    let (status, _html) = request(&addr, "GET", "/game?token=s3cret", None).await;
     assert_eq!(status, 200, "the game page cannot load");
 
     // Verify Three.js module has no external imports
