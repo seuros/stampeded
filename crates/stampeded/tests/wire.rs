@@ -423,19 +423,13 @@ async fn the_game_world_assets_fetch_nothing_from_the_network() {
     let (status, three_js) = request(&addr, "GET", "/game/three.module.js", None).await;
     assert_eq!(status, 200, "three.module.js must be served from the binary");
     assert!(three_js.len() > 100_000, "three.module.js looks truncated: {} bytes", three_js.len());
-    assert!(
-        !three_js.contains("http://") && !three_js.contains("https://") && !three_js.contains("//cdn"),
-        "three.module.js must not fetch from the network"
-    );
+    assert_no_remote_fetch("three.module.js", &three_js);
 
     // Verify GLTFLoader has no external imports
     let (status, gltf_loader) = request(&addr, "GET", "/game/gltf-loader.js", None).await;
     assert_eq!(status, 200, "gltf-loader.js must be served from the binary");
     assert!(gltf_loader.len() > 10_000, "gltf-loader.js looks truncated: {} bytes", gltf_loader.len());
-    assert!(
-        !gltf_loader.contains("http://") && !gltf_loader.contains("https://"),
-        "gltf-loader.js must not fetch from the network"
-    );
+    assert_no_remote_fetch("gltf-loader.js", &gltf_loader);
 
     // Verify models are served and are binary (not HTML error pages)
     let models = vec![
@@ -460,4 +454,75 @@ async fn the_game_world_assets_fetch_nothing_from_the_network() {
     }
 
     let _ = tx.send(true);
+}
+
+/// Assert a served script fetches nothing from the network.
+///
+/// Checks CODE, not comments. This is the third time today that a naive
+/// substring check has cried wolf on this project:
+///
+///   1. the dashboard's no-external-assets test failed on the favicon's own
+///      `xmlns="http://www.w3.org/2000/svg"` -- an XML namespace, never fetched
+///   2. this test's first version failed on the real three.js, which cites
+///      Khronos specs and a Stanford paper in comments
+///   3. its second version failed on GLTFLoader's docs: "referenced resource
+///      'model.bin' will be loaded from 'https://my-cdn-server.com/...'"
+///
+/// Each time the library was innocent and the test was wrong, and a test that
+/// cannot tell a citation from a network call gets silenced rather than fixed.
+/// So: strip comments, then look for the constructs that actually fetch.
+fn assert_no_remote_fetch(what: &str, src: &str) {
+    let code = strip_js_comments(src);
+
+    for pat in [
+        "from \"http", "from 'http", "from \"//", "from '//",
+        "import(\"http", "import('http",
+        "fetch(\"http", "fetch('http",
+        "importScripts(\"http", "importScripts('http",
+    ] {
+        assert!(
+            !code.contains(pat),
+            "{what} fetches from the network: found {pat:?} outside a comment"
+        );
+    }
+}
+
+/// Remove // and /* */ comments, leaving string literals intact.
+fn strip_js_comments(src: &str) -> String {
+    let b = src.as_bytes();
+    let mut out = String::with_capacity(src.len());
+    let (mut i, mut quote) = (0usize, None::<u8>);
+
+    while i < b.len() {
+        let c = b[i];
+        if let Some(q) = quote {
+            if c == b'\\' {
+                i += 2;
+                continue;
+            }
+            if c == q {
+                quote = None;
+            }
+            out.push(c as char);
+            i += 1;
+        } else if c == b'"' || c == b'\'' || c == b'`' {
+            quote = Some(c);
+            out.push(c as char);
+            i += 1;
+        } else if c == b'/' && i + 1 < b.len() && b[i + 1] == b'/' {
+            while i < b.len() && b[i] != b'\n' {
+                i += 1;
+            }
+        } else if c == b'/' && i + 1 < b.len() && b[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < b.len() && !(b[i] == b'*' && b[i + 1] == b'/') {
+                i += 1;
+            }
+            i += 2;
+        } else {
+            out.push(c as char);
+            i += 1;
+        }
+    }
+    out
 }
