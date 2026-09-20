@@ -469,10 +469,21 @@ impl Queue {
         limit: i32,
         statement_timeout: std::time::Duration,
     ) -> Result<u64> {
-        let mut conn = self.pool.acquire().await?;
+        // An EXPLICIT transaction, because SET LOCAL needs one.
+        let mut conn = self.pool.begin().await?;
 
-        // LOCAL: reverts when the connection returns to the pool, so this
-        // cannot leak onto an unrelated query later.
+        // LOCAL, inside an explicit transaction -- BOTH halves matter.
+        //
+        // SET LOCAL outside a transaction block is a NO-OP: Postgres emits
+        // "WARNING: SET LOCAL can only be used in transaction blocks" and the
+        // setting is discarded, because the implicit transaction wrapping that
+        // one statement has already ended by the time the next query runs.
+        // sqlx sends each execute() as its own statement, so the timeout never
+        // applied to the query it was meant to bound. Verified: with a 1 ms
+        // SET LOCAL issued this way, pg_sleep(0.5) ran to completion.
+        //
+        // That also made the batch-halving path below unreachable -- it keys
+        // off a statement timeout that could never fire.
         // AssertSqlSafe: the only interpolated value is a u128 of our own
         // making. SET does not accept a bind parameter.
         sqlx::query(sqlx::AssertSqlSafe(format!(
@@ -490,6 +501,11 @@ impl Queue {
         .bind(retain_failed.as_secs_f64())
         .fetch_one(&mut *conn)
         .await?;
+
+        // MUST commit. sqlx rolls a Transaction back on drop, so without this
+        // the prune deletes nothing and reports a count -- silently, since the
+        // function's return value is computed before the rollback.
+        conn.commit().await?;
 
         Ok(n.unwrap_or(0) as u64)
     }
@@ -701,7 +717,8 @@ impl Queue {
         state: Option<&str>,
         limit: i64,
     ) -> Result<Vec<Job>> {
-        let mut conn = self.pool.acquire().await?;
+        // An EXPLICIT transaction, because SET LOCAL needs one.
+        let mut conn = self.pool.begin().await?;
 
         // LOCAL, so it reverts when the connection returns to the pool and
         // cannot leak onto an unrelated query.
@@ -712,7 +729,7 @@ impl Queue {
         .execute(&mut *conn)
         .await?;
 
-        sqlx::query_as::<_, Job>(
+        let rows = sqlx::query_as::<_, Job>(
             "SELECT * FROM stampeded_jobs \
               WHERE queue = $1 AND ($2::text IS NULL OR state = $2) \
               ORDER BY id DESC LIMIT $3",
@@ -721,8 +738,13 @@ impl Queue {
         .bind(state)
         .bind(limit)
         .fetch_all(&mut *conn)
-        .await
-        .map_err(Into::into)
+        .await?;
+
+        // Read-only, so the drop-rollback would be harmless, but commit anyway:
+        // it returns the connection to the pool cleanly instead of via an abort.
+        conn.commit().await?;
+
+        Ok(rows)
     }
 
     /// Every queue that has rows, from the counters.

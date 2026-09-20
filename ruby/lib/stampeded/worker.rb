@@ -174,13 +174,42 @@ module Stampeded
           job = inbox.pop
           break if job == :stop
 
-          # Opened on first use so an idle worker holds nothing, then kept for
-          # the life of the thread.
-          conn ||= PG.connect(Connection.connection_params)
-          conn = execute(job, worker_id, conn)
+          begin
+            # Opened on first use so an idle worker holds nothing, then kept
+            # for the life of the thread.
+            #
+            # RESCUED, and the thread must survive it. Without this a single
+            # PG.connect failure -- a failover, a pooler restart, a blip --
+            # raised straight out of the loop, hit the ensure, and KILLED THE
+            # THREAD with no replacement. The job it had just popped was
+            # already `executing` in the database, so it sat there until the
+            # reaper. Lose every thread that way and the pool is empty for
+            # good: the main loop blocks pushing to a full inbox while the
+            # heartbeat keeps reporting a healthy worker -- the same shape as
+            # the claim-loop bug fixed earlier, a worker that passes every
+            # liveness check and runs nothing.
+            conn ||= PG.connect(Connection.connection_params)
+            conn = execute(job, worker_id, conn)
+          rescue PG::Error => e
+            # Drop the probably-dead connection and carry on. The job goes
+            # unreported, so the reaper reclaims it -- the right outcome for a
+            # worker that could not reach the database.
+            log "worker thread: #{e.message}"
+            begin
+              conn&.close
+            rescue StandardError
+              nil
+            end
+            conn = nil
+            sleep 0.1
+          end
         end
       ensure
-        conn&.close
+        begin
+          conn&.close
+        rescue StandardError
+          nil
+        end
       end
     end
 
