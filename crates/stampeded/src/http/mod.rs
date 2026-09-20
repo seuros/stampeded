@@ -12,6 +12,9 @@
 pub mod api;
 pub mod dashboard;
 
+#[cfg(feature = "game")]
+pub mod game;
+
 pub use api::{ApiState, router};
 
 use tokio::sync::watch;
@@ -46,14 +49,32 @@ pub async fn serve(
     use rama::rt::Executor;
     use rama::tcp::server::TcpListener;
 
-    let app = (ArcLayer::new(), ErrorHandlerLayer::new()).into_layer(
-        router(state.clone())
+    let app_router = {
+        let r = router(state.clone())
             .with_get("/dashboard", dashboard::index)
             .with_get("/dashboard/stream", dashboard::stream)
             // Datastar served from the binary, not a CDN. See dashboard::script.
             .with_get("/dashboard/datastar.js", dashboard::script)
-            .with_get("/dashboard/datastar.js.map", dashboard::script_map),
-    );
+            .with_get("/dashboard/datastar.js.map", dashboard::script_map);
+
+        #[cfg(feature = "game")]
+        {
+            r.with_get("/game", game::index)
+                .with_get("/game/stream", game::stream)
+                .with_get("/game/three.module.js", game::three_module)
+                .with_get("/game/gltf-loader.js", game::gltf_loader)
+                .with_get("/game/models/{name}", |rama::http::service::web::extract::Path(name): rama::http::service::web::extract::Path<String>| async move {
+                    game::model(name).await
+                })
+        }
+
+        #[cfg(not(feature = "game"))]
+        {
+            r
+        }
+    };
+
+    let app = (ArcLayer::new(), ErrorHandlerLayer::new()).into_layer(app_router);
     // The guard is what makes `serve` return: it cancels when the signal
     // future resolves, which here is our own shutdown channel rather than a
     // SIGTERM handler, so the daemon keeps owning signal policy.

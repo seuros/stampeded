@@ -409,3 +409,55 @@ async fn the_dashboard_assets_resolve_including_whatever_they_advertise() {
 
     let _ = tx.send(true);
 }
+
+#[tokio::test]
+#[cfg(feature = "game")]
+async fn the_game_world_assets_fetch_nothing_from_the_network() {
+    let (addr, _q, tx) = server!();
+
+    // Verify the game page itself loads
+    let (status, html) = request(&addr, "GET", "/game?token=s3cret", None).await;
+    assert_eq!(status, 200, "the game page cannot load");
+
+    // Verify Three.js module has no external imports
+    let (status, three_js) = request(&addr, "GET", "/game/three.module.js", None).await;
+    assert_eq!(status, 200, "three.module.js must be served from the binary");
+    assert!(three_js.len() > 100_000, "three.module.js looks truncated: {} bytes", three_js.len());
+    assert!(
+        !three_js.contains("http://") && !three_js.contains("https://") && !three_js.contains("//cdn"),
+        "three.module.js must not fetch from the network"
+    );
+
+    // Verify GLTFLoader has no external imports
+    let (status, gltf_loader) = request(&addr, "GET", "/game/gltf-loader.js", None).await;
+    assert_eq!(status, 200, "gltf-loader.js must be served from the binary");
+    assert!(gltf_loader.len() > 10_000, "gltf-loader.js looks truncated: {} bytes", gltf_loader.len());
+    assert!(
+        !gltf_loader.contains("http://") && !gltf_loader.contains("https://"),
+        "gltf-loader.js must not fetch from the network"
+    );
+
+    // Verify models are served and are binary (not HTML error pages)
+    let models = vec![
+        "box-small.glb",
+        "box-large.glb",
+        "conveyor-long.glb",
+        "crane.glb",
+        "hopper-square.glb",
+        "machine.glb",
+    ];
+    for model in models {
+        let (status, body) = request(&addr, "GET", &format!("/game/models/{}", model), None).await;
+        assert_eq!(status, 200, "model {} must be served from the binary", model);
+        // GLB files start with magic bytes 0x67 0x6C 0x54 0x46 ('glTF' in ASCII)
+        let bytes = body.as_bytes();
+        assert!(
+            bytes.len() > 100 && bytes.starts_with(b"glTF"),
+            "model {} looks wrong: starts with {:?}",
+            model,
+            &bytes[..bytes.len().min(20)]
+        );
+    }
+
+    let _ = tx.send(true);
+}

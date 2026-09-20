@@ -26,6 +26,8 @@ http = ["dep:rama", "dep:futures"]
 dashboard = ["http"]
 # MCP control plane, on mcp-host.
 mcp = ["dep:mcp-host", "dep:schemars"]
+# 3D game world visualization of the job queue state.
+game = ["http"]
 
 [dependencies]
 sqlx.workspace = true
