@@ -367,7 +367,12 @@ function updateScene(world) {
 const token = new URLSearchParams(window.location.search).get("token") || "";
 const eventSource = new EventSource(`/game/stream?token=${encodeURIComponent(token)}`);
 
-eventSource.onmessage = (event) => {
+// addEventListener, NOT onmessage. The server NAMES this event "world"
+// (try_with_event), and onmessage fires ONLY for unnamed events -- the
+// default "message" type. With onmessage the stream connects, the server
+// polls the database every 500ms forever, and not one frame reaches the
+// scene: the page sits at "Initializing..." looking like a slow query.
+eventSource.addEventListener("world", (event) => {
   try {
     worldData = JSON.parse(event.data);
     updateScene(worldData);
@@ -375,7 +380,7 @@ eventSource.onmessage = (event) => {
   } catch (e) {
     console.error("Failed to parse world data:", e);
   }
-};
+});
 
 eventSource.onerror = () => {
   document.getElementById("queue-info").textContent = "Connection lost";

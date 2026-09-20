@@ -526,3 +526,49 @@ fn strip_js_comments(src: &str) -> String {
     }
     out
 }
+
+/// The event name the server sends must be the one the browser listens for.
+///
+/// These live ~100 lines apart in one file -- the Rust builds the SSE event,
+/// the JS registers the handler -- and nothing connected them. The server named
+/// its event "world"; the client used `onmessage`, which fires only for events
+/// with NO name. So /game/stream connected, returned 200, streamed a fresh
+/// world every 500ms, and the browser dropped every frame on the floor. The
+/// page showed "Initializing..." forever.
+///
+/// Exactly the shape of the dashboard's data-on-load bug, and it survived for
+/// the same reason: the existing test asserted the HTML *mentions*
+/// /game/stream, which is true of a page that never renders a thing.
+#[test]
+#[cfg(feature = "game")]
+fn the_game_page_listens_for_the_event_the_server_actually_sends() {
+    let src = include_str!("../src/http/game.rs");
+
+    // What the server sends.
+    let sent = src
+        .split("try_with_event(\"")
+        .nth(1)
+        .and_then(|r| r.split('"').next())
+        .map(str::to_string);
+
+    match sent {
+        Some(name) => {
+            assert!(
+                src.contains(&format!("addEventListener(\"{name}\"")),
+                "the server sends a named SSE event {name:?} but the page never \
+                 registers addEventListener(\"{name}\"). A named event does NOT \
+                 trigger onmessage, so the browser receives every frame and \
+                 discards it."
+            );
+        }
+        None => {
+            // No name means the default "message" type, and onmessage is then
+            // the correct handler. Either pairing is fine; mixing them is not.
+            assert!(
+                src.contains("eventSource.onmessage"),
+                "the server sends unnamed SSE events but the page does not \
+                 define onmessage"
+            );
+        }
+    }
+}
