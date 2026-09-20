@@ -401,7 +401,8 @@ $$;
 CREATE FUNCTION stampeded_complete(
     p_queue     text,
     p_id        uuid,
-    p_worker_id uuid
+    p_worker_id uuid,
+    p_attempt   smallint
 ) RETURNS TABLE (was text, now_state text, owned boolean)
 LANGUAGE sql AS $$
     UPDATE stampeded_jobs
@@ -416,6 +417,7 @@ LANGUAGE sql AS $$
      WHERE queue = p_queue
        AND id    = p_id
        AND claimed_by = p_worker_id   -- refuse to complete a job we no longer own
+         AND attempt    = p_attempt     -- ...and refuse a PREVIOUS attempt's result
     RETURNING OLD.state, NEW.state, true;
 $$;
 
@@ -436,6 +438,7 @@ CREATE FUNCTION stampeded_fail(
     p_queue        text,
     p_id           uuid,
     p_worker_id    uuid,
+    p_attempt      smallint,
     p_kind         text,
     p_error        text,
 
@@ -454,7 +457,8 @@ DECLARE
     v_dlq        boolean := false;
 BEGIN
     SELECT * INTO j FROM stampeded_jobs
-     WHERE queue = p_queue AND id = p_id AND claimed_by = p_worker_id;
+     WHERE queue = p_queue AND id = p_id AND claimed_by = p_worker_id
+       AND attempt = p_attempt;
     IF NOT FOUND THEN
         -- Not ours: the reaper already reclaimed it and somebody else owns the
         -- outcome. Writing a failure over another worker's result would be
@@ -532,7 +536,8 @@ BEGIN
            -- keeps its slot so a duplicate cannot be enqueued while it waits.
            dedup_scope  = CASE WHEN v_terminal THEN NULL ELSE dedup_scope END,
            finished_at  = CASE WHEN v_terminal THEN now() ELSE NULL END
-     WHERE queue = p_queue AND id = p_id AND claimed_by = p_worker_id;
+     WHERE queue = p_queue AND id = p_id AND claimed_by = p_worker_id
+       AND attempt = p_attempt;
 
     -- Dead letter, with provenance. The copy carries where it came from and how
     -- hard it tried, because a DLQ row with no history is an alert nobody can
@@ -552,12 +557,13 @@ BEGIN
 END;
 $$;
 
-CREATE FUNCTION stampeded_touch(p_queue text, p_id uuid, p_worker_id uuid)
+CREATE FUNCTION stampeded_touch(p_queue text, p_id uuid, p_worker_id uuid, p_attempt smallint)
 RETURNS boolean
 LANGUAGE sql AS $$
     UPDATE stampeded_jobs SET heartbeat_at = now()
      WHERE queue = p_queue AND id = p_id
        AND claimed_by = p_worker_id AND state = 'executing'
+       AND attempt = p_attempt
     RETURNING true;
 $$;
 
@@ -565,6 +571,7 @@ CREATE FUNCTION stampeded_checkpoint(
     p_queue     text,
     p_id        uuid,
     p_worker_id uuid,
+    p_attempt   smallint,
     p_state     jsonb
 ) RETURNS integer
 LANGUAGE plpgsql AS $$
@@ -596,6 +603,7 @@ BEGIN
      WHERE queue = p_queue
        AND id    = p_id
        AND claimed_by = p_worker_id
+       AND attempt = p_attempt
        AND state = 'executing'
     RETURNING checkpoint_seq, length(OLD.checkpoint::text)
          INTO v_seq, v_old_size;
@@ -623,7 +631,7 @@ DECLARE
     r record;
 BEGIN
     FOR r IN
-        SELECT id, queue, claimed_by, expire_seconds
+        SELECT id, queue, claimed_by, attempt, expire_seconds
           FROM stampeded_jobs
          WHERE state = 'executing'
            -- From the last sign of life, not from claim: a job that is touching
@@ -633,7 +641,7 @@ BEGIN
          FOR UPDATE SKIP LOCKED
     LOOP
         PERFORM stampeded_fail(
-            r.queue, r.id, r.claimed_by, 'timed_out',
+            r.queue, r.id, r.claimed_by, r.attempt, 'timed_out',
             format('exceeded expire_seconds (%s)', r.expire_seconds), NULL, NULL);
         out_id := r.id; out_queue := r.queue; out_worker := r.claimed_by;
         RETURN NEXT;

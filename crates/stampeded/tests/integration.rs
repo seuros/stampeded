@@ -2848,3 +2848,61 @@ async fn a_partition_without_the_wakeup_trigger_is_detected() {
 
     assert_eq!(silent, vec!["stampeded_jobs_silent".to_string()]);
 }
+
+#[tokio::test]
+async fn a_stale_execution_cannot_complete_a_job_its_own_worker_has_since_reclaimed() {
+    let q = q!();
+    let w = q
+        .register_worker("test", 1, &["default".into()])
+        .await
+        .unwrap();
+
+    q.enqueue(NewJob::new("default", "slow")).await.unwrap();
+
+    // Attempt 1. The worker starts running it and then stalls -- long enough to
+    // stop heartbeating, but NOT long enough to be declared dead. This is the
+    // gap between stampeded_expire (job-level, worker still alive) and
+    // stampeded_reap (worker-level, worker gone), and it is where the ABA lives.
+    let first = q.claim("default", w, 1).await.unwrap().pop().unwrap();
+    assert_eq!(first.attempt, 1);
+
+    sqlx::query(
+        "UPDATE stampeded_jobs SET claimed_at = now() - interval '2 hours',
+                                   heartbeat_at = NULL WHERE id = $1",
+    )
+    .bind(first.id)
+    .execute(q.pool())
+    .await
+    .unwrap();
+
+    let expired = q.expire(100).await.unwrap();
+    assert_eq!(expired, 1, "the stalled job should have expired");
+
+    // The very same worker -- still alive, still registered, same uuid -- picks
+    // the job back up. Nothing prevents this; it is the common case when one
+    // worker serves the queue.
+    let second = q.claim("default", w, 1).await.unwrap().pop().unwrap();
+    assert_eq!(second.id, first.id);
+    assert_eq!(second.attempt, 2, "the retry is a new attempt");
+
+    // Now attempt 1 finally returns and reports success. It is a ghost: its work
+    // is two hours stale and attempt 2 is running RIGHT NOW. Ownership is fenced
+    // on claimed_by alone, and claimed_by is this same worker, so the fence does
+    // not see a difference between the two executions.
+    let t = q.complete(&first, w).await.unwrap();
+
+    let state: String = sqlx::query_scalar("SELECT state FROM stampeded_jobs WHERE id = $1")
+        .bind(first.id)
+        .fetch_one(q.pool())
+        .await
+        .unwrap();
+
+    assert!(
+        !t.owned && state == "executing",
+        "a stale execution completed a job that had been reclaimed: owned={}, \
+         state={state:?}. Attempt 2 is still running, and its result will be \
+         thrown away as 'not owned' when it finishes -- the outcome recorded is \
+         attempt 1's.",
+        t.owned
+    );
+}

@@ -211,10 +211,11 @@ impl Queue {
     /// Mark a job completed.
     pub async fn complete(&self, job: &Job, worker_id: Uuid) -> Result<Transition> {
         let row: Option<(Option<String>, Option<String>, Option<bool>)> =
-            sqlx::query_as("SELECT was, now_state, owned FROM stampeded_complete($1, $2, $3)")
+            sqlx::query_as("SELECT was, now_state, owned FROM stampeded_complete($1, $2, $3, $4)")
                 .bind(&job.queue)
                 .bind(job.id)
                 .bind(worker_id)
+                .bind(job.attempt)
                 .fetch_optional(&self.pool)
                 .await?;
 
@@ -268,11 +269,12 @@ impl Queue {
         exit_status: Option<i32>,
     ) -> Result<Transition> {
         let row: Option<(Option<String>, Option<String>, Option<bool>)> = sqlx::query_as(
-            "SELECT was, now_state, dead_lettered FROM stampeded_fail($1,$2,$3,$4,$5,$6,$7)",
+            "SELECT was, now_state, dead_lettered FROM stampeded_fail($1,$2,$3,$4,$5,$6,$7,$8)",
         )
         .bind(&job.queue)
         .bind(job.id)
         .bind(worker_id)
+        .bind(job.attempt)
         .bind(kind.as_str())
         .bind(error)
         .bind(retry_delay.map(|d| d.as_millis() as i64))
@@ -304,10 +306,11 @@ impl Queue {
         // Double Option: the outer is "no row came back", the inner is the
         // function returning NULL because the UPDATE matched nothing. Both mean
         // the same thing here -- this worker no longer owns the job.
-        let ok: Option<Option<bool>> = sqlx::query_scalar("SELECT stampeded_touch($1, $2, $3)")
+        let ok: Option<Option<bool>> = sqlx::query_scalar("SELECT stampeded_touch($1, $2, $3, $4)")
             .bind(&job.queue)
             .bind(job.id)
             .bind(worker_id)
+            .bind(job.attempt)
             .fetch_optional(&self.pool)
             .await?;
         Ok(ok.flatten().unwrap_or(false))
@@ -374,10 +377,11 @@ impl Queue {
     {
         let value = serde_json::to_value(state)?;
         let seq: Option<Option<i32>> =
-            sqlx::query_scalar("SELECT stampeded_checkpoint($1, $2, $3, $4)")
+            sqlx::query_scalar("SELECT stampeded_checkpoint($1, $2, $3, $4, $5)")
                 .bind(&job.queue)
                 .bind(job.id)
                 .bind(worker_id)
+                .bind(job.attempt)
                 .bind(&value)
                 .fetch_optional(executor)
                 .await?;

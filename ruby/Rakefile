@@ -8,6 +8,13 @@ Rake::TestTask.new(:test) do |t|
   t.warning = false
 end
 
+# The test helper loads ruby/schema/schema.sql, which is a STAGED COPY of the
+# real schema one directory up. Nothing forced it to be current, so editing
+# schema/schema.sql and running the Ruby suite tested the PREVIOUS schema and
+# passed -- the failure mode that hid an ownership-fencing change until the
+# Rust suite caught it. Only :package depended on staging; now the tests do.
+task test: :stage_schema
+
 task default: :test
 
 # ---------------------------------------------------------------------------

@@ -260,8 +260,8 @@ module Stampeded
       c = conn
       case outcome
         when :complete
-          r = c.exec_params("SELECT * FROM stampeded_complete($1, $2, $3)",
-                            [job.queue, job.id, worker_id])
+          r = c.exec_params("SELECT * FROM stampeded_complete($1, $2, $3, $4)",
+                            [job.queue, job.id, worker_id, job.attempt])
           verify_transition(r, :complete)
         when :fail
           kind = failure_kind_for(error)
@@ -282,8 +282,9 @@ module Stampeded
               backoff_ms(job)
             end
           r = c.exec_params(
-            "SELECT * FROM stampeded_fail($1, $2, $3, $4, $5, $6, $7)",
-            [job.queue, job.id, worker_id, kind, error.message.to_s[0, 4000], delay, nil]
+            "SELECT * FROM stampeded_fail($1, $2, $3, $4, $5, $6, $7, $8)",
+            [job.queue, job.id, worker_id, job.attempt, kind,
+             error.message.to_s[0, 4000], delay, nil]
           )
           # Which transition SQL should have made depends on whether there was
           # budget left, and SQL decides that -- so check against what it
