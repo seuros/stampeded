@@ -138,3 +138,112 @@ fn the_wakeup_cooldown_does_not_cap_the_claim() {
         "and above a few ms it caps throughput instead of bounding bursts"
     );
 }
+
+/// Build a job row with the given per-job backoff columns.
+fn job_with_backoff(base_ms: i16, max_ms: i32, attempt: i16) -> Job {
+    Job {
+        id: uuid::Uuid::now_v7(),
+        queue: "default".into(),
+        tenant_id: None,
+        task: "t".into(),
+        args: serde_json::json!({}),
+        state: crate::job::JobState::Executing,
+        priority: 0,
+        scheduled_at: Utc::now(),
+        attempt,
+        max_attempts: 25,
+        attempted_by: vec![],
+        claimed_by: None,
+        claimed_at: None,
+        dedup_scope: None,
+        dedup_period: None,
+        destination: None,
+        interruptions: 0,
+        max_interruptions: 1,
+        deferrals: 0,
+        max_deferrals: 100,
+        expire_seconds: 3600,
+        heartbeat_at: None,
+        backoff_base_ms: base_ms,
+        backoff_max_ms: max_ms,
+        checkpoint: None,
+        checkpoint_at: None,
+        checkpoint_seq: 0,
+        failure_kind: None,
+        last_error: None,
+        errors: serde_json::json!([]),
+        error_fingerprint: None,
+        dead_letter_queue: None,
+        source_id: None,
+        source_queue: None,
+        source_attempts: None,
+        inserted_at: Utc::now(),
+        finished_at: None,
+    }
+}
+
+/// Sample a policy repeatedly; full jitter means one draw proves nothing.
+fn sample_delays(policy: BackoffPolicy, attempt: i16, n: usize) -> Vec<u64> {
+    let mut rng = chrono_machines::rand::rng();
+    (0..n)
+        .map(|_| {
+            policy
+                .delay(attempt.clamp(0, u8::MAX as i16) as u8, &mut rng)
+                .unwrap_or(FALLBACK_RETRY_DELAY_MS)
+        })
+        .collect()
+}
+
+#[test]
+fn a_jobs_own_backoff_columns_beat_the_workers_configured_policy() {
+    // The columns are NOT NULL with defaults 1000/3600000, so every row has
+    // them and the only question is whether this side reads them. It did not:
+    // Ruby's `backoff_ms` read the row, Rust used the worker-wide policy, and
+    // the same job retried on a different schedule depending on which runtime
+    // dequeued it -- while the dashboard drew Ruby's schedule for both.
+    let tight = job_with_backoff(2, 4, 8);
+
+    // attempt 8 under the DEFAULT policy is base 1000 * 2^7 = 128s, capped at
+    // an hour. Under the job's own it is 2 * 2^7 = 256ms, capped at 4ms.
+    let delays = sample_delays(policy_for(&tight, default_backoff()), tight.attempt, 200);
+    let worst = delays.iter().copied().max().unwrap();
+
+    assert!(
+        worst <= 4,
+        "per-job cap of 4ms ignored: sampled a {worst}ms delay. The worker is \
+         still using its own policy instead of the row."
+    );
+}
+
+#[test]
+fn a_row_carrying_the_schema_defaults_leaves_the_configured_policy_alone() {
+    // The inverse, and the reason `policy_for` compares against the schema
+    // defaults rather than always rebuilding from the row: a job that asked
+    // for nothing must not silently override a worker configured with
+    // `.backoff(...)`. Otherwise fixing the bug above would break that knob.
+    let plain = job_with_backoff(SCHEMA_BACKOFF_BASE_MS, SCHEMA_BACKOFF_MAX_MS, 1);
+
+    let configured = BackoffPolicy::Exponential(
+        ExponentialBackoff::new()
+            .base_delay_ms(30_000)
+            .max_delay_ms(60_000)
+            .jitter_factor(1.0)
+            .max_attempts(u8::MAX),
+    );
+
+    let worst = sample_delays(policy_for(&plain, configured), plain.attempt, 200)
+        .into_iter()
+        .max()
+        .unwrap();
+
+    // The schema default would cap attempt 1 at 1000ms. The configured policy
+    // allows up to 30s, so anything above 1000ms proves the worker's choice
+    // survived. Full jitter makes a single low draw meaningless; 200 draws
+    // from a uniform over 0..30000 clear 1000 with certainty for any practical
+    // purpose.
+    assert!(
+        worst > 1_000,
+        "worker's configured policy was overridden by a job that expressed no \
+         preference: worst of 200 draws was {worst}ms, within the schema default"
+    );
+}

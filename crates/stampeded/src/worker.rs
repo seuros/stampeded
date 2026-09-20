@@ -312,6 +312,40 @@ pub fn default_backoff() -> BackoffPolicy {
     )
 }
 
+/// The schema defaults for `backoff_base_ms` / `backoff_max_ms`.
+///
+/// A row carrying exactly these is expressing no preference, so the worker's
+/// configured policy wins. A row carrying anything else was set deliberately --
+/// by `JobBuilder::backoff` or Ruby's `stampeded backoff_base_ms:` -- and
+/// overrides the worker, because per-job is more specific than per-worker.
+const SCHEMA_BACKOFF_BASE_MS: i16 = 1_000;
+const SCHEMA_BACKOFF_MAX_MS: i32 = 3_600_000;
+
+/// The policy to retry THIS job with.
+///
+/// The per-job columns were dead weight on this side: written at enqueue,
+/// rendered by the dashboard's retry schedule, honoured by the Ruby worker
+/// (`backoff_ms`), and never once read by the Rust one -- so the same row
+/// retried on two different schedules depending on which language picked it
+/// up, and the schedule the dashboard drew was the Ruby one.
+fn policy_for(job: &Job, configured: BackoffPolicy) -> BackoffPolicy {
+    if job.backoff_base_ms == SCHEMA_BACKOFF_BASE_MS && job.backoff_max_ms == SCHEMA_BACKOFF_MAX_MS
+    {
+        return configured;
+    }
+
+    // Full jitter and the u8::MAX attempt budget, for the reasons in
+    // `default_backoff`: the DATABASE owns the attempt limit, and a policy that
+    // declines to produce a delay would mean "retry immediately".
+    BackoffPolicy::Exponential(
+        ExponentialBackoff::new()
+            .base_delay_ms(job.backoff_base_ms.max(1) as u64)
+            .max_delay_ms(job.backoff_max_ms.max(1) as u64)
+            .jitter_factor(1.0)
+            .max_attempts(u8::MAX),
+    )
+}
+
 pub struct Worker {
     queue: Queue,
     config: WorkerConfig,
@@ -789,7 +823,7 @@ async fn report_failure(
         Some(r)
     } else {
         let mut rng = chrono_machines::rand::rng();
-        let ms = backoff
+        let ms = policy_for(job, backoff)
             .delay(job.attempt.clamp(0, u8::MAX as i16) as u8, &mut rng)
             // Defence in depth against the hot-loop described in
             // default_backoff: a policy that declines to produce a delay must
