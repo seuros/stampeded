@@ -736,3 +736,50 @@ fn every_import_in_the_served_assets_resolves_to_a_route() {
         }
     }
 }
+
+/// Every external resource an embedded model references must be served.
+///
+/// A .glb embeds its geometry but may reference textures by URI. All 14 Factory
+/// Kit models name `Textures/colormap.png`, which nothing served -- so
+/// GLTFLoader resolved it against /game/models/, got a 404, and every model
+/// rendered untextured. The model files themselves returned 200 with valid glTF
+/// magic the whole time, which is all any existing test asked.
+///
+/// Same failure as the GLTFLoader and three.core 404s: a dependency one level
+/// below what the tests modelled.
+#[test]
+#[cfg(feature = "game")]
+fn every_external_resource_a_model_references_is_served() {
+    let routes = include_str!("../src/http/mod.rs");
+    let models: [(&str, &[u8]); 3] = [
+        ("box-small.glb", include_bytes!("../assets/models/box-small.glb")),
+        ("conveyor-long.glb", include_bytes!("../assets/models/conveyor-long.glb")),
+        ("crane.glb", include_bytes!("../assets/models/crane.glb")),
+    ];
+
+    for (name, bytes) in models {
+        // glTF-Binary: 12-byte header, then length-prefixed chunks. The first
+        // chunk is JSON; its `uri` fields are the external references.
+        assert_eq!(&bytes[0..4], b"glTF", "{name} is not a GLB");
+        let json_len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+        let json = std::str::from_utf8(&bytes[20..20 + json_len]).expect("GLB JSON chunk");
+
+        for (i, _) in json.match_indices("\"uri\"") {
+            let rest = &json[i + 5..];
+            let Some(start) = rest.find('"') else { continue };
+            let Some(uri) = rest[start + 1..].split('"').next() else { continue };
+
+            // Data URIs are self-contained; only file references can 404.
+            if uri.starts_with("data:") {
+                continue;
+            }
+
+            let resolved = format!("/game/models/{uri}");
+            assert!(
+                routes.contains(&format!("\"{resolved}\"")),
+                "{name} references {uri:?}, which resolves to {resolved} -- no \
+                 route serves it, so the model loads but renders untextured"
+            );
+        }
+    }
+}

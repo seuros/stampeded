@@ -792,6 +792,20 @@ pub async fn skeleton_utils() -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "application/javascript")], SRC).into_response()
 }
 
+/// Serve the Factory Kit's shared texture atlas.
+///
+/// Every one of the 14 GLBs references `Textures/colormap.png` as an EXTERNAL
+/// uri -- the geometry is embedded, the texture is not. Unserved, GLTFLoader
+/// resolves it against /game/models/ and 404s, so every model renders
+/// untextured. Kenney ships a different colormap per kit, so this one must
+/// come from Factory Kit specifically; another kit's atlas is the same size
+/// and silently wrong colours.
+pub async fn model_texture() -> impl IntoResponse {
+    const SRC: &[u8] = include_bytes!("../../assets/models/Textures/colormap.png");
+
+    ([(header::CONTENT_TYPE, "image/png")], SRC).into_response()
+}
+
 /// Serve a 3D model file from embedded assets.
 pub async fn model(model_name: String) -> impl IntoResponse {
     match model_name.as_str() {

@@ -66,6 +66,7 @@ pub async fn serve(
                 .with_get("/game/loaders/gltf-loader.js", game::gltf_loader)
                 .with_get("/game/utils/BufferGeometryUtils.js", game::buffer_geometry_utils)
                 .with_get("/game/utils/SkeletonUtils.js", game::skeleton_utils)
+                .with_get("/game/models/Textures/colormap.png", game::model_texture)
                 .with_get("/game/models/{name}", |rama::http::service::web::extract::Path(name): rama::http::service::web::extract::Path<String>| async move {
                     game::model(name).await
                 })
