@@ -1,18 +1,37 @@
 name: release
 
-# The daemon binary, one platform gem per target.
+# Compilation happens HERE, not on a laptop. `rake package[arm64-darwin]` works
+# on a Mac and cannot produce a linux-musl binary, so the matrix IS the build.
 #
-# Cross-compilation is the reason this exists as CI rather than a local rake
-# task: `rake build[arm64-darwin]` works on a Mac and cannot produce a
-# linux-musl binary, so the matrix IS the build. plans/16 listed this as the
-# last unbuilt piece.
+# release-please owns the version: a conventional-commit push to master opens a
+# release PR, and merging that PR creates the tag, which is what gates the
+# builds below. Nothing is PUBLISHED -- no rubygems push, no GitHub Packages.
+# The gems are attached to the GitHub Release as assets.
 on:
   push:
-    tags: ["v*"]
+    branches: [master]
   workflow_dispatch:
 
+permissions:
+  contents: write
+  pull-requests: write
+
 jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      releases_created: ${{ steps.release.outputs.releases_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v5
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
   binaries:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.releases_created == 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -30,10 +49,21 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.98"
           targets: ${{ matrix.target }}
+
+      # BEFORE the build, not after. rama-dns runs bindgen on Linux and needs
+      # libclang; installing it afterwards meant the build it was meant to fix
+      # had already failed. `cross` compiles inside its own container, which
+      # carries its own toolchain, so only the native Linux build needs this.
+      - name: Install libclang (native linux build)
+        if: runner.os == 'Linux' && !matrix.cross
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev
 
       - name: Install cross
         if: matrix.cross
@@ -48,53 +78,117 @@ jobs:
           fi
 
       # A binary that cannot start is not a release. --help exercises argument
-      # parsing without needing a database.
+      # parsing without needing a database. Skipped for cross targets, which
+      # cannot execute on this host.
       - name: Smoke test
         if: '!matrix.cross'
         run: ./target/${{ matrix.target }}/release/stampeded --help
-
-      # rama-dns runs bindgen on Linux and needs libclang. Only for the
-      # native Linux build -- `cross` compiles inside its own container, which
-      # carries its own toolchain.
-      - name: install libclang (native linux builds)
-        if: runner.os == 'Linux' && !matrix.cross
-        run: sudo apt-get update && sudo apt-get install -y libclang-dev
 
       - uses: actions/upload-artifact@v4
         with:
           name: stampeded-${{ matrix.gem }}
           path: target/${{ matrix.target }}/release/stampeded
+          if-no-files-found: error
 
   gems:
-    needs: binaries
+    needs: [release-please, binaries]
+    if: ${{ needs.release-please.outputs.releases_created == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+
+      # The gemspec requires >= 4.0. Building on 3.4 would either fail or
+      # produce a gem nobody can install.
       - uses: ruby/setup-ruby@v1
-        with: { ruby-version: "3.4" }
+        with:
+          ruby-version: "4.0"
+          working-directory: ruby
+
       - uses: actions/download-artifact@v4
         with: { path: artifacts }
 
-      # One gem per platform, binary inside. `rake stage_schema` copies
-      # schema/*.sql in from the repo root -- without it the gem ships no
-      # schema and every install fails at stampeded:install.
       - name: Assemble platform gems
         working-directory: ruby
         run: |
           set -euo pipefail
+
+          # Copies schema/*.sql and LICENSE in from the repo root. Without it
+          # the gem ships no schema and every install fails at
+          # stampeded:install.
           bundle exec rake stage_schema
+
           for dir in ../artifacts/stampeded-*; do
             plat="${dir#../artifacts/stampeded-}"
-            mkdir -p "exe/$plat"
-            cp "$dir/stampeded" "exe/$plat/stampeded"
-            chmod +x "exe/$plat/stampeded"
-            STAMPEDED_GEM_PLATFORM="$plat" gem build stampeded.gemspec
+
+            # libexec, NOT exe/<platform>/: exe/ holds the Ruby launcher that
+            # RubyGems installs as the `stampeded` command, and Daemon resolves
+            # the binary from libexec.
+            mkdir -p libexec
+            cp "$dir/stampeded" libexec/stampeded
+            chmod +x libexec/stampeded
+
+            # Unbundled, and with the platform set for this invocation only:
+            # under `bundle exec` Bundler re-resolves the gemspec and rejects
+            # the platform triple.
+            env -u BUNDLE_GEMFILE -u RUBYOPT \
+              STAMPEDED_GEM_PLATFORM="$plat" gem build stampeded.gemspec
           done
-          # And the platformless one, for platforms we do not cross-compile.
-          bundle exec rake package_generic
+
+          # And the platformless one, for targets we do not cross-compile. It
+          # must NOT carry a binary, so clear the staged one first.
+          rm -f libexec/stampeded
+          env -u BUNDLE_GEMFILE -u RUBYOPT gem build stampeded.gemspec
+
           ls -la ./*.gem
+
+      # Every gem must contain what its name promises. A platform gem without a
+      # binary installs cleanly and then cannot start the daemon -- which is
+      # exactly what a mis-set STAMPEDED_GEM_PLATFORM produces, silently.
+      - name: Verify gem contents
+        working-directory: ruby
+        run: |
+          set -euo pipefail
+          fail=0
+          for g in ./*.gem; do
+            listing=$(tar -xOf "$g" data.tar.gz | tar -tz)
+            echo "=== $g"
+            case "$g" in
+              *-darwin.gem|*-linux*.gem)
+                echo "$listing" | grep -qx "libexec/stampeded" \
+                  || { echo "  MISSING libexec/stampeded in a platform gem"; fail=1; } ;;
+              *)
+                echo "$listing" | grep -qx "libexec/stampeded" \
+                  && { echo "  platformless gem must not ship a binary"; fail=1; } ;;
+            esac
+            echo "$listing" | grep -qx "exe/stampeded" \
+              || { echo "  MISSING exe/stampeded (the launcher)"; fail=1; }
+            echo "$listing" | grep -q "^schema/.*\.sql$" \
+              || { echo "  MISSING schema/*.sql"; fail=1; }
+          done
+          exit $fail
 
       - uses: actions/upload-artifact@v4
         with:
           name: gems
           path: ruby/*.gem
+          if-no-files-found: error
+
+  attach:
+    needs: [release-please, gems]
+    if: ${{ needs.release-please.outputs.releases_created == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: gems, path: gems }
+
+      - run: ls -la gems
+
+      # Attached to the release, not pushed to any registry. Installation is
+      # `gem install ./stampeded-<version>-<platform>.gem` from the release
+      # page, or a git/path reference in a Gemfile.
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: gems/*.gem
+          tag_name: ${{ needs.release-please.outputs.tag_name }}

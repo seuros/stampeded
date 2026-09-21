@@ -50,6 +50,10 @@ jobs:
       # what stops that regressing silently.
       - run: cargo build --no-default-features --lib
       - run: cargo test --workspace
+      # The game page is behind a feature flag, so --workspace alone never
+      # compiled it, let alone tested it. Its suite found a CDN shim, a dropped
+      # SSE contract and four unserved assets -- all of it invisible to CI.
+      - run: cargo test --workspace --features game
 
   ruby:
     runs-on: ubuntu-latest
