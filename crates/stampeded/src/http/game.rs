@@ -163,7 +163,7 @@ const INDEX: &str = r#"<!doctype html>
 <script type="importmap">
 {
   "imports": {
-    "three": "/game/three.module.js",
+    "three": "/game/three.module.min.js",
     "gltf": "/game/loaders/gltf-loader.js"
   }
 }
@@ -736,7 +736,7 @@ async fn build_world_state(state: &ApiState) -> GameWorld {
 
 /// Serve Three.js library from embedded bytes.
 pub async fn three_module() -> impl IntoResponse {
-    const THREE_JS: &[u8] = include_bytes!("../../assets/three.module.js");
+    const THREE_JS: &[u8] = include_bytes!("../../assets/three.module.min.js");
 
     (
         [(header::CONTENT_TYPE, "application/javascript")],
@@ -754,6 +754,20 @@ pub async fn gltf_loader() -> impl IntoResponse {
         GLTF_LOADER,
     )
         .into_response()
+}
+
+/// Serve three's core module from embedded bytes.
+///
+/// From 0.16x on, build/three.module.js is a thin re-export shell whose every
+/// symbol comes from `./three.core.min.js`. Vendoring only the module gives you
+/// a file that imports a megabyte it cannot reach, and `import * as THREE`
+/// fails outright -- the whole scene, not just the loader. The minified pair is
+/// 733 KB against 2044 KB for the readable one; the addons have no minified
+/// build upstream, so they stay readable. Names must match the import exactly.
+pub async fn three_core() -> impl IntoResponse {
+    const SRC: &[u8] = include_bytes!("../../assets/three.core.min.js");
+
+    ([(header::CONTENT_TYPE, "application/javascript")], SRC).into_response()
 }
 
 /// Serve GLTFLoader's addon dependencies from embedded bytes.
@@ -882,7 +896,7 @@ mod tests {
 
         // The Three.js loader must be served from the binary
         assert!(
-            html.contains("/game/three.module.js"),
+            html.contains("/game/three.module.min.js"),
             "the game page does not load Three.js"
         );
 

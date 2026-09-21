@@ -420,10 +420,16 @@ async fn the_game_world_assets_fetch_nothing_from_the_network() {
     assert_eq!(status, 200, "the game page cannot load");
 
     // Verify Three.js module has no external imports
-    let (status, three_js) = request(&addr, "GET", "/game/three.module.js", None).await;
+    let (status, three_js) = request(&addr, "GET", "/game/three.module.min.js", None).await;
     assert_eq!(status, 200, "three.module.js must be served from the binary");
-    assert!(three_js.len() > 100_000, "three.module.js looks truncated: {} bytes", three_js.len());
-    assert_no_remote_fetch("three.module.js", &three_js);
+    assert!(three_js.len() > 100_000, "three.module.min.js looks truncated: {} bytes", three_js.len());
+    assert_no_remote_fetch("three.module.min.js", &three_js);
+
+    // The shell is useless without the core it re-exports from.
+    let (status, core) = request(&addr, "GET", "/game/three.core.min.js", None).await;
+    assert_eq!(status, 200, "three.core.min.js must be served: the module imports it");
+    assert!(core.len() > 100_000, "three.core.min.js looks truncated: {} bytes", core.len());
+    assert_no_remote_fetch("three.core.min.js", &core);
 
     // Verify GLTFLoader has no external imports. Served from /game/loaders/ so
     // its own '../utils/...' imports resolve to /game/utils/.
@@ -481,10 +487,16 @@ async fn the_game_world_assets_fetch_nothing_from_the_network() {
 /// cannot tell a citation from a network call gets silenced rather than fixed.
 /// So: strip comments, then look for the constructs that actually fetch.
 fn assert_no_remote_fetch(what: &str, src: &str) {
-    let code = strip_js_comments(src);
+    // Whitespace-collapsed, because the vendored three is MINIFIED: it writes
+    // `from"./three.core.min.js"` with no space at all, so every pattern here
+    // that assumed one would sail straight past a real remote import.
+    let code: String = strip_js_comments(src)
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
 
     for pat in [
-        "from \"http", "from 'http", "from \"//", "from '//",
+        "from\"http", "from'http", "from\"//", "from'//",
         "import(\"http", "import('http",
         "fetch(\"http", "fetch('http",
         "importScripts(\"http", "importScripts('http",
@@ -654,39 +666,65 @@ fn the_models_in_the_binary_are_actually_used_by_the_scene() {
 #[cfg(feature = "game")]
 fn every_import_in_the_served_assets_resolves_to_a_route() {
     let routes = include_str!("../src/http/mod.rs");
-    let assets: [(&str, &str); 3] = [
+    // EVERY embedded .js, not a hand-picked subset. The first version listed
+    // only the three addons and so never looked at three.module.js -- a
+    // re-export shell importing ./three.core.min.js, which was not vendored at
+    // all. The guard below keeps this list honest.
+    let assets: [(&str, &str); 5] = [
+        ("/game/three.module.min.js", include_str!("../assets/three.module.min.js")),
+        ("/game/three.core.min.js", include_str!("../assets/three.core.min.js")),
         ("/game/loaders/gltf-loader.js", include_str!("../assets/gltf-loader.js")),
         ("/game/utils/BufferGeometryUtils.js", include_str!("../assets/utils/BufferGeometryUtils.js")),
         ("/game/utils/SkeletonUtils.js", include_str!("../assets/utils/SkeletonUtils.js")),
     ];
 
+    // Count include_bytes! of .js specifically -- a bare ".js\")" also matches
+    // route paths and importmap entries in the same file, which made this guard
+    // read 7 against 5 real assets the first time it ran.
+    let embedded_js = include_str!("../src/http/game.rs")
+        .split("include_bytes!(\"../../assets/")
+        .skip(1)
+        .filter(|r| r.split('"').next().is_some_and(|f| f.ends_with(".js")))
+        .count();
+    assert_eq!(
+        assets.len(), embedded_js,
+        "the binary embeds {embedded_js} .js assets but this test checks {}. \
+         Add the new one here, or its imports go unverified -- which is exactly \
+         how three.core.min.js came to be imported but never served.",
+        assets.len()
+    );
+
     for (served_at, src) in assets {
         let base = served_at.rsplit_once('/').unwrap().0;
 
-        for line in src.lines() {
-            let t = line.trim_start();
-            if t.starts_with("//") || t.starts_with('*') || !t.starts_with("import") {
+        // Scan for module specifiers directly rather than parsing lines: the
+        // vendored three is minified into ONE 376 KB line, so a line-based
+        // parser sees the whole file as a single "import ..." statement and
+        // then lifts a quoted fragment out of a GLSL shader string.
+        //
+        // Only RELATIVE specifiers are asserted on. Those are the ones that
+        // resolve against the serving path and 404 when unserved -- the actual
+        // bug twice over. A bare specifier is the importmap's business, and
+        // trying to recognise them inside minified soup produces false alarms.
+        for (i, _) in src.match_indices("from") {
+            let rest = src[i + 4..].trim_start();
+            let Some(quote) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') else {
+                continue;
+            };
+            let Some(spec) = rest[1..].split(quote).next() else { continue };
+            if !(spec.starts_with("./") || spec.starts_with("../")) || spec.len() > 200 {
                 continue;
             }
-            let Some(spec) = t.split('\'').nth(1) else { continue };
 
-            // Bare specifiers are the importmap's problem, and it is in the HTML.
-            if !spec.starts_with('.') {
-                assert!(
-                    spec == "three",
-                    "{served_at} imports bare {spec:?}, which the importmap does \
-                     not define"
-                );
-                continue;
-            }
-
-            // Resolve the relative path against where this file is served.
             let mut resolved = base.to_string();
             for seg in spec.split('/') {
                 match seg {
                     "." => {}
-                    ".." => { resolved = resolved.rsplit_once('/').unwrap().0.to_string(); }
-                    other => { resolved.push('/'); resolved.push_str(other); }
+                    ".." => resolved = resolved.rsplit_once('/').unwrap().0.to_string(),
+                    other => {
+                        resolved.push('/');
+                        resolved.push_str(other);
+                    }
                 }
             }
 
