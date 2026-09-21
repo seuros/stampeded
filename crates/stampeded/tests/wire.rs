@@ -470,7 +470,6 @@ async fn the_game_world_assets_fetch_nothing_from_the_network() {
 
     let _ = tx.send(true);
 }
-
 /// Assert a served script fetches nothing from the network.
 ///
 /// Checks CODE, not comments. This is the third time today that a naive
@@ -486,6 +485,7 @@ async fn the_game_world_assets_fetch_nothing_from_the_network() {
 /// Each time the library was innocent and the test was wrong, and a test that
 /// cannot tell a citation from a network call gets silenced rather than fixed.
 /// So: strip comments, then look for the constructs that actually fetch.
+#[cfg(feature = "game")]
 fn assert_no_remote_fetch(what: &str, src: &str) {
     // Whitespace-collapsed, because the vendored three is MINIFIED: it writes
     // `from"./three.core.min.js"` with no space at all, so every pattern here
@@ -507,8 +507,8 @@ fn assert_no_remote_fetch(what: &str, src: &str) {
         );
     }
 }
-
 /// Remove // and /* */ comments, leaving string literals intact.
+#[cfg(feature = "game")]
 fn strip_js_comments(src: &str) -> String {
     let b = src.as_bytes();
     let mut out = String::with_capacity(src.len());
