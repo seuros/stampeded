@@ -164,7 +164,7 @@ const INDEX: &str = r#"<!doctype html>
 {
   "imports": {
     "three": "/game/three.module.js",
-    "gltf": "/game/gltf-loader.js"
+    "gltf": "/game/loaders/gltf-loader.js"
   }
 }
 </script>
@@ -756,6 +756,28 @@ pub async fn gltf_loader() -> impl IntoResponse {
         .into_response()
 }
 
+/// Serve GLTFLoader's addon dependencies from embedded bytes.
+///
+/// GLTFLoader does `import ... from '../utils/BufferGeometryUtils.js'`. Served
+/// from /game/gltf-loader.js that resolved to /utils/BufferGeometryUtils.js,
+/// which nothing served -- a 404, so the module never evaluated, the loader
+/// never existed, and every model silently fell back to a primitive. Serving
+/// the loader from /game/loaders/ instead makes ../utils/ land on /game/utils/,
+/// so three's own relative imports resolve untouched. Do not flatten these
+/// paths without re-reading the import statements.
+pub async fn buffer_geometry_utils() -> impl IntoResponse {
+    const SRC: &[u8] = include_bytes!("../../assets/utils/BufferGeometryUtils.js");
+
+    ([(header::CONTENT_TYPE, "application/javascript")], SRC).into_response()
+}
+
+/// See buffer_geometry_utils: GLTFLoader imports `clone` from this.
+pub async fn skeleton_utils() -> impl IntoResponse {
+    const SRC: &[u8] = include_bytes!("../../assets/utils/SkeletonUtils.js");
+
+    ([(header::CONTENT_TYPE, "application/javascript")], SRC).into_response()
+}
+
 /// Serve a 3D model file from embedded assets.
 pub async fn model(model_name: String) -> impl IntoResponse {
     match model_name.as_str() {
@@ -866,7 +888,7 @@ mod tests {
 
         // The GLTF loader must be served from the binary
         assert!(
-            html.contains("/game/gltf-loader.js"),
+            html.contains("/game/loaders/gltf-loader.js"),
             "the game page does not load GLTFLoader"
         );
 

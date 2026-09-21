@@ -62,7 +62,9 @@ pub async fn serve(
             r.with_get("/game", game::index)
                 .with_get("/game/stream", game::stream)
                 .with_get("/game/three.module.js", game::three_module)
-                .with_get("/game/gltf-loader.js", game::gltf_loader)
+                .with_get("/game/loaders/gltf-loader.js", game::gltf_loader)
+                .with_get("/game/utils/BufferGeometryUtils.js", game::buffer_geometry_utils)
+                .with_get("/game/utils/SkeletonUtils.js", game::skeleton_utils)
                 .with_get("/game/models/{name}", |rama::http::service::web::extract::Path(name): rama::http::service::web::extract::Path<String>| async move {
                     game::model(name).await
                 })

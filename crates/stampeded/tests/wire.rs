@@ -425,11 +425,20 @@ async fn the_game_world_assets_fetch_nothing_from_the_network() {
     assert!(three_js.len() > 100_000, "three.module.js looks truncated: {} bytes", three_js.len());
     assert_no_remote_fetch("three.module.js", &three_js);
 
-    // Verify GLTFLoader has no external imports
-    let (status, gltf_loader) = request(&addr, "GET", "/game/gltf-loader.js", None).await;
+    // Verify GLTFLoader has no external imports. Served from /game/loaders/ so
+    // its own '../utils/...' imports resolve to /game/utils/.
+    let (status, gltf_loader) = request(&addr, "GET", "/game/loaders/gltf-loader.js", None).await;
     assert_eq!(status, 200, "gltf-loader.js must be served from the binary");
     assert!(gltf_loader.len() > 10_000, "gltf-loader.js looks truncated: {} bytes", gltf_loader.len());
     assert_no_remote_fetch("gltf-loader.js", &gltf_loader);
+
+    // And the addon utils it imports. These 404'd, which killed the loader.
+    for util in ["BufferGeometryUtils.js", "SkeletonUtils.js"] {
+        let (status, body) = request(&addr, "GET", &format!("/game/utils/{util}"), None).await;
+        assert_eq!(status, 200, "{util} must be served: GLTFLoader imports it");
+        assert!(body.len() > 5_000, "{util} looks truncated: {} bytes", body.len());
+        assert_no_remote_fetch(util, &body);
+    }
 
     // Verify models are served and are binary (not HTML error pages)
     let models = vec![
@@ -627,5 +636,65 @@ fn the_models_in_the_binary_are_actually_used_by_the_scene() {
             "the scene asks for {referenced:?} but it is not embedded -- it \
              will 404 at runtime. Embedded: {embedded:?}"
         );
+    }
+}
+
+/// Every import in every served JS asset must resolve to something we serve.
+///
+/// The vendored GLTFLoader does `import { toTrianglesDrawMode } from
+/// '../utils/BufferGeometryUtils.js'`. Served from /game/gltf-loader.js, that
+/// resolves to /utils/BufferGeometryUtils.js -- a path no route answered. The
+/// browser 404'd, the module never evaluated, GLTFLoader never came into
+/// existence, and every model quietly fell back to a primitive box. The page
+/// still returned 200 and the world still rendered, so nothing looked wrong.
+///
+/// The existing asset test only asked whether anything was fetched from the
+/// NETWORK. A local import that 404s is just as fatal and it did not look.
+#[test]
+#[cfg(feature = "game")]
+fn every_import_in_the_served_assets_resolves_to_a_route() {
+    let routes = include_str!("../src/http/mod.rs");
+    let assets: [(&str, &str); 3] = [
+        ("/game/loaders/gltf-loader.js", include_str!("../assets/gltf-loader.js")),
+        ("/game/utils/BufferGeometryUtils.js", include_str!("../assets/utils/BufferGeometryUtils.js")),
+        ("/game/utils/SkeletonUtils.js", include_str!("../assets/utils/SkeletonUtils.js")),
+    ];
+
+    for (served_at, src) in assets {
+        let base = served_at.rsplit_once('/').unwrap().0;
+
+        for line in src.lines() {
+            let t = line.trim_start();
+            if t.starts_with("//") || t.starts_with('*') || !t.starts_with("import") {
+                continue;
+            }
+            let Some(spec) = t.split('\'').nth(1) else { continue };
+
+            // Bare specifiers are the importmap's problem, and it is in the HTML.
+            if !spec.starts_with('.') {
+                assert!(
+                    spec == "three",
+                    "{served_at} imports bare {spec:?}, which the importmap does \
+                     not define"
+                );
+                continue;
+            }
+
+            // Resolve the relative path against where this file is served.
+            let mut resolved = base.to_string();
+            for seg in spec.split('/') {
+                match seg {
+                    "." => {}
+                    ".." => { resolved = resolved.rsplit_once('/').unwrap().0.to_string(); }
+                    other => { resolved.push('/'); resolved.push_str(other); }
+                }
+            }
+
+            assert!(
+                routes.contains(&format!("\"{resolved}\"")),
+                "{served_at} imports {spec:?}, which resolves to {resolved} -- \
+                 no route serves that, so it 404s and the module never loads"
+            );
+        }
     }
 }
