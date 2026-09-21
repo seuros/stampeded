@@ -36,8 +36,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { gem: arm64-darwin,       target: aarch64-apple-darwin,       os: macos-14 }
-          - { gem: x86_64-darwin,      target: x86_64-apple-darwin,        os: macos-13 }
+          # macOS is DISABLED while this repo is private: GitHub bills macOS
+          # runners at 10x the Linux rate against a private repo's quota, and
+          # two darwin targets per release is not worth that during setup.
+          # Re-enable by uncommenting -- the rest of the pipeline is unchanged,
+          # and `rake package[arm64-darwin]` still builds them locally on a Mac.
+          #
+          # Until then darwin installs get the platformless gem, which says
+          # there is no build for the platform and how to point at a local one.
+          #
+          # - { gem: arm64-darwin,       target: aarch64-apple-darwin,       os: macos-14 }
+          # - { gem: x86_64-darwin,      target: x86_64-apple-darwin,        os: macos-13 }
           - { gem: aarch64-linux-gnu,  target: aarch64-unknown-linux-gnu,  os: ubuntu-latest, cross: true }
           - { gem: x86_64-linux-gnu,   target: x86_64-unknown-linux-gnu,   os: ubuntu-latest }
           # musl is not optional: most container images are Alpine, where a gnu
