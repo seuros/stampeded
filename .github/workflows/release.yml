@@ -45,15 +45,24 @@ jobs:
           # Until then darwin installs get the platformless gem, which says
           # there is no build for the platform and how to point at a local one.
           #
+          # ONE target to start with, so the first release proves the pipeline
+          # rather than debugging six cross-compilers at once. It is also the
+          # only entry that builds natively, so it smoke-tests the binary.
+          - { gem: x86_64-linux-gnu,   target: x86_64-unknown-linux-gnu,   os: ubuntu-latest }
+
+          # Add back once a release has gone green. musl is not optional
+          # long-term: most container images are Alpine, where a gnu binary
+          # fails at exec with a linker error rather than anything actionable.
+          #
+          # - { gem: aarch64-linux-gnu,  target: aarch64-unknown-linux-gnu,  os: ubuntu-latest, cross: true }
+          # - { gem: aarch64-linux-musl, target: aarch64-unknown-linux-musl, os: ubuntu-latest, cross: true }
+          # - { gem: x86_64-linux-musl,  target: x86_64-unknown-linux-musl,  os: ubuntu-latest, cross: true }
+          #
+          # macOS stays off while the repo is private: GitHub bills those
+          # runners at 10x against a private quota.
+          #
           # - { gem: arm64-darwin,       target: aarch64-apple-darwin,       os: macos-14 }
           # - { gem: x86_64-darwin,      target: x86_64-apple-darwin,        os: macos-13 }
-          - { gem: aarch64-linux-gnu,  target: aarch64-unknown-linux-gnu,  os: ubuntu-latest, cross: true }
-          - { gem: x86_64-linux-gnu,   target: x86_64-unknown-linux-gnu,   os: ubuntu-latest }
-          # musl is not optional: most container images are Alpine, where a gnu
-          # binary fails at exec with a linker error rather than anything
-          # actionable.
-          - { gem: aarch64-linux-musl, target: aarch64-unknown-linux-musl, os: ubuntu-latest, cross: true }
-          - { gem: x86_64-linux-musl,  target: x86_64-unknown-linux-musl,  os: ubuntu-latest, cross: true }
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -160,6 +169,18 @@ jobs:
         run: |
           set -euo pipefail
           fail=0
+
+          # One platform gem per matrix target, plus the platformless one.
+          # Assert the COUNT: a matrix entry that silently failed to produce a
+          # gem, or a gemspec that stopped honouring STAMPEDED_GEM_PLATFORM and
+          # emitted the stub twice, both leave a release that looks fine and
+          # installs nothing usable.
+          expected=2
+          actual=$(ls -1 ./*.gem | wc -l | tr -d " ")
+          echo "gems built: $actual (expected $expected)"
+          ls -1 ./*.gem
+          [ "$actual" = "$expected" ] || { echo "WRONG NUMBER OF GEMS"; exit 1; }
+
           for g in ./*.gem; do
             listing=$(tar -xOf "$g" data.tar.gz | tar -tz)
             echo "=== $g"
