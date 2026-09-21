@@ -66,34 +66,32 @@ jobs:
 
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.release-please.outputs.tag_name }}
 
-      - uses: dtolnay/rust-toolchain@master
+      # mise owns the toolchain version, from mise.toml -- the same file used
+      # locally, so a release cannot be built with a Rust nobody tested on.
+      - uses: jdx/mise-action@v4
+
+      - name: Set up mbx
+        uses: jdx/mr-boxington-action@v1
         with:
-          toolchain: "1.98"
-          targets: ${{ matrix.target }}
+          backend: github
+          github-cache-mode: target
+          cache-generation: stampeded-release-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+
+      - run: rustup target add ${{ matrix.target }}
 
       # BEFORE the build, not after. rama-dns runs bindgen on Linux and needs
       # libclang; installing it afterwards meant the build it was meant to fix
-      # had already failed. `cross` compiles inside its own container, which
-      # carries its own toolchain, so only the native Linux build needs this.
-      - name: Install libclang (native linux build)
+      # had already failed.
+      - name: Install libclang
         if: runner.os == 'Linux' && !matrix.cross
         run: sudo apt-get update && sudo apt-get install -y libclang-dev
 
-      - name: Install cross
-        if: matrix.cross
-        run: cargo install cross --locked
-
       - name: Build
-        run: |
-          if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --release --bin stampeded --target ${{ matrix.target }}
-          else
-            cargo build --release --bin stampeded --target ${{ matrix.target }}
-          fi
+        run: mbx build --release --bin stampeded --target ${{ matrix.target }}
 
       # A binary that cannot start is not a release. --help exercises argument
       # parsing without needing a database. Skipped for cross targets, which
@@ -102,7 +100,7 @@ jobs:
         if: '!matrix.cross'
         run: ./target/${{ matrix.target }}/release/stampeded --help
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: stampeded-${{ matrix.gem }}
           path: target/${{ matrix.target }}/release/stampeded
@@ -113,18 +111,20 @@ jobs:
     if: ${{ needs.release-please.outputs.releases_created == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.release-please.outputs.tag_name }}
 
-      # The gemspec requires >= 4.0. Building on 3.4 would either fail or
-      # produce a gem nobody can install.
-      - uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: "4.0"
-          working-directory: ruby
+      # Ruby comes from mise.toml, which declares >= the gemspec's floor. A
+      # version pinned in a workflow file is a version nobody checks against
+      # the gemspec -- that is how this built a >= 4.0 gem on 3.4.
+      - uses: jdx/mise-action@v4
 
-      - uses: actions/download-artifact@v4
+      - name: Install gems
+        working-directory: ruby
+        run: bundle install --jobs 4
+
+      - uses: actions/download-artifact@v8
         with: { path: artifacts }
 
       - name: Assemble platform gems
@@ -199,7 +199,7 @@ jobs:
           done
           exit $fail
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: gems
           path: ruby/*.gem
@@ -210,7 +210,7 @@ jobs:
     if: ${{ needs.release-please.outputs.releases_created == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with: { name: gems, path: gems }
 
       - run: ls -la gems
@@ -218,7 +218,7 @@ jobs:
       # Attached to the release, not pushed to any registry. Installation is
       # `gem install ./stampeded-<version>-<platform>.gem` from the release
       # page, or a git/path reference in a Gemfile.
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: gems/*.gem
           tag_name: ${{ needs.release-please.outputs.tag_name }}

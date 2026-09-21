@@ -1,3 +1,8 @@
 [tools]
 # 1.98 because mcp-host 0.3.2 requires it (mcphost-rs pins the same).
 rust = "1.98"
+# The gemspec requires >= 4.0. Declared here so CI installs the same Ruby the
+# gem is built against, rather than a version picked in a workflow file that
+# nobody checks against the gemspec -- which is how the release workflow came
+# to build a >= 4.0 gem on 3.4.
+ruby = "4.0"

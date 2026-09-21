@@ -4,74 +4,63 @@ on:
   push: { branches: [master] }
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
     services:
-      # Postgres 18+ ONLY. The schema uses uuidv7(), RETURNING OLD./NEW. and
-      # generated columns, with no compatibility shims -- so an older image
-      # does not fail a test, it fails to apply the schema at all.
       postgres:
+        # 18, not latest: the schema uses uuidv7(), RETURNING OLD./NEW. and
+        # statement triggers with transition tables. On 17 it does not load.
         image: postgres:18
         env:
           POSTGRES_USER: stampeded
           POSTGRES_PASSWORD: stampeded
           POSTGRES_DB: stampeded_test
         options: >-
-          --health-cmd pg_isready --health-interval 10s
-          --health-timeout 5s --health-retries 5
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 20
         ports: ["5432:5432"]
-
     env:
       STAMPEDED_TEST_DATABASE_URL: postgres://stampeded:stampeded@localhost/stampeded_test
-
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          # mcp-host's MSRV. Pinned rather than `stable` so a toolchain bump is
-          # a deliberate commit and not a Tuesday morning surprise.
-          toolchain: "1.98"
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@v7
 
-      # rama-dns runs bindgen in a build script on Linux, which needs
-      # libclang. Whether a runner image happens to ship it is not something to
-      # depend on: without it the build dies with "Unable to find libclang",
-      # which names neither the crate that wanted it nor the package that
-      # provides it. Found by running this workflow under act, where the image
-      # does not have it.
+      # mise owns the toolchain versions, from mise.toml. One place decides
+      # which Rust and which Ruby, and it is the same file used locally.
+      - uses: jdx/mise-action@v4
+
+      # mbx wraps cargo with a cache that keys on the toolchain and target, so
+      # there is no second compiler cache layered on top of it.
+      - name: Set up mbx
+        uses: jdx/mr-boxington-action@v1
+        with:
+          backend: github
+          github-cache-mode: target
+          cache-generation: stampeded-ci-${{ hashFiles('Cargo.lock') }}
+
+      # rama-dns runs bindgen on Linux and needs libclang. Without it the build
+      # dies with "Unable to find libclang", which names nothing useful.
       - run: sudo apt-get update && sudo apt-get install -y libclang-dev
 
-      - run: cargo build --workspace
-      - run: cargo clippy --all-targets -- -D warnings
-      # The library alone must compile without rama or mcp-host: an application
-      # embedding the queue should not have to build an HTTP stack, and this is
-      # what stops that regressing silently.
-      - run: cargo build --no-default-features --lib
-      - run: cargo test --workspace
-      # The game page is behind a feature flag, so --workspace alone never
-      # compiled it, let alone tested it. Its suite found a CDN shim, a dropped
-      # SSE contract and four unserved assets -- all of it invisible to CI.
-      - run: cargo test --workspace --features game
+      - run: mbx build --workspace
+      - run: mbx clippy --all-targets -- -D warnings
+      # Both feature shapes: the game page is behind a flag, so a default
+      # clippy run sees its test helpers as dead code and a default test run
+      # never compiles its suite at all.
+      - run: mbx clippy --all-targets --features game -- -D warnings
+      - run: mbx build --no-default-features --lib
+      - run: mbx test --workspace
+      - run: mbx test --workspace --features game
+
+      - run: psql "$STAMPEDED_TEST_DATABASE_URL" -f schema/schema.sql
+      - name: Schema is idempotent enough to diff
+        run: psql "$STAMPEDED_TEST_DATABASE_URL" -c "SELECT count(*) FROM stampeded_jobs"
 
   ruby:
     runs-on: ubuntu-latest
-    # The gemspec requires Ruby >= 4.0, so that is what gets tested. A matrix
-    # is what makes a required_ruby_version claim true rather than aspirational
-    # -- it exists to cover the supported range, not to look thorough.
-    strategy:
-      fail-fast: false
-      matrix:
-        ruby: ["4.0"]
-
-    # Every `run` in this job is in the gem directory. Without this the steps
-    # execute at the repo root, which has no Gemfile -- `bundle exec` fails
-    # there with no useful message.
-    defaults:
-      run:
-        working-directory: ruby
-
     services:
       postgres:
         image: postgres:18
@@ -80,24 +69,22 @@ jobs:
           POSTGRES_PASSWORD: stampeded
           POSTGRES_DB: stampeded_test
         options: >-
-          --health-cmd pg_isready --health-interval 10s
-          --health-timeout 5s --health-retries 5
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 20
         ports: ["5432:5432"]
-
     env:
       STAMPEDED_TEST_DATABASE_URL: postgres://stampeded:stampeded@localhost/stampeded_test
-
     steps:
-      - uses: actions/checkout@v4
-      - uses: ruby/setup-ruby@v1
-        with:
-          # REQUIRED. setup-ruby falls back to .ruby-version or
-          # .tool-versions, and this repo has neither -- it uses mise. Without
-          # it the action fails immediately with "input ruby-version needs to
-          # be specified", which is how this job failed the first time it was
-          # ever run.
-          ruby-version: ${{ matrix.ruby }}
-          working-directory: ruby
-          bundler-cache: true
-      - run: bundle exec rake test
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v4
+
+      - name: Install gems
         working-directory: ruby
+        run: bundle install --jobs 4
+
+      # The suite loads ruby/schema/schema.sql, a staged copy of the real
+      # schema. `rake test` depends on stage_schema so it cannot run against a
+      # stale one -- it did once, and passed against the previous schema.
+      - name: Test
+        working-directory: ruby
+        run: bundle exec rake test
