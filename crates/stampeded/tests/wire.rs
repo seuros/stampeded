@@ -572,3 +572,60 @@ fn the_game_page_listens_for_the_event_the_server_actually_sends() {
         }
     }
 }
+
+/// Models that ship in the binary must actually be used by the page.
+///
+/// All 14 Kenney models were embedded with include_bytes!, given routes, and
+/// asserted-on by a test that checked the HTML mentions /game/gltf-loader.js --
+/// while the page contained zero loader.load() calls and built its entire scene
+/// from BoxGeometry and ConeGeometry. The assets were 1.6 MB of decoration and
+/// every existing test was satisfied.
+///
+/// So: the page must load models, and every model it names must be embedded.
+#[test]
+#[cfg(feature = "game")]
+fn the_models_in_the_binary_are_actually_used_by_the_scene() {
+    let raw = include_str!("../src/http/game.rs");
+
+    // Line-based, and deliberately not strip_js_comments: this file is Rust
+    // source wrapping a JS string, and that stripper's quote state machine
+    // desyncs on apostrophes in prose ("Kenney's pieces"), leaving comments in.
+    // The comment describing THIS bug contains the text "loader.load()", so the
+    // naive check passed against a scene that had been reverted to primitives.
+    // Caught by mutation -- twice.
+    let calls_loader = raw.lines().any(|l| {
+        let t = l.trim_start();
+        !t.starts_with("//") && t.contains("loader.load(")
+    });
+
+    assert!(
+        calls_loader,
+        "the page never calls loader.load(), so the embedded .glb models are \
+         dead weight and the scene is primitives"
+    );
+
+    // Every model the page asks for at runtime must be embedded, or it 404s.
+    let embedded: Vec<&str> = raw
+        .split("include_bytes!(\"../../assets/models/")
+        .skip(1)
+        .filter_map(|r| r.split('"').next())
+        .collect();
+    assert!(!embedded.is_empty(), "no models embedded at all");
+
+    for referenced in raw
+        .split("MODEL_FILES")
+        .nth(1)
+        .unwrap_or("")
+        .split("};")
+        .next()
+        .unwrap_or("")
+        .split('"')
+        .filter(|t| t.ends_with(".glb"))
+    {
+        assert!(
+            embedded.contains(&referenced),
+            "the scene asks for {referenced:?} but it is not embedded -- it \
+             will 404 at runtime. Embedded: {embedded:?}"
+        );
+    }
+}

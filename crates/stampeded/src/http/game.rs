@@ -171,7 +171,69 @@ const INDEX: &str = r#"<!doctype html>
 
 <script type="module">
 import * as THREE from "three";
-// GLTFLoader is available via /game/gltf-loader.js if needed
+import { GLTFLoader } from "gltf";
+
+// The Kenney models were embedded in the binary and routed, and then nothing
+// ever asked for them: not one loader.load() call anywhere, and the scene was
+// built entirely from BoxGeometry and ConeGeometry. 1.6 MB of assets shipped
+// as decoration. These four are the ones the world actually uses.
+const MODEL_FILES = {
+  box: "box-small.glb",
+  conveyor: "conveyor-long.glb",
+  crane: "crane.glb",
+  hopper: "hopper-square.glb",
+};
+const MODELS = {};
+
+// Normalise each model to a known size. Kenney's pieces do not share a scale,
+// and the layout below is written in world units, not model units.
+function fitTo(obj, targetSize) {
+  const bounds = new THREE.Box3().setFromObject(obj);
+  const size = new THREE.Vector3();
+  bounds.getSize(size);
+  const largest = Math.max(size.x, size.y, size.z);
+  if (largest > 0) obj.scale.setScalar(targetSize / largest);
+  return obj;
+}
+
+const TARGET_SIZE = { box: 0.8, conveyor: 10, crane: 2.5, hopper: 2 };
+
+(function loadModels() {
+  const loader = new GLTFLoader();
+  for (const [key, file] of Object.entries(MODEL_FILES)) {
+    loader.load(
+      `/game/models/${file}`,
+      (gltf) => {
+        const root = gltf.scene;
+        root.traverse((n) => {
+          if (n.isMesh) { n.castShadow = true; n.receiveShadow = true; }
+        });
+        MODELS[key] = fitTo(root, TARGET_SIZE[key]);
+      },
+      undefined,
+      // A missing model must not take the page down. updateScene rebuilds the
+      // world every tick, so the primitive fallback just keeps being used.
+      (err) => console.warn(`model ${file} failed to load; using primitive`, err),
+    );
+  }
+})();
+
+// A clone of a loaded model, or null if it has not arrived (or failed).
+function modelClone(key) {
+  const m = MODELS[key];
+  return m ? m.clone(true) : null;
+}
+
+// Recolour a clone without touching the shared source material.
+function tint(obj, color) {
+  obj.traverse((n) => {
+    if (n.isMesh && n.material) {
+      n.material = n.material.clone();
+      n.material.color = new THREE.Color(color);
+    }
+  });
+  return obj;
+}
 
 const canvas = document.getElementById("canvas");
 const scene = new THREE.Scene();
@@ -218,6 +280,9 @@ function createJobBox(state) {
     completed: 0x05ffa1,    // green
   };
   const color = colors[state] || 0xb2b7c7;
+  const model = modelClone("box");
+  if (model) return tint(model, color);
+
   const geo = new THREE.BoxGeometry(0.8, 0.8, 0.8);
   const mat = new THREE.MeshStandardMaterial({ color });
   const box = new THREE.Mesh(geo, mat);
@@ -228,6 +293,9 @@ function createJobBox(state) {
 
 // Helper: create a conveyor belt visual
 function createConveyorBelt(length = 8) {
+  const model = modelClone("conveyor");
+  if (model) return fitTo(model, length);
+
   const geo = new THREE.BoxGeometry(length, 0.4, 1.5);
   const mat = new THREE.MeshStandardMaterial({ color: 0x333333 });
   const belt = new THREE.Mesh(geo, mat);
@@ -238,6 +306,9 @@ function createConveyorBelt(length = 8) {
 
 // Helper: create a simple crane (worker)
 function createCrane() {
+  const model = modelClone("crane");
+  if (model) return model;
+
   const group = new THREE.Group();
 
   // Base
@@ -262,6 +333,9 @@ function createCrane() {
 
 // Helper: create a hopper (destination)
 function createHopper() {
+  const model = modelClone("hopper");
+  if (model) return model;
+
   const group = new THREE.Group();
 
   // Main body
@@ -518,10 +592,17 @@ where
     {
         return Vec::new();
     }
-    let rows = sqlx::query_as::<_, T>(sql)
-        .fetch_all(&mut *tx)
-        .await
-        .unwrap_or_default();
+    let rows = match sqlx::query_as::<_, T>(sql).fetch_all(&mut *tx).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            // NOT silent. The worker query referenced heartbeat_at and `alive`,
+            // neither of which exists on stampeded_workers, so it failed on
+            // every single tick -- and unwrap_or_default rendered that as an
+            // empty worker list. The world looked idle instead of broken.
+            tracing::warn!(error = %e, "game world query failed; rendering it empty");
+            Vec::new()
+        }
+    };
     let _ = tx.commit().await;
     rows
 }
@@ -582,11 +663,16 @@ async fn build_world_state(state: &ApiState) -> GameWorld {
     // Fetch worker information
     let worker_rows: Vec<(String, String, i32)> = timed_read(
         state,
-        "SELECT id::text, queues::text, EXTRACT(EPOCH FROM (NOW() - heartbeat_at))::int as secs_ago
-         FROM stampeded_workers
-         WHERE alive
-         ORDER BY heartbeat_at DESC
-         LIMIT 20",
+        // last_heartbeat, NOT heartbeat_at, and there is no `alive` column on
+        // stampeded_workers -- see the table definition. The original query
+        // referenced all three, so it errored on every tick and unwrap_or_default
+        // turned that into an empty worker list. The world never showed a single
+        // worker and looked merely idle.
+        "SELECT id::text, queues::text,
+                EXTRACT(EPOCH FROM (NOW() - last_heartbeat))::int AS secs_ago
+           FROM stampeded_workers
+          ORDER BY last_heartbeat DESC
+          LIMIT 20",
     )
     .await;
 
