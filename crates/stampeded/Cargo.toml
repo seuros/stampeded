@@ -4,7 +4,7 @@ description = "A polyglot job processor on Postgres 18+: claim, execute, schedul
 # A LITERAL version, not version.workspace: release-please's rust strategy
 # rewrites the member manifest, and an inherited version is not a value it can
 # edit -- it fails the run with "value at path package.version is not tagged".
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
