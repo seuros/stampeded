@@ -100,10 +100,18 @@ jobs:
         if: '!matrix.cross'
         run: ./target/${{ matrix.target }}/release/stampeded --help
 
+      # The platform travels in the FILENAME, not in a directory name.
+      # download-artifact flattens a single artifact into the download root, so
+      # the platform derived from the parent directory came out as "artifacts"
+      # and produced a gem called stampeded-<version>-artifacts.gem. Encoding
+      # it in the file removes the dependency on any layout at all.
+      - name: Name the binary after its platform
+        run: cp target/${{ matrix.target }}/release/stampeded stampeded-${{ matrix.gem }}
+
       - uses: actions/upload-artifact@v7
         with:
           name: stampeded-${{ matrix.gem }}
-          path: target/${{ matrix.target }}/release/stampeded
+          path: stampeded-${{ matrix.gem }}
           if-no-files-found: error
 
   gems:
@@ -145,20 +153,19 @@ jobs:
           # nothing, which `set -e` turned into a failed release after the
           # binary had already built successfully. download-artifact's layout is
           # not something this script should be asserting.
-          mapfile -t bins < <(find ../artifacts -type f -name stampeded)
+          mapfile -t bins < <(find ../artifacts -type f -name 'stampeded-*')
           [ "${#bins[@]}" -gt 0 ] || { echo "no binaries in ../artifacts"; exit 1; }
 
           for bin in "${bins[@]}"; do
-            plat="$(basename "$(dirname "$bin")")"
+            plat="$(basename "$bin")"
             plat="${plat#stampeded-}"
             echo "staging $plat from $bin"
-            dir="$(dirname "$bin")"
 
             # libexec, NOT exe/<platform>/: exe/ holds the Ruby launcher that
             # RubyGems installs as the `stampeded` command, and Daemon resolves
             # the binary from libexec.
             mkdir -p libexec
-            cp "$dir/stampeded" libexec/stampeded
+            cp "$bin" libexec/stampeded
             chmod +x libexec/stampeded
 
             # Unbundled, and with the platform set for this invocation only:
