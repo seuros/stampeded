@@ -3,7 +3,8 @@ resolver = "3"
 members = ["crates/stampeded"]
 
 [workspace.package]
-version = "0.1.0"
+# No version here: the crate carries its own so release-please can bump it, and
+# two copies would drift the moment one of them was updated by hand.
 edition = "2024"
 rust-version = "1.98"
 license = "BSD-3-Clause"
