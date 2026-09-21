@@ -22,8 +22,12 @@ use rama::http::sse::Event;
 use rama::http::sse::server::KeepAlive;
 use rama::http::service::web::response::Sse;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::convert::Infallible;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
+use tokio::sync::watch;
 
 #[derive(Debug, Deserialize, Default)]
 pub struct GameParams {
@@ -57,6 +61,10 @@ pub struct QueueConveyor {
     pub cancelled: i64,
     /// Position on the factory floor (x, y, z).
     pub position: [f32; 3],
+    /// Jobs completing per second, measured as the delta in `completed`
+    /// between two builds of the world. This is what drives the belt speed, so
+    /// a still belt means nothing is finishing -- not that the page is stuck.
+    pub throughput_per_sec: f64,
     /// Oldest waiting job's age in seconds, if any.
     pub oldest_age_secs: Option<i32>,
 }
@@ -265,7 +273,10 @@ let worldData = null;
 let fps = 0;
 let frameCount = 0;
 let lastTime = performance.now();
-let sceneObjects = { queues: [], workers: [], destinations: [] };
+let sceneObjects = { queues: [], workers: [], destinations: [], belt: [] };
+
+// Belt geometry, shared by the layout and the animation so they cannot drift.
+const BELT_LENGTH = 10;
 
 // Create floor
 const floorGeometry = new THREE.PlaneGeometry(120, 120);
@@ -362,6 +373,7 @@ function updateScene(world) {
   // Clear old queue visualizations
   sceneObjects.queues.forEach(obj => scene.remove(obj));
   sceneObjects.queues = [];
+  sceneObjects.belt = [];
 
   // Create conveyor belts and job boxes
   let queueIndex = 0;
@@ -403,13 +415,24 @@ function updateScene(world) {
       const boxesForState = Math.ceil((state.count / total) * boxesToShow);
       for (let i = 0; i < boxesForState && boxIndex < boxesToShow; i++) {
         const box = createJobBox(state.name);
-        box.position.set(
-          x - 4 + (boxIndex % 4) * 2,
-          1.5 + Math.sin(boxIndex) * 0.2,
-          z - 1 + Math.floor(boxIndex / 4) * 1.5
-        );
+        box.position.set(x, 1.0, z - 0.4 + (boxIndex % 2) * 0.8);
+
+        // Position along the belt is a pure function of the clock, NOT an
+        // accumulated offset: updateScene rebuilds every box twice a second, so
+        // anything stateful would snap back to the start on each tick and the
+        // belt would stutter in place.
+        //
+        // Speed is the MEASURED completion rate. A still belt means nothing is
+        // finishing, which is true and worth being able to see at a glance.
+        box.userData = {
+          baseX: x,
+          speed: Math.min(queue.throughput_per_sec || 0, 40) * 0.08,
+          phase: (boxIndex / Math.max(1, boxesToShow)) * BELT_LENGTH,
+        };
+
         scene.add(box);
         sceneObjects.queues.push(box);
+        sceneObjects.belt.push(box);
         boxIndex++;
       }
     }
@@ -518,10 +541,16 @@ function animate() {
     document.getElementById("fps").textContent = fps;
   }
 
-  // Gentle rotation for visual interest
-  sceneObjects.queues.forEach(obj => {
-    if (obj.rotation) obj.rotation.y += 0.0001;
-  });
+  // Run the belt. Each box's position comes from the clock, so a rebuild
+  // mid-travel does not jump it back to the start.
+  const t = now / 1000;
+  for (const box of sceneObjects.belt) {
+    const d = box.userData;
+    const travelled = t * d.speed + d.phase;
+    const along = ((travelled % BELT_LENGTH) + BELT_LENGTH) % BELT_LENGTH;
+    box.position.x = d.baseX - BELT_LENGTH / 2 + along;
+    box.rotation.y = d.speed > 0 ? travelled * 0.5 : 0;
+  }
 
   renderer.render(scene, camera);
 }
@@ -544,28 +573,125 @@ pub async fn index(State(state): State<ApiState>, Query(p): Query<GameParams>) -
     Html(INDEX).into_response()
 }
 
+/// A single world feed shared by every viewer.
+///
+/// Each SSE connection used to run its OWN 500ms poll loop, so N browsers meant
+/// N times the queries -- two per tick each, forever. The world is identical
+/// for everyone (it is read-only and unscoped), so it is built once here and
+/// fanned out over a watch channel.
+///
+/// Deliberately a shared poll rather than LISTEN/NOTIFY per connection: see
+/// wakeup.rs, where the same decision is made for workers. A LISTEN needs its
+/// own dedicated connection, and one per dashboard viewer does not fit a
+/// max_connections budget. The insert trigger also would not help much here --
+/// under load the counters change continuously, so a notify-per-change would
+/// fire far more often than twice a second, not less.
+fn world_feed(state: &ApiState) -> watch::Receiver<Arc<GameWorld>> {
+    // The SENDER is kept, not a receiver. Holding a receiver here would keep the
+    // channel alive forever, so tx.send() could never report "nobody is
+    // watching" and the builder would poll the database for the life of the
+    // process. Measured: 66 transactions in 8s with zero viewers, against a
+    // baseline of 4.
+    static FEED: OnceLock<(watch::Sender<Arc<GameWorld>>, AtomicBool)> = OnceLock::new();
+
+    let (tx, running) = FEED.get_or_init(|| {
+        let (tx, _rx) = watch::channel(Arc::new(GameWorld {
+            queues: Vec::new(),
+            workers: Vec::new(),
+            destinations: Vec::new(),
+            timestamp_ms: 0,
+        }));
+        (tx, AtomicBool::new(false))
+    });
+
+    // Subscribe BEFORE the spawn check, so a builder starting up can never
+    // observe zero receivers and exit immediately.
+    let rx = tx.subscribe();
+
+    if running
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        let tx = tx.clone();
+        let state = state.clone();
+
+        tokio::spawn(async move {
+            let mut last: HashMap<String, (i64, Instant, f64)> = HashMap::new();
+
+            loop {
+                let mut world = build_world_state(&state).await;
+                let now = Instant::now();
+
+                for q in &mut world.queues {
+                    if let Some((prev_completed, at, prev_rate)) = last.get(&q.name) {
+                        let secs = now.duration_since(*at).as_secs_f64();
+                        let delta = q.completed - prev_completed;
+
+                        // A FALLING completed count means the pruner deleted
+                        // finished rows, not that nothing finished. Clamping the
+                        // delta to zero reported 0/s while the worker was busy --
+                        // observed on the soak, 43,992 -> 33,992 in one tick, a
+                        // whole 10,000-row prune batch. Such a tick cannot be
+                        // measured, so carry the last rate rather than lie with
+                        // a zero; the next clean tick corrects it.
+                        q.throughput_per_sec = if delta >= 0 && secs > 0.0 {
+                            delta as f64 / secs
+                        } else {
+                            *prev_rate
+                        };
+                    }
+                    last.insert(q.name.clone(), (q.completed, now, q.throughput_per_sec));
+                }
+
+                if tx.send(Arc::new(world)).is_err() {
+                    // Nobody is watching. Stand down -- but re-check after
+                    // releasing the flag, because a viewer can subscribe in the
+                    // window between the failed send and this store, and would
+                    // otherwise wait on a channel no one is feeding.
+                    running.store(false, Ordering::Release);
+                    if tx.receiver_count() > 0
+                        && running
+                            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                            .is_ok()
+                    {
+                        continue;
+                    }
+                    break;
+                }
+
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        });
+    }
+
+    rx
+}
+
 pub async fn stream(State(state): State<ApiState>, Query(p): Query<GameParams>) -> impl IntoResponse {
     if !state.dashboard_authorised(p.token.as_deref()) {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     }
 
-    // Stream JSON world state over SSE
+    // Subscribe to the shared feed; do not start a private poll loop.
     let ticks = stream::unfold(
-        (state, true),
-        move |(state, first)| async move {
-            if !first {
-                tokio::time::sleep(Duration::from_millis(500)).await;
+        (world_feed(&state), true),
+        move |(mut rx, first)| async move {
+            // timestamp_ms == 0 is the placeholder the channel is created
+            // with, before the builder's first query returns. Emitting it would
+            // show every new viewer an empty factory for up to half a second.
+            if !first || rx.borrow_and_update().timestamp_ms == 0 {
+                rx.changed().await.ok()?;
             }
 
-            let world = build_world_state(&state).await;
-            let json_str = serde_json::to_string(&world).ok()?;
+            let world = rx.borrow().clone();
+            let json_str = serde_json::to_string(&*world).ok()?;
 
             // Create SSE event with JSON data
             let event = Event::new()
                 .try_with_event("world")
                 .ok()?
                 .with_data(json_str);
-            Some((Ok::<_, Infallible>(event), (state, false)))
+            Some((Ok::<_, Infallible>(event), (rx, false)))
         },
     );
 
@@ -666,6 +792,7 @@ async fn build_world_state(state: &ApiState) -> GameWorld {
             discarded,
             cancelled,
             position: [x_offset, 0.0, 0.0],
+            throughput_per_sec: 0.0,
             oldest_age_secs: oldest_age,
         });
         x_offset += 15.0;
@@ -950,6 +1077,7 @@ mod tests {
                 discarded: 1,
                 cancelled: 0,
                 position: [0.0, 0.0, 0.0],
+                throughput_per_sec: 0.0,
                 oldest_age_secs: Some(30),
             }],
             workers: vec![WorkerEntity {
