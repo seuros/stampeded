@@ -59,8 +59,12 @@ module Stampeded
     # gem and the `ruby/` directory in a checkout -- one expression that works
     # for both. Looking the gem up by name only worked installed, which is the
     # case nobody tests.
+    # libexec, not exe: exe/ holds the Ruby launcher that RubyGems installs as
+    # the `stampeded` command, and the real binary must not collide with it.
+    # No platform subdirectory either -- a platform gem only ever contains its
+    # own binary, so the extra level was vestigial. Matches guardship.
     def bundled_path
-      File.expand_path(File.join("../..", "exe", platform, BINARY), __dir__)
+      File.expand_path(File.join("../..", "libexec", BINARY), __dir__)
     end
 
     def available?

@@ -69,7 +69,7 @@ task :build_binary, [:platform] do |_t, args|
   sh "cargo build --release --bin stampeded --target #{target} " \
      "--manifest-path #{WORKSPACE}/Cargo.toml"
 
-  dest = File.join(__dir__, "exe", platform)
+  dest = File.join(__dir__, "libexec")
   FileUtils.mkdir_p(dest)
   FileUtils.cp(File.join(WORKSPACE, "target", target, "release", "stampeded"),
                File.join(dest, "stampeded"))

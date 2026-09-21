@@ -1,0 +1,26 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Launcher for the precompiled daemon, following guardship/mothership: the gem
+# installs THIS as its executable, and it execs the real binary from libexec.
+#
+# It resolves through Stampeded::Daemon rather than hardcoding a path, so
+# STAMPEDED_INSTALL_DIR keeps working for a platform we do not ship or a locally
+# built debug binary -- and so there is exactly one place that knows where the
+# binary lives.
+#
+# Deliberately NOT requiring Rails or the app: the daemon runs scheduler,
+# reaper, pruner, expirer and the dashboard, none of which need to know what a
+# job means. Booting an application to launch it would be slower and would make
+# the daemon fail whenever the app fails.
+
+require "stampeded/version"
+require "stampeded/errors"
+require "stampeded/daemon"
+
+begin
+  Stampeded::Daemon.exec!(*ARGV)
+rescue Stampeded::DaemonNotFound => e
+  warn e.message
+  exit 1
+end

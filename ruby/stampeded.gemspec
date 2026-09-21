@@ -54,9 +54,19 @@ Gem::Specification.new do |spec|
   spec.files = Dir["lib/**/*.rb", "lib/**/*.rake", "lib/generators/**/*",
                    "schema/*.sql", "README.md", "LICENSE"]
 
+  # The launcher is a real executable, so `bundle exec stampeded` works and the
+  # daemon can be run without Rails. Shipping the binary WITHOUT declaring an
+  # executable left the gem with no command at all -- verified by installing it
+  # into an empty GEM_HOME and finding bin/ empty -- so the only way to start
+  # the daemon was a Rails rake task.
+  spec.bindir = "exe"
+  spec.executables = ["stampeded"]
+
   if (gem_platform = ENV.fetch("STAMPEDED_GEM_PLATFORM", nil))
     spec.platform = gem_platform
-    spec.files += Dir["exe/#{gem_platform}/*"]
+    # One binary, no platform subdirectory: a platform gem only ever contains
+    # its own. The subdirectory was vestigial from tailwindcss-ruby.
+    spec.files += ["libexec/stampeded"]
   end
   spec.require_paths = ["lib"]
 
