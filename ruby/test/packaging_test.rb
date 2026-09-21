@@ -16,8 +16,18 @@ require "test_helper"
 class PackagingTest < Minitest::Test
   ROOT = File.expand_path("..", __dir__)
 
+  GEMSPEC = File.join(ROOT, "stampeded.gemspec")
+
+  # Evaluated fresh every time, NOT Gem::Specification.load, which memoises by
+  # path: the second load returns the first result, so a test that sets
+  # STAMPEDED_GEM_PLATFORM and reloads silently inspects the cached
+  # platformless spec and asserts nothing.
+  def load_gemspec
+    eval(File.read(GEMSPEC), TOPLEVEL_BINDING, GEMSPEC) # rubocop:disable Security/Eval
+  end
+
   def spec
-    @spec ||= Gem::Specification.load(File.join(ROOT, "stampeded.gemspec"))
+    @spec ||= load_gemspec
   end
 
   def test_the_gem_installs_a_stampeded_command
@@ -52,9 +62,26 @@ class PackagingTest < Minitest::Test
     assert_match(%r{/libexec/stampeded\z}, Stampeded::Daemon.bundled_path)
   end
 
+  def test_a_platform_gem_ships_the_binary
+    # The inverse of the stub case, and the one that silently broke: the
+    # platform reached `gem build` through an environment variable, and wrapping
+    # the build in Bundler.with_unbundled_env discarded it -- with_unbundled_env
+    # restores the snapshot Bundler took at load time, so anything exported
+    # afterwards is gone. The task then produced the PLATFORMLESS gem under a
+    # successful-looking build. A release would have shipped no daemon at all.
+    ENV["STAMPEDED_GEM_PLATFORM"] = "arm64-darwin"
+    platform_spec = load_gemspec
+
+    assert_includes platform_spec.files, "libexec/stampeded",
+                    "a platform gem must ship the daemon binary"
+    assert_equal "arm64-darwin", platform_spec.platform.to_s
+  ensure
+    ENV.delete("STAMPEDED_GEM_PLATFORM")
+  end
+
   def test_a_platformless_gem_ships_no_binary
     ENV.delete("STAMPEDED_GEM_PLATFORM")
-    generic = Gem::Specification.load(File.join(ROOT, "stampeded.gemspec"))
+    generic = load_gemspec
 
     refute_includes generic.files, "libexec/stampeded",
                     "the platformless gem must not claim a binary it has not built"

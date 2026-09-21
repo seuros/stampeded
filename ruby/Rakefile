@@ -25,6 +25,7 @@ task default: :test
 # ---------------------------------------------------------------------------
 
 require "fileutils"
+require "json"
 
 # Platforms we ship.
 #
@@ -61,6 +62,39 @@ task :stage_schema do
   puts "staged #{Dir[File.join(dest, '*.sql')].size} schema file(s)"
 end
 
+# Ask cargo where it builds, rather than assuming <workspace>/target.
+#
+# CARGO_TARGET_DIR relocates it -- shared caches in CI do this routinely, and a
+# hardcoded path then copies a binary that is not there, or worse, a stale one
+# from a previous build. `cargo metadata` reports the real directory.
+def cargo_target_root
+  @cargo_target_root ||= Dir.chdir(WORKSPACE) do
+    JSON.parse(`cargo metadata --no-deps --format-version 1`).fetch("target_directory")
+  end
+end
+
+# `gem build` must run with Bundler's environment stripped.
+#
+# Under `bundle exec`, Bundler re-resolves this directory's gemspec against the
+# lockfile, and a platform gem does not match the running platform's full
+# triple: building arm64-darwin from an arm64-darwin-23 machine fails with
+# "Could not find gems matching 'stampeded' valid for all resolution
+# platforms". The working copy happened to have a lockfile that hid this; a
+# fresh clone did not, so `rake package` failed for anyone who had just cloned.
+#
+# Same fix guardship uses for the same reason.
+# The platform is set INSIDE the block, not before it. with_unbundled_env
+# restores the environment snapshot Bundler took at load time, so anything the
+# task exported afterwards is discarded -- including STAMPEDED_GEM_PLATFORM.
+# Setting it outside silently produced the PLATFORMLESS stub gem, with no
+# binary in it, under a name that looked like a successful platform build.
+def build_gem(platform = nil)
+  Bundler.with_unbundled_env do
+    ENV["STAMPEDED_GEM_PLATFORM"] = platform
+    sh "gem build stampeded.gemspec"
+  end
+end
+
 desc "Build the daemon binary for one rubygems platform"
 task :build_binary, [:platform] do |_t, args|
   platform = args[:platform] or abort "usage: rake build_binary[arm64-darwin]"
@@ -71,7 +105,7 @@ task :build_binary, [:platform] do |_t, args|
 
   dest = File.join(__dir__, "libexec")
   FileUtils.mkdir_p(dest)
-  FileUtils.cp(File.join(WORKSPACE, "target", target, "release", "stampeded"),
+  FileUtils.cp(File.join(cargo_target_root, target, "release", "stampeded"),
                File.join(dest, "stampeded"))
   FileUtils.chmod(0o755, File.join(dest, "stampeded"))
 end
@@ -80,14 +114,13 @@ desc "Package the gem for one platform, binary included"
 task :package, [:platform] => :stage_schema do |_t, args|
   platform = args[:platform] or abort "usage: rake package[arm64-darwin]"
   Rake::Task["build_binary"].invoke(platform)
-  ENV["STAMPEDED_GEM_PLATFORM"] = platform
-  sh "gem build stampeded.gemspec"
+  build_gem(platform)
 end
 
 desc "Package the platformless gem: no binary, for platforms we do not build"
 task package_generic: :stage_schema do
   ENV.delete("STAMPEDED_GEM_PLATFORM")
-  sh "gem build stampeded.gemspec"
+  build_gem
 end
 
 desc "List shippable platforms"
