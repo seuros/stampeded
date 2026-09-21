@@ -199,6 +199,12 @@ function fitTo(obj, targetSize) {
 const TARGET_SIZE = { box: 0.8, conveyor: 10, crane: 2.5, hopper: 2 };
 
 (function loadModels() {
+  // Four models each reference Textures/colormap.png, and three.js ships with
+  // its loader cache DISABLED, so the same texture was fetched four times --
+  // once per loader.load(). FileLoader consults this cache, so enabling it
+  // collapses them into one request. Set before any load starts.
+  THREE.Cache.enabled = true;
+
   const loader = new GLTFLoader();
   for (const [key, file] of Object.entries(MODEL_FILES)) {
     loader.load(
@@ -384,6 +390,11 @@ function updateScene(world) {
       { name: 'retryable', count: queue.retryable },
       { name: 'discarded', count: queue.discarded },
       { name: 'cancelled', count: queue.cancelled },
+      // completed was in `total` but not here: it inflated the denominator,
+      // diluting every other state's share of the eight boxes, and was never
+      // drawn itself. A queue that had finished its work rendered as a bare
+      // conveyor -- soak, 7,544 completed, zero boxes.
+      { name: 'completed', count: queue.completed },
     ];
 
     let boxIndex = 0;

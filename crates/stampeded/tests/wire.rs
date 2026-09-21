@@ -783,3 +783,47 @@ fn every_external_resource_a_model_references_is_served() {
         }
     }
 }
+
+/// Every state counted in the denominator must also be drawable.
+///
+/// `total` summed six states; the sampling array listed five. `completed` was
+/// missing, so it inflated the denominator -- diluting every other state's
+/// share of the eight available boxes -- and was itself never rendered. A queue
+/// that had finished its work drew a bare conveyor. Two of four queues in the
+/// live soak looked empty while holding 7,744 jobs between them.
+#[test]
+#[cfg(feature = "game")]
+fn every_state_in_the_denominator_can_be_drawn() {
+    let src = include_str!("../src/http/game.rs");
+
+    let field_names = |frag: &str| -> Vec<String> {
+        frag.match_indices("queue.")
+            .map(|(i, _)| {
+                frag[i + 6..]
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect()
+            })
+            .collect()
+    };
+
+    let total = src
+        .split("const total = ")
+        .nth(1)
+        .and_then(|r| r.split(';').next())
+        .expect("the total expression");
+    let states = src
+        .split("const states = [")
+        .nth(1)
+        .and_then(|r| r.split("];").next())
+        .expect("the states array");
+
+    for state in field_names(total) {
+        assert!(
+            field_names(states).contains(&state),
+            "queue.{state} is summed into `total` but is not in the states \
+             array, so it dilutes every other state's share of the boxes and \
+             is never drawn itself"
+        );
+    }
+}
