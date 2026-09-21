@@ -409,3 +409,166 @@ async fn the_dashboard_assets_resolve_including_whatever_they_advertise() {
 
     let _ = tx.send(true);
 }
+
+#[tokio::test]
+#[cfg(feature = "game")]
+async fn the_game_world_assets_fetch_nothing_from_the_network() {
+    let (addr, _q, tx) = server!();
+
+    // Verify the game page itself loads
+    let (status, _html) = request(&addr, "GET", "/game?token=s3cret", None).await;
+    assert_eq!(status, 200, "the game page cannot load");
+
+    // Verify Three.js module has no external imports
+    let (status, three_js) = request(&addr, "GET", "/game/three.module.js", None).await;
+    assert_eq!(status, 200, "three.module.js must be served from the binary");
+    assert!(three_js.len() > 100_000, "three.module.js looks truncated: {} bytes", three_js.len());
+    assert_no_remote_fetch("three.module.js", &three_js);
+
+    // Verify GLTFLoader has no external imports
+    let (status, gltf_loader) = request(&addr, "GET", "/game/gltf-loader.js", None).await;
+    assert_eq!(status, 200, "gltf-loader.js must be served from the binary");
+    assert!(gltf_loader.len() > 10_000, "gltf-loader.js looks truncated: {} bytes", gltf_loader.len());
+    assert_no_remote_fetch("gltf-loader.js", &gltf_loader);
+
+    // Verify models are served and are binary (not HTML error pages)
+    let models = vec![
+        "box-small.glb",
+        "box-large.glb",
+        "conveyor-long.glb",
+        "crane.glb",
+        "hopper-square.glb",
+        "machine.glb",
+    ];
+    for model in models {
+        let (status, body) = request(&addr, "GET", &format!("/game/models/{}", model), None).await;
+        assert_eq!(status, 200, "model {} must be served from the binary", model);
+        // GLB files start with magic bytes 0x67 0x6C 0x54 0x46 ('glTF' in ASCII)
+        let bytes = body.as_bytes();
+        assert!(
+            bytes.len() > 100 && bytes.starts_with(b"glTF"),
+            "model {} looks wrong: starts with {:?}",
+            model,
+            &bytes[..bytes.len().min(20)]
+        );
+    }
+
+    let _ = tx.send(true);
+}
+
+/// Assert a served script fetches nothing from the network.
+///
+/// Checks CODE, not comments. This is the third time today that a naive
+/// substring check has cried wolf on this project:
+///
+///   1. the dashboard's no-external-assets test failed on the favicon's own
+///      `xmlns="http://www.w3.org/2000/svg"` -- an XML namespace, never fetched
+///   2. this test's first version failed on the real three.js, which cites
+///      Khronos specs and a Stanford paper in comments
+///   3. its second version failed on GLTFLoader's docs: "referenced resource
+///      'model.bin' will be loaded from 'https://my-cdn-server.com/...'"
+///
+/// Each time the library was innocent and the test was wrong, and a test that
+/// cannot tell a citation from a network call gets silenced rather than fixed.
+/// So: strip comments, then look for the constructs that actually fetch.
+fn assert_no_remote_fetch(what: &str, src: &str) {
+    let code = strip_js_comments(src);
+
+    for pat in [
+        "from \"http", "from 'http", "from \"//", "from '//",
+        "import(\"http", "import('http",
+        "fetch(\"http", "fetch('http",
+        "importScripts(\"http", "importScripts('http",
+    ] {
+        assert!(
+            !code.contains(pat),
+            "{what} fetches from the network: found {pat:?} outside a comment"
+        );
+    }
+}
+
+/// Remove // and /* */ comments, leaving string literals intact.
+fn strip_js_comments(src: &str) -> String {
+    let b = src.as_bytes();
+    let mut out = String::with_capacity(src.len());
+    let (mut i, mut quote) = (0usize, None::<u8>);
+
+    while i < b.len() {
+        let c = b[i];
+        if let Some(q) = quote {
+            if c == b'\\' {
+                i += 2;
+                continue;
+            }
+            if c == q {
+                quote = None;
+            }
+            out.push(c as char);
+            i += 1;
+        } else if c == b'"' || c == b'\'' || c == b'`' {
+            quote = Some(c);
+            out.push(c as char);
+            i += 1;
+        } else if c == b'/' && i + 1 < b.len() && b[i + 1] == b'/' {
+            while i < b.len() && b[i] != b'\n' {
+                i += 1;
+            }
+        } else if c == b'/' && i + 1 < b.len() && b[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < b.len() && !(b[i] == b'*' && b[i + 1] == b'/') {
+                i += 1;
+            }
+            i += 2;
+        } else {
+            out.push(c as char);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// The event name the server sends must be the one the browser listens for.
+///
+/// These live ~100 lines apart in one file -- the Rust builds the SSE event,
+/// the JS registers the handler -- and nothing connected them. The server named
+/// its event "world"; the client used `onmessage`, which fires only for events
+/// with NO name. So /game/stream connected, returned 200, streamed a fresh
+/// world every 500ms, and the browser dropped every frame on the floor. The
+/// page showed "Initializing..." forever.
+///
+/// Exactly the shape of the dashboard's data-on-load bug, and it survived for
+/// the same reason: the existing test asserted the HTML *mentions*
+/// /game/stream, which is true of a page that never renders a thing.
+#[test]
+#[cfg(feature = "game")]
+fn the_game_page_listens_for_the_event_the_server_actually_sends() {
+    let src = include_str!("../src/http/game.rs");
+
+    // What the server sends.
+    let sent = src
+        .split("try_with_event(\"")
+        .nth(1)
+        .and_then(|r| r.split('"').next())
+        .map(str::to_string);
+
+    match sent {
+        Some(name) => {
+            assert!(
+                src.contains(&format!("addEventListener(\"{name}\"")),
+                "the server sends a named SSE event {name:?} but the page never \
+                 registers addEventListener(\"{name}\"). A named event does NOT \
+                 trigger onmessage, so the browser receives every frame and \
+                 discards it."
+            );
+        }
+        None => {
+            // No name means the default "message" type, and onmessage is then
+            // the correct handler. Either pairing is fine; mixing them is not.
+            assert!(
+                src.contains("eventSource.onmessage"),
+                "the server sends unnamed SSE events but the page does not \
+                 define onmessage"
+            );
+        }
+    }
+}
