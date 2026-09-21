@@ -127,6 +127,9 @@ jobs:
       - uses: actions/download-artifact@v8
         with: { path: artifacts }
 
+      - name: Show what was downloaded
+        run: ls -R artifacts
+
       - name: Assemble platform gems
         working-directory: ruby
         run: |
@@ -137,8 +140,19 @@ jobs:
           # stampeded:install.
           bundle exec rake stage_schema
 
-          for dir in ../artifacts/stampeded-*; do
-            plat="${dir#../artifacts/stampeded-}"
+          # FIND the binaries rather than globbing a directory shape. The first
+          # version assumed ../artifacts/stampeded-<plat>/stampeded and matched
+          # nothing, which `set -e` turned into a failed release after the
+          # binary had already built successfully. download-artifact's layout is
+          # not something this script should be asserting.
+          mapfile -t bins < <(find ../artifacts -type f -name stampeded)
+          [ "${#bins[@]}" -gt 0 ] || { echo "no binaries in ../artifacts"; exit 1; }
+
+          for bin in "${bins[@]}"; do
+            plat="$(basename "$(dirname "$bin")")"
+            plat="${plat#stampeded-}"
+            echo "staging $plat from $bin"
+            dir="$(dirname "$bin")"
 
             # libexec, NOT exe/<platform>/: exe/ holds the Ruby launcher that
             # RubyGems installs as the `stampeded` command, and Daemon resolves
