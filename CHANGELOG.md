@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/seuros/stampeded/compare/stampeded-v0.2.1...stampeded-v0.2.2) (2026-09-21)
+
+
+### Bug Fixes
+
+* carry the platform in the binary's filename ([001a304](https://github.com/seuros/stampeded/commit/001a304d834803498d517f4c2dd4beca8423f80b))
+
 ## [0.2.1](https://github.com/seuros/stampeded/compare/stampeded-v0.2.0...stampeded-v0.2.1) (2026-09-21)
 
 
