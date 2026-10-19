@@ -45,7 +45,8 @@ module Stampeded
     end
 
     def exec!(*args, env: {})
-      Kernel.exec(env, executable, *args)
+      path = executable
+      Kernel.exec(env, [path, path], *args)
     end
   end
 end

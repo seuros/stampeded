@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "test_helper"
+require "fileutils"
 require "open3"
 
 class DaemonTest < Minitest::Test
@@ -15,12 +16,14 @@ class DaemonTest < Minitest::Test
     ENV["STAMPEDED_INSTALL_DIR"] = @saved
   end
 
-  def against_a_fake_daemon(env, *command)
-    Dir.mktmpdir do |dir|
+  def against_a_fake_daemon(env, *command, under: ".")
+    Dir.mktmpdir do |tmp|
+      dir = File.join(tmp, under)
+      FileUtils.mkdir_p(dir)
       bin = File.join(dir, "stampeded")
       File.write(bin, <<~'SH')
         #!/bin/sh
-        printf '%s\n' "$@" > "$0.argv"
+        for arg in "$@"; do printf '%s\n' "$arg"; done > "$0.argv"
         printf '%s' "${STAMPEDED_DATABASE_URL-unset}" > "$0.env"
       SH
       File.chmod(0o755, bin)
@@ -57,6 +60,12 @@ class DaemonTest < Minitest::Test
     against_a_fake_daemon({}, EXE, "--queue", "mail", "--no-maintenance") do |argv, env_url|
       assert_equal ["--queue", "mail", "--no-maintenance"], argv
       assert_equal "unset", env_url, "the executable adds nothing to the environment"
+    end
+  end
+
+  def test_a_fake_daemon_under_a_path_with_a_space_starts_with_no_arguments
+    against_a_fake_daemon({}, EXE, under: "fake daemon") do |argv, _env_url|
+      assert_equal [], argv, "a lone command string is split on spaces; the path must reach exec whole"
     end
   end
 
