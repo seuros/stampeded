@@ -50,9 +50,12 @@ module Stampeded
       params = Connection.connection_params
       return params if params.is_a?(String)
 
-      user = [params[:user], params[:password]].compact.join(":")
-      host = [params[:host], params[:port]].compact.join(":")
-      "postgres://#{user}#{"@" unless user.empty?}#{host}/#{params[:dbname]}"
+      userinfo = URI.encode_uri_component(params[:user].to_s)
+      userinfo += ":#{URI.encode_uri_component(params[:password].to_s)}" if params[:password]
+      host = params[:host].to_s
+      host = host.include?(":") ? "[#{host}]" : URI.encode_uri_component(host)
+      host += ":#{params[:port]}" if params[:port]
+      "postgres://#{userinfo}#{"@" unless userinfo.empty?}#{host}/#{URI.encode_uri_component(params[:dbname].to_s)}"
     end
 
     def create_queue(name)

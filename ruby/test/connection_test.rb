@@ -21,9 +21,9 @@ class ConnectionTest < Minitest::Test
     super
   end
 
-  def with_active_record(host: "apphost", database: "app_db", username: "appuser")
+  def with_active_record(host: "apphost", database: "app_db", username: "appuser", password: "pw", port: nil)
     cfg = Struct.new(:configuration_hash).new(
-      { host: host, database: database, username: username, password: "pw" }
+      { host: host, port: port, database: database, username: username, password: password }
     )
     FakeAR::Base.db_config = cfg
     Object.const_set(:ActiveRecord, FakeAR)
@@ -60,6 +60,41 @@ class ConnectionTest < Minitest::Test
       assert_includes url, "db.internal"
       assert_includes url, "/prod"
       assert_includes url, "app:"
+    end
+  end
+
+  def libpq_reads(url)
+    PG::Connection.conninfo_parse(url).to_h { [it[:keyword], it[:val]] }
+  end
+
+  def test_the_daemon_url_carries_any_password_intact
+    password = "p@ss/w:rd#?% x+%41"
+    with_active_record(host: "db.internal", port: 5433, database: "prod db", username: "app user@corp",
+                       password: password) do
+      url = Stampeded.database_url_for_daemon
+      parsed = libpq_reads(url)
+
+      assert_equal password, parsed["password"], url
+      assert_equal "app user@corp", parsed["user"], url
+      assert_equal "db.internal", parsed["host"], url
+      assert_equal "5433", parsed["port"], url
+      assert_equal "prod db", parsed["dbname"], url
+      assert_equal 1, url.count("@"), "a raw @ would also defeat the daemon's log redaction: #{url}"
+    end
+  end
+
+  def test_the_daemon_url_keeps_socket_and_ipv6_hosts
+    with_active_record(host: "/var/run/postgresql", username: nil, password: nil) do
+      parsed = libpq_reads(Stampeded.database_url_for_daemon)
+      assert_equal "/var/run/postgresql", parsed["host"]
+      assert_nil parsed["user"]
+    end
+
+    with_active_record(host: "::1", port: 5432, password: nil) do
+      parsed = libpq_reads(Stampeded.database_url_for_daemon)
+      assert_equal "::1", parsed["host"]
+      assert_equal "5432", parsed["port"]
+      assert_nil parsed["password"]
     end
   end
 end
