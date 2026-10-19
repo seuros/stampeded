@@ -61,7 +61,8 @@ roots built in; a private CA goes in `sslrootcert`, so on RDS:
 `?sslmode=verify-full&sslrootcert=/path/to/global-bundle.pem`.
 
 - **Dashboard** -- `http://127.0.0.1:7878/dashboard`, live over SSE. Only
-  served when you pass `--dashboard-token`.
+  served with a token: set `STAMPEDED_DASHBOARD_TOKEN`, or pass
+  `--dashboard-token`, which `ps` shows to everyone on the host.
 - **MCP** -- `stampeded-mcp` over stdio.
 - **HTTP API** -- for callers that cannot reach Postgres:
 

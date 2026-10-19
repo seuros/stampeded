@@ -37,6 +37,42 @@ fn flags_override_env() {
 }
 
 #[test]
+fn dashboard_token_comes_from_the_flag_or_env_and_the_flag_wins() {
+    let flag: &[&str] = &["--dashboard-token", "from-flag"];
+    let cases: [(&[&str], Option<&str>, Option<&str>); 5] = [
+        (&[], None, None),
+        (&[], Some("from-env"), Some("from-env")),
+        (&[], Some(""), None),
+        (flag, None, Some("from-flag")),
+        (flag, Some("from-env"), Some("from-flag")),
+    ];
+    for (extra, env_token, expected) in cases {
+        let c = Config::parse(args(extra), |k| match k {
+            "STAMPEDED_DATABASE_URL" => Some("postgres://x/y".into()),
+            "STAMPEDED_DASHBOARD_TOKEN" => env_token.map(Into::into),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(
+            c.dashboard_token.as_deref(),
+            expected,
+            "{extra:?} with STAMPEDED_DASHBOARD_TOKEN={env_token:?}"
+        );
+    }
+}
+
+#[test]
+fn an_empty_dashboard_token_is_refused() {
+    // An empty token matches an empty `?token=`: the dashboard would be open.
+    let err = Config::parse(
+        args(&["--database-url", "postgres://x/y", "--dashboard-token", ""]),
+        no_env,
+    )
+    .unwrap_err();
+    assert!(err.contains("--dashboard-token"), "got: {err}");
+}
+
+#[test]
 fn a_worker_can_serve_several_queues_or_every_queue() {
     let parse = |extra: &[&str]| {
         Config::parse(args(extra), |k| {

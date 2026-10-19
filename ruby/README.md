@@ -25,6 +25,14 @@ scheduler, reaper, pruner, expirer, health checks, HTTP API and dashboard. It
 never runs a job itself. Without the daemon, jobs still run, but there is no
 cron, no recovery of jobs from dead workers, no retention and no dashboard.
 
+The daemon gets the database URL through its environment, never its command
+line. Extra flags go in `STAMPEDED_ARGS`, which `ps` shows to everyone on the
+host, so the dashboard token goes in `STAMPEDED_DASHBOARD_TOKEN` instead:
+
+```bash
+STAMPEDED_DASHBOARD_TOKEN=... STAMPEDED_ARGS="--http 127.0.0.1:7878" bin/rails stampeded:daemon
+```
+
 ## Transactional enqueue
 
 ```ruby

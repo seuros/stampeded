@@ -65,7 +65,8 @@ impl Config {
             "  --migrate              apply the schema on startup\n",
             "  --http ADDR            serve the HTTP API on ADDR (e.g. 127.0.0.1:7878)\n",
             "  --dashboard-token TOK  serve the dashboard, gated on this token\n",
-            "                         (without it the dashboard is NOT served)\n",
+            "                         (or STAMPEDED_DASHBOARD_TOKEN; without either\n",
+            "                         the dashboard is NOT served)\n",
             "  -h, --help             this message\n",
             "  -V, --version          print the version and exit\n",
         )
@@ -81,6 +82,8 @@ impl Config {
     pub fn parse(args: Vec<String>, env: impl Fn(&str) -> Option<String>) -> Result<Self, String> {
         let mut c = Self {
             database_url: env("STAMPEDED_DATABASE_URL").unwrap_or_default(),
+            // Empty means unset: an empty token would open the dashboard to `?token=`.
+            dashboard_token: env("STAMPEDED_DASHBOARD_TOKEN").filter(|t| !t.is_empty()),
             ..Default::default()
         };
         let mut queues = env("STAMPEDED_QUEUE").unwrap_or_else(|| "default".into());
@@ -147,6 +150,9 @@ impl Config {
     fn validate(&self) -> Result<(), String> {
         if self.database_url.is_empty() {
             return Err("--database-url or STAMPEDED_DATABASE_URL is required".into());
+        }
+        if self.dashboard_token.as_deref() == Some("") {
+            return Err("--dashboard-token must not be empty".into());
         }
         if self.concurrency == 0 {
             return Err("--concurrency must be at least 1".into());
