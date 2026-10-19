@@ -13,11 +13,6 @@
         {
           "type": "generic",
           "path": "ruby/lib/stampeded/version.rb"
-        },
-        {
-          "type": "toml",
-          "path": "Cargo.lock",
-          "jsonpath": "$.package[?(@.name==='stampeded')].version"
         }
       ]
     }
