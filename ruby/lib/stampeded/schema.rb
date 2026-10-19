@@ -9,7 +9,7 @@ module Stampeded
     def root
       candidates = [
         File.expand_path("../../schema", __dir__),
-        File.expand_path("../../../schema", __dir__)
+        File.expand_path("../../../crates/stampeded/schema", __dir__)
       ]
       candidates.find { |d| File.directory?(d) } ||
         raise(Error, "cannot find schema/*.sql (looked in #{candidates.join(", ")})")

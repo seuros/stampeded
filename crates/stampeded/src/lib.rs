@@ -50,7 +50,7 @@ pub use worker::{Worker, WorkerConfig};
 /// The embedded schema, so a host can migrate without shipping .sql files.
 pub mod schema {
     /// Applied whole to a fresh database in one transaction, never incrementally.
-    pub const SCHEMA: &str = include_str!("../../../schema/schema.sql");
+    pub const SCHEMA: &str = include_str!("../schema/schema.sql");
 
     pub async fn migrate(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
         sqlx::raw_sql(SCHEMA).execute(pool).await?;

@@ -92,13 +92,13 @@ use `stampeded max_attempts:` or `Stampeded::RetryIn`.
 
 A job with `stampeded task: "invoice.parse"` can be enqueued from Rails and run
 by any worker that handles `invoice.parse`, in any language; its keyword
-arguments become `args`. See [ruby/README.md](ruby/README.md).
+arguments become `args`. See [ruby/README.md](https://github.com/seuros/stampeded/blob/master/ruby/README.md).
 
 ## Other languages
 
 `libstampeded_ffi` exposes enqueueing and pulling over a C ABI, for any
 language with a C FFI. The header is
-[`crates/stampeded-ffi/include/stampeded.h`](crates/stampeded-ffi/include/stampeded.h).
+[`crates/stampeded-ffi/include/stampeded.h`](https://github.com/seuros/stampeded/blob/master/crates/stampeded-ffi/include/stampeded.h).
 
 ```c
 stampeded_client *client = stampeded_connect("postgres://localhost/app");
@@ -390,8 +390,8 @@ included. The Ruby suite lives in `ruby/`.
 ## Layout
 
 ```
-schema/            schema.sql, NOTES.md (design notes)
 crates/stampeded/  queue, worker, scheduler, maintenance, planner
+  schema/          schema.sql, NOTES.md (design notes)
   src/http/        HTTP API and dashboard    [feature: http]
   src/mcp/         MCP control plane         [feature: mcp]
   src/bin/         stampeded, stampeded-mcp
@@ -417,7 +417,7 @@ Same: upgrade, or fork.
 Consume the HTTP API with whatever you want.
 
 **Will there be PHP or JS bindings?**
-Build one on the C ABI ([`stampeded.h`](crates/stampeded-ffi/include/stampeded.h))
+Build one on the C ABI ([`stampeded.h`](https://github.com/seuros/stampeded/blob/master/crates/stampeded-ffi/include/stampeded.h))
 and open an issue linking to it; you can be listed as its maintainer. I can't
 maintain bindings for languages I don't use, even with AI in the loop.
 

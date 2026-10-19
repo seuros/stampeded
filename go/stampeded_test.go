@@ -48,7 +48,7 @@ func database(t *testing.T) (string, func(string) string) {
 	t.Cleanup(func() {
 		_ = exec.Command("psql", "-XAtq", base, "-c", "SET client_min_messages TO WARNING", "-c", "DROP SCHEMA "+schema+" CASCADE").Run()
 	})
-	install := exec.Command("psql", "-XAtq", "-v", "ON_ERROR_STOP=1", base, "-f", "../schema/schema.sql")
+	install := exec.Command("psql", "-XAtq", "-v", "ON_ERROR_STOP=1", base, "-f", "../crates/stampeded/schema/schema.sql")
 	install.Env = append(os.Environ(), "PGOPTIONS=-c search_path="+schema)
 	if out, err := install.CombinedOutput(); err != nil {
 		t.Fatalf("install schema: %v\n%s", err, out)

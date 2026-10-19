@@ -27,13 +27,17 @@ require_relative "lib/stampeded/version"
 WORKSPACE = File.expand_path("..", __dir__)
 PKG = File.join(__dir__, "pkg")
 
-desc "Copy schema/*.sql and LICENSE in from the repo root, ready to package"
+desc "Copy the crate's schema/*.sql and the repo's LICENSE in, ready to package"
 task :stage_schema do
+  source = File.join(WORKSPACE, "crates", "stampeded", "schema")
+  sources = Dir[File.join(source, "*.sql")]
+  abort "no *.sql in #{source}" if sources.empty?
+
   FileUtils.cp(File.join(WORKSPACE, "LICENSE"), File.join(__dir__, "LICENSE"))
   dest = File.join(__dir__, "schema")
   FileUtils.rm_rf(dest)
   FileUtils.mkdir_p(dest)
-  FileUtils.cp(Dir[File.join(WORKSPACE, "schema", "*.sql")], dest)
+  FileUtils.cp(sources, dest)
   puts "staged #{Dir[File.join(dest, '*.sql')].size} schema file(s)"
 end
 

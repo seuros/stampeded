@@ -74,7 +74,7 @@ jobs:
       - if: always()
         run: df -h /
 
-      - run: psql "$STAMPEDED_TEST_DATABASE_URL" -f schema/schema.sql
+      - run: psql "$STAMPEDED_TEST_DATABASE_URL" -f crates/stampeded/schema/schema.sql
       - name: Schema is idempotent enough to diff
         run: psql "$STAMPEDED_TEST_DATABASE_URL" -c "SELECT count(*) FROM stampeded_jobs"
 
