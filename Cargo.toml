@@ -18,6 +18,7 @@ serde_json = "1"
 jiff = { version = "0.2", features = ["serde"] }
 jiff-sqlx = { version = "0.2", features = ["postgres"] }
 thiserror = "2"
+gethostname = "1.1"
 anyhow = "1.0.104"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

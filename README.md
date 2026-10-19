@@ -325,6 +325,9 @@ The dashboard and the `system_health` MCP tool report:
 - backlog age per queue -- whether work is being done, not just how much is
   waiting.
 
+The dashboard also draws the last 10 minutes of throughput, depth and backlog
+age per queue, and live jobs per tenant with how many are `throttled`.
+
 ## Retention
 
 Completed jobs are kept 14 days (`--retain-for`), discarded ones 7 days. A

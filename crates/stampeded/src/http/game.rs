@@ -1,16 +1,6 @@
-//! 3D game world visualization of the job queue state.
+//! 3D factory-floor view of the queue: belts are queues, boxes are sampled jobs.
 //!
-//! The metaphor: a factory floor where queues are conveyor belts, jobs are boxes
-//! moving through states, workers are cranes/robots picking up boxes, and
-//! destinations are loading docks.
-//!
-//! The world is read-only and token-gated identically to the dashboard.
-//! All assets are embedded in the binary behind the `game` feature flag.
-//!
-//! Scale handling: A real queue can hold 200k+ jobs. We render 8-12 representative
-//! boxes per queue, sampled proportionally by state, with actual counts shown
-//! as labels. Workers and destinations are rendered as actual entities (not
-//! many of those).
+//! Read-only and token-gated like the dashboard; assets are embedded.
 
 use super::ApiState;
 use rama::futures::stream;
@@ -61,9 +51,7 @@ pub struct QueueConveyor {
     pub cancelled: i64,
     /// Position on the factory floor (x, y, z).
     pub position: [f32; 3],
-    /// Jobs completing per second, measured as the delta in `completed`
-    /// between two builds of the world. This is what drives the belt speed, so
-    /// a still belt means nothing is finishing -- not that the page is stuck.
+    /// Jobs completing per second, from the `completed` delta between builds.
     pub throughput_per_sec: f64,
     /// Oldest waiting job's age in seconds, if any.
     pub oldest_age_secs: Option<i32>,
@@ -71,8 +59,10 @@ pub struct QueueConveyor {
 
 #[derive(Debug, Serialize, Clone)]
 pub struct WorkerEntity {
-    /// Worker ID or name.
+    /// Worker ID.
     pub id: String,
+    /// `hostname:pid`, the way an operator identifies a process.
+    pub name: String,
     /// What queue this worker claims from.
     pub queue: String,
     /// Is this worker still heartbeating?
@@ -91,7 +81,7 @@ pub struct DestinationEntity {
     pub waiting: i64,
     /// Number of recent failures.
     pub failed_recently: i64,
-    /// Circuit breaker status (open, closed, half-open).
+    /// Inferred breaker status: open, failing or closed.
     pub breaker_state: String,
     /// Position on the floor.
     pub position: [f32; 3],
@@ -220,7 +210,16 @@ const TARGET_SIZE = { box: 0.8, conveyor: 10, crane: 2.5, hopper: 2 };
       (gltf) => {
         const root = gltf.scene;
         root.traverse((n) => {
-          if (n.isMesh) { n.castShadow = true; n.receiveShadow = true; }
+          if (!n.isMesh) return;
+          n.castShadow = true;
+          n.receiveShadow = true;
+          // The palette's dark slates read as black; let the texture light itself.
+          const m = n.material;
+          if (m && m.map) {
+            m.emissiveMap = m.map;
+            m.emissive = new THREE.Color(0xffffff);
+            m.emissiveIntensity = 0.45;
+          }
         });
         MODELS[key] = fitTo(root, TARGET_SIZE[key]);
       },
@@ -238,36 +237,93 @@ function modelClone(key) {
   return m ? m.clone(true) : null;
 }
 
+// One glowing material per state colour, shared: a fresh one per tick leaks GPU memory.
+const STATE_MATERIALS = new Map();
+function stateMaterial(color) {
+  let mat = STATE_MATERIALS.get(color);
+  if (!mat) {
+    mat = new THREE.MeshStandardMaterial({
+      color, emissive: color, emissiveIntensity: 0.35, roughness: 0.55,
+    });
+    STATE_MATERIALS.set(color, mat);
+  }
+  return mat;
+}
+
 // Recolour a clone without touching the shared source material.
 function tint(obj, color) {
   obj.traverse((n) => {
-    if (n.isMesh && n.material) {
-      n.material = n.material.clone();
-      n.material.color = new THREE.Color(color);
-    }
+    if (n.isMesh) n.material = stateMaterial(color);
   });
   return obj;
 }
 
 const canvas = document.getElementById("canvas");
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 1000);
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setClearColor(0x0d0e14);
-scene.background = new THREE.Color(0x0d0e14);
+// Physical light units since three r155; tone mapping keeps the brighter rig from clipping.
+renderer.toneMapping = THREE.NeutralToneMapping;
+renderer.toneMappingExposure = 1.2;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
-// Lighting
-const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
-scene.add(ambientLight);
-const directionalLight = new THREE.DirectionalLight(0xffffff, 0.7);
-directionalLight.position.set(15, 25, 15);
-directionalLight.castShadow = true;
-scene.add(directionalLight);
+const SKY = 0x161a2b;
+renderer.setClearColor(SKY);
+scene.background = new THREE.Color(SKY);
+scene.fog = new THREE.Fog(SKY, 80, 180);
 
-camera.position.set(0, 18, 35);
-camera.lookAt(0, 0, 0);
+// Sky/ground fill, a shadow-casting key light, and a cyan rim to lift silhouettes.
+scene.add(new THREE.HemisphereLight(0xdfe7ff, 0x2a2f45, 2.2));
+const sun = new THREE.DirectionalLight(0xffffff, 3.0);
+sun.position.set(20, 35, 25);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -70, right: 70, top: 45, bottom: -45, near: 1, far: 140 });
+sun.shadow.camera.updateProjectionMatrix();
+scene.add(sun);
+const rim = new THREE.DirectionalLight(0x00f0ff, 1.2);
+rim.position.set(-25, 15, -30);
+scene.add(rim);
+
+// Orbit camera: drag to turn, wheel to zoom; frames every belt until touched.
+const view = { yaw: 0, pitch: 0.6, dist: 50, auto: true };
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+function placeCamera() {
+  const flat = Math.cos(view.pitch) * view.dist;
+  camera.position.set(Math.sin(view.yaw) * flat, Math.sin(view.pitch) * view.dist, Math.cos(view.yaw) * flat);
+  camera.lookAt(0, 1, 0);
+}
+function frameRow(width) {
+  if (!view.auto) return;
+  const halfH = Math.atan(Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * camera.aspect);
+  view.dist = clamp((width / 2) / Math.tan(halfH) * 1.15, 20, 160);
+  placeCamera();
+}
+let drag = null;
+canvas.addEventListener("pointerdown", (e) => {
+  drag = { x: e.clientX, y: e.clientY };
+  canvas.setPointerCapture(e.pointerId);
+});
+canvas.addEventListener("pointermove", (e) => {
+  if (!drag) return;
+  view.yaw -= (e.clientX - drag.x) * 0.005;
+  view.pitch = clamp(view.pitch + (e.clientY - drag.y) * 0.005, 0.12, 1.45);
+  drag = { x: e.clientX, y: e.clientY };
+  view.auto = false;
+  placeCamera();
+});
+canvas.addEventListener("pointerup", () => { drag = null; });
+canvas.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  view.dist = clamp(view.dist * (1 + e.deltaY * 0.001), 8, 200);
+  view.auto = false;
+  placeCamera();
+}, { passive: false });
+placeCamera();
 
 let worldData = null;
 let fps = 0;
@@ -277,14 +333,90 @@ let sceneObjects = { queues: [], workers: [], destinations: [], belt: [] };
 
 // Belt geometry, shared by the layout and the animation so they cannot drift.
 const BELT_LENGTH = 10;
+const BELT_SPACING = 15;
+const rowWidth = (n) => Math.max(n - 1, 0) * BELT_SPACING + 14;
+
+// Primitive fallbacks, shared: removing a mesh does not free its buffers.
+const PRIM = {
+  box: new THREE.BoxGeometry(0.8, 0.8, 0.8),
+  belt: new THREE.BoxGeometry(BELT_LENGTH, 0.4, 1.5),
+  beltMat: new THREE.MeshStandardMaterial({ color: 0x3a3f55 }),
+  craneBase: new THREE.BoxGeometry(1, 0.3, 1),
+  craneBaseMat: new THREE.MeshStandardMaterial({ color: 0xffcc00 }),
+  craneArm: new THREE.BoxGeometry(0.2, 2, 0.2),
+  craneArmMat: new THREE.MeshStandardMaterial({ color: 0xff9900 }),
+  hopper: new THREE.ConeGeometry(1, 2, 8),
+  hopperMat: new THREE.MeshStandardMaterial({ color: 0x5a6078 }),
+};
+
+// One label sprite per queue, redrawn on change, disposed with the queue.
+const LABEL_W = 512;
+const LABEL_H = 128;
+const labels = new Map();
+function beltLabel(name, detail) {
+  let label = labels.get(name);
+  if (!label) {
+    const canvas = document.createElement("canvas");
+    canvas.width = LABEL_W;
+    canvas.height = LABEL_H;
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    const material = new THREE.SpriteMaterial({
+      map: texture, transparent: true, depthWrite: false, toneMapped: false,
+    });
+    const sprite = new THREE.Sprite(material);
+    sprite.scale.set(8, 2, 1);
+    scene.add(sprite);
+    label = { canvas, texture, material, sprite, detail: null };
+    labels.set(name, label);
+  }
+  if (label.detail !== detail) {
+    const ctx = label.canvas.getContext("2d");
+    ctx.clearRect(0, 0, LABEL_W, LABEL_H);
+    ctx.fillStyle = "rgba(13, 14, 20, 0.8)";
+    ctx.fillRect(0, 0, LABEL_W, LABEL_H);
+    ctx.strokeStyle = "rgba(0, 240, 255, 0.9)";
+    ctx.lineWidth = 4;
+    ctx.strokeRect(2, 2, LABEL_W - 4, LABEL_H - 4);
+    ctx.fillStyle = "rgb(0, 240, 255)";
+    ctx.font = "bold 46px ui-monospace, Menlo, monospace";
+    ctx.fillText(name, 22, 56);
+    // Shrink the detail line until it fits.
+    ctx.fillStyle = "rgb(178, 183, 199)";
+    let size = 30;
+    do {
+      ctx.font = `${size}px ui-monospace, Menlo, monospace`;
+      size -= 2;
+    } while (ctx.measureText(detail).width > LABEL_W - 44 && size >= 16);
+    ctx.fillText(detail, 22, 104);
+    label.texture.needsUpdate = true;
+    label.detail = detail;
+  }
+  return label.sprite;
+}
+function dropStaleLabels(live) {
+  for (const [name, label] of labels) {
+    if (live.has(name)) continue;
+    scene.remove(label.sprite);
+    label.texture.dispose();
+    label.material.dispose();
+    labels.delete(name);
+  }
+}
 
 // Create floor
 const floorGeometry = new THREE.PlaneGeometry(120, 120);
-const floorMaterial = new THREE.MeshStandardMaterial({ color: 0x181a25 });
+const floorMaterial = new THREE.MeshStandardMaterial({ color: 0x262b40, roughness: 0.9 });
 const floor = new THREE.Mesh(floorGeometry, floorMaterial);
 floor.rotation.x = -Math.PI / 2;
 floor.receiveShadow = true;
 scene.add(floor);
+// A faint grid gives the floor depth.
+const grid = new THREE.GridHelper(120, 60, 0x00f0ff, 0x3a4160);
+grid.material.transparent = true;
+grid.material.opacity = 0.25;
+grid.position.y = 0.01;
+scene.add(grid);
 
 // Helper: create a colored box (representing a job)
 function createJobBox(state) {
@@ -300,9 +432,7 @@ function createJobBox(state) {
   const model = modelClone("box");
   if (model) return tint(model, color);
 
-  const geo = new THREE.BoxGeometry(0.8, 0.8, 0.8);
-  const mat = new THREE.MeshStandardMaterial({ color });
-  const box = new THREE.Mesh(geo, mat);
+  const box = new THREE.Mesh(PRIM.box, stateMaterial(color));
   box.castShadow = true;
   box.receiveShadow = true;
   return box;
@@ -313,9 +443,7 @@ function createConveyorBelt(length = 8) {
   const model = modelClone("conveyor");
   if (model) return fitTo(model, length);
 
-  const geo = new THREE.BoxGeometry(length, 0.4, 1.5);
-  const mat = new THREE.MeshStandardMaterial({ color: 0x333333 });
-  const belt = new THREE.Mesh(geo, mat);
+  const belt = new THREE.Mesh(PRIM.belt, PRIM.beltMat);
   belt.castShadow = true;
   belt.receiveShadow = true;
   return belt;
@@ -329,16 +457,12 @@ function createCrane() {
   const group = new THREE.Group();
 
   // Base
-  const baseGeo = new THREE.BoxGeometry(1, 0.3, 1);
-  const baseMat = new THREE.MeshStandardMaterial({ color: 0xffcc00 });
-  const base = new THREE.Mesh(baseGeo, baseMat);
+  const base = new THREE.Mesh(PRIM.craneBase, PRIM.craneBaseMat);
   base.receiveShadow = true;
   group.add(base);
 
   // Arm
-  const armGeo = new THREE.BoxGeometry(0.2, 2, 0.2);
-  const armMat = new THREE.MeshStandardMaterial({ color: 0xff9900 });
-  const arm = new THREE.Mesh(armGeo, armMat);
+  const arm = new THREE.Mesh(PRIM.craneArm, PRIM.craneArmMat);
   arm.position.z = -0.4;
   arm.position.y = 1.2;
   arm.castShadow = true;
@@ -356,9 +480,7 @@ function createHopper() {
   const group = new THREE.Group();
 
   // Main body
-  const bodyGeo = new THREE.ConeGeometry(1, 2, 8);
-  const bodyMat = new THREE.MeshStandardMaterial({ color: 0x444444 });
-  const body = new THREE.Mesh(bodyGeo, bodyMat);
+  const body = new THREE.Mesh(PRIM.hopper, PRIM.hopperMat);
   body.castShadow = true;
   body.receiveShadow = true;
   group.add(body);
@@ -375,10 +497,14 @@ function updateScene(world) {
   sceneObjects.queues = [];
   sceneObjects.belt = [];
 
-  // Create conveyor belts and job boxes
+  dropStaleLabels(new Set(world.queues.map((q) => q.name)));
+
+  // Belts and job boxes, centred on the origin.
+  const first = -((world.queues.length - 1) * BELT_SPACING) / 2;
+  frameRow(rowWidth(world.queues.length));
   let queueIndex = 0;
   for (const queue of world.queues) {
-    const x = -30 + queueIndex * 15;
+    const x = first + queueIndex * BELT_SPACING;
     const z = 0;
 
     // Add conveyor belt
@@ -386,6 +512,13 @@ function updateScene(world) {
     belt.position.set(x, 0.3, z);
     scene.add(belt);
     sceneObjects.queues.push(belt);
+
+    // The label sprite persists across rebuilds, so it is only repositioned.
+    const rate = queue.throughput_per_sec || 0;
+    beltLabel(
+      queue.name,
+      `${queue.available} waiting · ${queue.executing} running · ${rate.toFixed(1)}/s`,
+    ).position.set(x, 3.4, z);
 
     // Calculate total jobs and add representative boxes
     const total = queue.available + queue.executing + queue.retryable + queue.discarded + queue.cancelled + queue.completed;
@@ -436,14 +569,6 @@ function updateScene(world) {
         boxIndex++;
       }
     }
-
-    // Add queue label (as a small colored indicator)
-    const labelGeo = new THREE.SphereGeometry(0.3, 8, 8);
-    const labelMat = new THREE.MeshStandardMaterial({ color: 0x00f0ff });
-    const label = new THREE.Mesh(labelGeo, labelMat);
-    label.position.set(x, 2.5, z + 2);
-    scene.add(label);
-    sceneObjects.queues.push(label);
 
     queueIndex++;
   }
@@ -513,7 +638,7 @@ function updateHUD(world) {
     html += `<h3>Workers (${world.workers.length})</h3>`;
     for (const w of world.workers.slice(0, 3)) {
       const status = w.alive ? `<span style="color: #05ffa1">✓</span>` : `<span style="color: #ff2a6d">✗</span>`;
-      html += `<div>${status} ${w.id}</div>`;
+      html += `<div>${status} ${w.name || w.id}</div>`;
     }
   }
 
@@ -561,6 +686,7 @@ window.addEventListener("resize", () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  if (worldData?.queues) frameRow(rowWidth(worldData.queues.length));
 });
 </script>
 </body>
@@ -576,25 +702,9 @@ pub async fn index(
     Html(INDEX).into_response()
 }
 
-/// A single world feed shared by every viewer.
-///
-/// Each SSE connection used to run its OWN 500ms poll loop, so N browsers meant
-/// N times the queries -- two per tick each, forever. The world is identical
-/// for everyone (it is read-only and unscoped), so it is built once here and
-/// fanned out over a watch channel.
-///
-/// Deliberately a shared poll rather than LISTEN/NOTIFY per connection: see
-/// wakeup.rs, where the same decision is made for workers. A LISTEN needs its
-/// own dedicated connection, and one per dashboard viewer does not fit a
-/// max_connections budget. The insert trigger also would not help much here --
-/// under load the counters change continuously, so a notify-per-change would
-/// fire far more often than twice a second, not less.
+/// A single world feed shared by every viewer, polled while anyone watches.
 fn world_feed(state: &ApiState) -> watch::Receiver<Arc<GameWorld>> {
-    // The SENDER is kept, not a receiver. Holding a receiver here would keep the
-    // channel alive forever, so tx.send() could never report "nobody is
-    // watching" and the builder would poll the database for the life of the
-    // process. Measured: 66 transactions in 8s with zero viewers, against a
-    // baseline of 4.
+    // Keep the sender, not a receiver, so send() can report that nobody is watching.
     static FEED: OnceLock<(watch::Sender<Arc<GameWorld>>, AtomicBool)> = OnceLock::new();
 
     let (tx, running) = FEED.get_or_init(|| {
@@ -607,8 +717,7 @@ fn world_feed(state: &ApiState) -> watch::Receiver<Arc<GameWorld>> {
         (tx, AtomicBool::new(false))
     });
 
-    // Subscribe BEFORE the spawn check, so a builder starting up can never
-    // observe zero receivers and exit immediately.
+    // Subscribe before the spawn check so a new builder never sees zero receivers.
     let rx = tx.subscribe();
 
     if running
@@ -630,13 +739,7 @@ fn world_feed(state: &ApiState) -> watch::Receiver<Arc<GameWorld>> {
                         let secs = now.duration_since(*at).as_secs_f64();
                         let delta = q.completed - prev_completed;
 
-                        // A FALLING completed count means the pruner deleted
-                        // finished rows, not that nothing finished. Clamping the
-                        // delta to zero reported 0/s while the worker was busy --
-                        // observed on the soak, 43,992 -> 33,992 in one tick, a
-                        // whole 10,000-row prune batch. Such a tick cannot be
-                        // measured, so carry the last rate rather than lie with
-                        // a zero; the next clean tick corrects it.
+                        // A falling count means the pruner ran: carry the last rate.
                         q.throughput_per_sec = if delta >= 0 && secs > 0.0 {
                             delta as f64 / secs
                         } else {
@@ -647,10 +750,8 @@ fn world_feed(state: &ApiState) -> watch::Receiver<Arc<GameWorld>> {
                 }
 
                 if tx.send(Arc::new(world)).is_err() {
-                    // Nobody is watching. Stand down -- but re-check after
-                    // releasing the flag, because a viewer can subscribe in the
-                    // window between the failed send and this store, and would
-                    // otherwise wait on a channel no one is feeding.
+                    // Nobody is watching. Re-check after releasing the flag: a
+                    // viewer may have subscribed between the send and the store.
                     running.store(false, Ordering::Release);
                     if tx.receiver_count() > 0
                         && running
@@ -682,9 +783,7 @@ pub async fn stream(
     let ticks = stream::unfold(
         (world_feed(&state), true),
         move |(mut rx, first)| async move {
-            // timestamp_ms == 0 is the placeholder the channel is created
-            // with, before the builder's first query returns. Emitting it would
-            // show every new viewer an empty factory for up to half a second.
+            // timestamp_ms == 0 is the empty placeholder; wait for a real world.
             if !first || rx.borrow_and_update().timestamp_ms == 0 {
                 // Err: the feed's builder is gone, so the stream is over.
                 rx.changed().await.ok()?;
@@ -695,7 +794,6 @@ pub async fn stream(
                 .inspect_err(|e| tracing::warn!(error = %e, "game world did not serialize"))
                 .ok()?;
 
-            // Create SSE event with JSON data
             let event = Event::new()
                 .try_with_event("world")
                 .ok()?
@@ -713,14 +811,7 @@ pub async fn stream(
 
 type QueueState = (i64, i64, i64, i64, i64, i64, Option<i32>);
 
-/// Run a read on a connection carrying the dashboard's statement_timeout.
-///
-/// Every /game/stream connection re-runs these every 500ms, so an unbounded
-/// read here is worse than on the dashboard: a slow query does not just stall
-/// one page load, it pins a pool connection per viewer and keeps doing it.
-/// SET LOCAL needs an explicit transaction to mean anything -- see
-/// Queue::recent_jobs, where issuing it on an autocommit connection made it a
-/// silent no-op.
+/// Run a read under the dashboard's statement_timeout, in a transaction for SET LOCAL.
 async fn timed_read<T>(state: &ApiState, sql: &'static str) -> Vec<T>
 where
     T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
@@ -728,34 +819,27 @@ where
     match try_timed_read(state, sql).await {
         Ok(rows) => rows,
         Err(e) => {
-            // NOT silent. The worker query referenced heartbeat_at and `alive`,
-            // neither of which exists on stampeded_workers, so it failed on
-            // every single tick -- and unwrap_or_default rendered that as an
-            // empty worker list. The world looked idle instead of broken.
+            // Logged: an empty world must not hide a broken query.
             tracing::warn!(error = %e, "game world query failed; rendering it empty");
             Vec::new()
         }
     }
 }
 
-async fn try_timed_read<T>(state: &ApiState, sql: &'static str) -> sqlx::Result<Vec<T>>
+async fn try_timed_read<T>(state: &ApiState, sql: &'static str) -> crate::Result<Vec<T>>
 where
     T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
 {
-    let mut tx = state.queue.pool().begin().await?;
-    sqlx::query(sqlx::AssertSqlSafe(format!(
-        "SET LOCAL statement_timeout = {}",
-        crate::queue::DASHBOARD_QUERY_TIMEOUT.as_millis()
-    )))
-    .execute(&mut *tx)
-    .await?;
+    let mut tx = state
+        .queue
+        .begin_timed(crate::queue::DASHBOARD_QUERY_TIMEOUT)
+        .await?;
     let rows = sqlx::query_as::<_, T>(sql).fetch_all(&mut *tx).await?;
     tx.commit().await?;
     Ok(rows)
 }
 
 async fn build_world_state(state: &ApiState) -> GameWorld {
-    // Fetch queue depth information
     let queue_rows: Vec<(String, String, i64)> = timed_read(
         state,
         "SELECT queue, state, n FROM stampeded_queue_counts WHERE n <> 0 ORDER BY queue, state",
@@ -769,7 +853,6 @@ async fn build_world_state(state: &ApiState) -> GameWorld {
         .inspect_err(|e| tracing::warn!(error = %e, "game world age query failed"))
         .unwrap_or_default();
 
-    // Group by queue
     let mut queue_map: std::collections::HashMap<String, QueueState> =
         std::collections::HashMap::default();
     for (queue, st, n) in queue_rows {
@@ -785,21 +868,17 @@ async fn build_world_state(state: &ApiState) -> GameWorld {
         }
     }
 
-    // Add age for waiting states
     for (queue_name, age) in &ages {
         if let Some(entry) = queue_map.get_mut(queue_name)
             && (entry.0 > 0 || entry.3 > 0)
         {
-            // Has available or retryable jobs
-            // Whole seconds; float-to-int `as` saturates, and a wait past
-            // i32::MAX seconds is not one the world view needs to tell apart.
+            // Whole seconds; float-to-int `as` saturates past i32::MAX.
             #[expect(clippy::cast_possible_truncation)]
             let secs = *age as i32;
             entry.6 = Some(secs);
         }
     }
 
-    // Build conveyor entities
     let mut queues = Vec::new();
     let mut x_offset = 0.0;
     for (
@@ -822,15 +901,9 @@ async fn build_world_state(state: &ApiState) -> GameWorld {
         x_offset += 15.0;
     }
 
-    // Fetch worker information
-    let worker_rows: Vec<(String, String, i32)> = timed_read(
+    let worker_rows: Vec<(String, String, String, i32)> = timed_read(
         state,
-        // last_heartbeat, NOT heartbeat_at, and there is no `alive` column on
-        // stampeded_workers -- see the table definition. The original query
-        // referenced all three, so it errored on every tick and unwrap_or_default
-        // turned that into an empty worker list. The world never showed a single
-        // worker and looked merely idle.
-        "SELECT id::text, queues::text,
+        "SELECT id::text, hostname || ':' || pid, queues::text,
                 EXTRACT(EPOCH FROM (NOW() - last_heartbeat))::int AS secs_ago
            FROM stampeded_workers
           ORDER BY last_heartbeat DESC
@@ -840,8 +913,8 @@ async fn build_world_state(state: &ApiState) -> GameWorld {
 
     let mut workers = Vec::new();
     let mut w_offset = 0.0;
-    for (id, queue_str, secs_ago) in worker_rows {
-        // Parse queue string (PostgreSQL text array format like "{default,mail}")
+    for (id, name, queue_str, secs_ago) in worker_rows {
+        // A Postgres text array, e.g. "{default,mail}".
         let queue = queue_str
             .trim_matches(|c| c == '{' || c == '}')
             .split(',')
@@ -851,6 +924,7 @@ async fn build_world_state(state: &ApiState) -> GameWorld {
 
         workers.push(WorkerEntity {
             id,
+            name,
             queue,
             alive: secs_ago < 300, // Alive if heartbeat < 5 minutes ago
             last_heartbeat_secs_ago: secs_ago,
@@ -859,11 +933,11 @@ async fn build_world_state(state: &ApiState) -> GameWorld {
         w_offset += 2.0;
     }
 
-    // Fetch destination health information
     let dest_rows = state
         .queue
         .destination_health(Duration::from_secs(3600))
         .await
+        .inspect_err(|e| tracing::warn!(error = %e, "game world destination query failed"))
         .unwrap_or_default();
 
     let mut destinations = Vec::new();
@@ -913,14 +987,7 @@ pub async fn gltf_loader() -> impl IntoResponse {
         .into_response()
 }
 
-/// Serve three's core module from embedded bytes.
-///
-/// From 0.16x on, build/three.module.js is a thin re-export shell whose every
-/// symbol comes from `./three.core.min.js`. Vendoring only the module gives you
-/// a file that imports a megabyte it cannot reach, and `import * as THREE`
-/// fails outright -- the whole scene, not just the loader. The minified pair is
-/// 733 KB against 2044 KB for the readable one; the addons have no minified
-/// build upstream, so they stay readable. Names must match the import exactly.
+/// Serve three's core module, which three.module.min.js re-exports by this exact name.
 pub async fn three_core() -> impl IntoResponse {
     const SRC: &[u8] = include_bytes!("../../assets/three.core.min.js");
 
@@ -929,13 +996,7 @@ pub async fn three_core() -> impl IntoResponse {
 
 /// Serve GLTFLoader's addon dependencies from embedded bytes.
 ///
-/// GLTFLoader does `import ... from '../utils/BufferGeometryUtils.js'`. Served
-/// from /game/gltf-loader.js that resolved to /utils/BufferGeometryUtils.js,
-/// which nothing served -- a 404, so the module never evaluated, the loader
-/// never existed, and every model silently fell back to a primitive. Serving
-/// the loader from /game/loaders/ instead makes ../utils/ land on /game/utils/,
-/// so three's own relative imports resolve untouched. Do not flatten these
-/// paths without re-reading the import statements.
+/// GLTFLoader imports `../utils/`, so these must stay under /game/utils/.
 pub async fn buffer_geometry_utils() -> impl IntoResponse {
     const SRC: &[u8] = include_bytes!("../../assets/utils/BufferGeometryUtils.js");
 
@@ -949,14 +1010,9 @@ pub async fn skeleton_utils() -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "application/javascript")], SRC).into_response()
 }
 
-/// Serve the Factory Kit's shared texture atlas.
+/// Serve the Factory Kit's texture atlas, which every GLB references externally.
 ///
-/// Every one of the 14 GLBs references `Textures/colormap.png` as an EXTERNAL
-/// uri -- the geometry is embedded, the texture is not. Unserved, GLTFLoader
-/// resolves it against /game/models/ and 404s, so every model renders
-/// untextured. Kenney ships a different colormap per kit, so this one must
-/// come from Factory Kit specifically; another kit's atlas is the same size
-/// and silently wrong colours.
+/// Each Kenney kit has its own colormap; only Factory Kit's has the right colours.
 pub async fn model_texture() -> impl IntoResponse {
     const SRC: &[u8] = include_bytes!("../../assets/models/Textures/colormap.png");
 

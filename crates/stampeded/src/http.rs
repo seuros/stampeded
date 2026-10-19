@@ -1,16 +1,10 @@
-//! HTTP edge for clients outside the trust boundary.
+//! HTTP edge for clients that cannot hold a Postgres connection.
 //!
-//! Most callers should enqueue with a plain `INSERT` from their own Postgres
-//! driver -- that is the whole polyglot argument and it gets transactional
-//! enqueue for free. This exists for callers that cannot or should not hold a
-//! Postgres connection: browsers, edge functions, third parties, anything
-//! across a trust boundary.
-//!
-//! Built on rama so the API, the dashboard and the MCP transport share one HTTP
-//! stack.
+//! Everyone else should enqueue with a plain `INSERT`, which is transactional.
 
 pub mod api;
 pub mod dashboard;
+pub mod trends;
 
 #[cfg(feature = "game")]
 pub mod game;
@@ -21,24 +15,9 @@ mod test_support;
 pub use api::{ApiState, router};
 
 use tokio::sync::watch;
-use tracing::info;
+use tracing::{info, warn};
 
-/// Serve the API on `addr` until `shutdown` flips to true.
-///
-/// Separate from `router()` so the router can be mounted alongside the
-/// dashboard and MCP transport in one rama server -- sharing a single HTTP stack
-/// is the reason rama is here at all.
-///
-/// The layer stack is not decoration: `Router` is neither `Clone` nor
-/// infallible, so `ArcLayer` makes it shareable across connections and
-/// `ErrorHandlerLayer` turns its `RouterError` into a response. Without both,
-/// this does not compile.
-///
-/// The shutdown wiring is not optional either. `TcpListener::serve` stops
-/// accepting when its `Executor` carries a graceful guard -- and does NOT when
-/// the executor is `Executor::default()`, which has none. Built that way, this
-/// future never resolves, and a daemon awaiting its tasks hangs on SIGTERM
-/// forever instead of exiting. That was a real bug, found by sending the signal.
+/// Serve the API and dashboard on `addr` until `shutdown` flips to true.
 pub async fn serve(
     addr: &str,
     state: ApiState,
@@ -56,7 +35,7 @@ pub async fn serve(
         let r = router(state.clone())
             .with_get("/dashboard", dashboard::index)
             .with_get("/dashboard/stream", dashboard::stream)
-            // Datastar served from the binary, not a CDN. See dashboard::script.
+            // Datastar served from the binary, not a CDN.
             .with_get("/dashboard/datastar.js", dashboard::script)
             .with_get("/dashboard/datastar.js.map", dashboard::script_map);
 
@@ -81,10 +60,10 @@ pub async fn serve(
         }
     };
 
+    // Router is neither Clone nor infallible; ArcLayer and ErrorHandlerLayer fix both.
     let app = (ArcLayer::new(), ErrorHandlerLayer::new()).into_layer(app_router);
-    // The guard is what makes `serve` return: it cancels when the signal
-    // future resolves, which here is our own shutdown channel rather than a
-    // SIGTERM handler, so the daemon keeps owning signal policy.
+    let sampler_shutdown = shutdown.clone();
+    // Without a graceful guard `serve` never returns and SIGTERM hangs the daemon.
     let graceful = Shutdown::new(async move {
         // Err means the sender is gone, which is a shutdown too.
         let _ = shutdown.changed().await;
@@ -92,22 +71,36 @@ pub async fn serve(
     let exec = Executor::graceful(graceful.guard());
     let service = HttpServer::auto(exec.clone()).service(app);
 
-    info!(%addr, "http api listening");
-    TcpListener::bind_address(addr, exec)
+    let listener = TcpListener::bind_address(addr, exec)
         .await
         .map_err(|source| crate::Error::Bind {
             addr: addr.to_owned(),
             source,
-        })?
-        .serve(service)
-        .await;
+        })?;
 
-    // Accepting has stopped; let in-flight requests finish. An SSE stream can
-    // be open indefinitely, so this is bounded rather than unbounded -- a job
-    // watcher must not keep the process alive.
+    // Sample while the dashboard is served, so history exists before anyone looks.
+    let sampler = state.dashboard_token.is_some().then(|| {
+        tokio::spawn(trends::run(
+            state.queue.clone(),
+            state.trends.clone(),
+            sampler_shutdown,
+        ))
+    });
+
+    info!(%addr, "http api listening");
+    listener.serve(service).await;
+
+    // Bounded: an open SSE stream must not keep the process alive.
     let waited = graceful
         .shutdown_with_limit(std::time::Duration::from_secs(10))
         .await;
     info!(?waited, "http api stopped");
+
+    // Awaited so a panicked sampler is reported, not silently frozen.
+    if let Some(sampler) = sampler
+        && let Err(e) = sampler.await
+    {
+        warn!(error = %e, "trend sampler died");
+    }
     Ok(())
 }

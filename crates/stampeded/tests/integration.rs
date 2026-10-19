@@ -1175,6 +1175,76 @@ async fn timestamps_round_trip_through_jiff_sqlx() {
 }
 
 #[tokio::test]
+async fn tenant_load_counts_live_jobs_and_deferrals_per_tenant() {
+    // The dashboard's tenant panel: live backlog only, never finished history.
+    let q = q!();
+    let w = q
+        .register_worker("h", 1, &["default".into()])
+        .await
+        .unwrap();
+    for _ in 0..3 {
+        q.enqueue(NewJob::new("default", "t").tenant("acme"))
+            .await
+            .unwrap();
+    }
+    q.enqueue(NewJob::new("default", "t").tenant("globex"))
+        .await
+        .unwrap();
+    q.enqueue(NewJob::new("default", "untagged")).await.unwrap();
+
+    // Claim every job; then run one acme job, defer one, and finish one.
+    let claimed = q.claim("default", w, 10).await.unwrap();
+    let acme: Vec<_> = claimed
+        .iter()
+        .filter(|j| j.tenant_id.as_deref() == Some("acme"))
+        .collect();
+    let (deferred, finished) = (acme[0], acme[1]);
+    q.fail(
+        deferred,
+        w,
+        FailureKind::Throttled,
+        "tenant over its share",
+        Some(Duration::from_secs(60)),
+    )
+    .await
+    .unwrap();
+    q.complete(finished, w).await.unwrap();
+    for j in claimed
+        .iter()
+        .filter(|j| j.id != deferred.id && j.id != finished.id)
+    {
+        if j.tenant_id.as_deref() != Some("acme") {
+            q.fail(
+                j,
+                w,
+                FailureKind::Raised,
+                "boom",
+                Some(Duration::from_secs(60)),
+            )
+            .await
+            .unwrap();
+        }
+    }
+
+    let load = q.tenant_load(10).await.unwrap();
+    let row = |t: &str| load.iter().find(|r| r.tenant == t).cloned();
+    let acme = row("acme").expect("acme has live jobs");
+    // One executing, one deferred (waiting), one completed and no longer live.
+    assert_eq!((acme.waiting, acme.running, acme.throttled), (1, 1, 1));
+    let globex = row("globex").expect("globex has a live job");
+    assert_eq!(
+        (globex.waiting, globex.running, globex.throttled),
+        (1, 0, 0),
+        "a raise is not a deferral"
+    );
+    assert!(
+        load.iter().all(|r| !r.tenant.is_empty()),
+        "untagged jobs are not a tenant"
+    );
+    assert_eq!(load.len(), 2);
+}
+
+#[tokio::test]
 async fn args_and_meta_must_be_json_objects() {
     // A raw INSERT skips NewJob, so the schema alone keeps args and meta objects.
     let q = q!();

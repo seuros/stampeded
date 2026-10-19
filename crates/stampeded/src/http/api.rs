@@ -76,6 +76,8 @@ pub struct ApiState {
     pub dashboard_token: Option<Arc<String>>,
     /// State of the NOTIFY path, for the health panel.
     pub wakeups: WakeupStatus,
+    /// Throughput, depth and backlog-age history. See [`crate::http::trends`].
+    pub trends: Arc<crate::http::trends::Trends>,
 }
 
 impl ApiState {
@@ -85,6 +87,7 @@ impl ApiState {
             panels: Arc::new(PanelCache::default()),
             dashboard_token: None,
             wakeups: WakeupStatus::NotApplicable,
+            trends: Arc::default(),
         }
     }
 

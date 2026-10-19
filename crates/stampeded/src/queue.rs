@@ -48,6 +48,18 @@ pub struct DestinationHealth {
     pub last_failure: Option<Timestamp>,
 }
 
+/// One tenant's live jobs. See `tenant_load`.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct TenantLoad {
+    pub tenant: String,
+    /// Available plus retryable.
+    pub waiting: i64,
+    /// Claimed plus executing.
+    pub running: i64,
+    /// Retryable because the fairness gate deferred them, not failed.
+    pub throttled: i64,
+}
+
 /// One clustered failure signature.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct FailureCluster {
@@ -160,6 +172,22 @@ impl Queue {
 
     pub fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    /// A transaction with a LOCAL `statement_timeout`, so the setting never leaks to the pool.
+    pub(crate) async fn begin_timed(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
+        let mut tx = self.pool.begin().await?;
+        // AssertSqlSafe: SET takes no bind parameter, and the value is our own integer.
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SET LOCAL statement_timeout = {}",
+            timeout.as_millis().max(1)
+        )))
+        .execute(&mut *tx)
+        .await?;
+        Ok(tx)
     }
 
     /// Enqueue a job; `None` when a deduplicated job was already queued.
@@ -424,17 +452,7 @@ impl Queue {
         limit: i32,
         statement_timeout: std::time::Duration,
     ) -> Result<u64> {
-        // An EXPLICIT transaction, because SET LOCAL needs one.
-        let mut conn = self.pool.begin().await?;
-
-        // AssertSqlSafe: SET takes no bind parameter, and the value is our own integer.
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "SET LOCAL statement_timeout = {}",
-            statement_timeout.as_millis().max(1)
-        )))
-        .execute(&mut *conn)
-        .await?;
-
+        let mut conn = self.begin_timed(statement_timeout).await?;
         let n: Option<i32> = sqlx::query_scalar(
             "SELECT stampeded_prune(make_interval(secs => $1), $2, make_interval(secs => $3))",
         )
@@ -571,17 +589,7 @@ impl Queue {
         state: Option<&str>,
         limit: i64,
     ) -> Result<Vec<Job>> {
-        // An EXPLICIT transaction, because SET LOCAL needs one.
-        let mut conn = self.pool.begin().await?;
-
-        // LOCAL, so it cannot leak onto the pooled connection's next query.
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "SET LOCAL statement_timeout = {}",
-            DASHBOARD_QUERY_TIMEOUT.as_millis()
-        )))
-        .execute(&mut *conn)
-        .await?;
-
+        let mut conn = self.begin_timed(DASHBOARD_QUERY_TIMEOUT).await?;
         let rows = sqlx::query_as::<_, Job>(
             "SELECT * FROM stampeded_jobs \
               WHERE queue = $1 AND ($2::text IS NULL OR state = $2) \
@@ -596,6 +604,31 @@ impl Queue {
         // Read-only, but commit so the connection returns cleanly instead of via an abort.
         conn.commit().await?;
 
+        Ok(rows)
+    }
+
+    /// Live jobs per tenant, busiest backlog first, under the dashboard timeout.
+    pub async fn tenant_load(&self, limit: i64) -> Result<Vec<TenantLoad>> {
+        let mut conn = self.begin_timed(DASHBOARD_QUERY_TIMEOUT).await?;
+        let rows = sqlx::query_as::<_, TenantLoad>(
+            "SELECT tenant_id AS tenant, \
+                    count(*) FILTER (WHERE state IN ('available','retryable'))::bigint AS waiting, \
+                    count(*) FILTER (WHERE state IN ('claimed','executing'))::bigint AS running, \
+                    count(*) FILTER (WHERE state = 'retryable' \
+                                       AND failure_kind = 'throttled')::bigint AS throttled \
+               FROM stampeded_jobs \
+              WHERE tenant_id IS NOT NULL \
+                AND state IN ('available','retryable','claimed','executing') \
+              GROUP BY tenant_id \
+              ORDER BY waiting DESC, tenant_id \
+              LIMIT $1",
+        )
+        .bind(limit)
+        .fetch_all(&mut *conn)
+        .await?;
+
+        // Read-only, but commit so the connection returns cleanly instead of via an abort.
+        conn.commit().await?;
         Ok(rows)
     }
 

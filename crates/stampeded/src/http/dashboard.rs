@@ -1,21 +1,8 @@
-//! The operator console, served with Datastar over SSE.
+//! The operator console, served with Datastar over SSE. Off unless a token is set.
 //!
-//! A job dashboard is ~90% "stream state changes into a table", which is
-//! exactly SSE's shape. This is one HTML page and a server-sent event stream --
-//! no Node toolchain, no bundler, nothing to `npm install`. Datastar patches
-//! elements by selector, so all rendering stays in Rust.
-//!
-//! **Off unless a token is configured.** Secure by default, because an opt-in
-//! auth setting is how a job dashboard ends up open on staging and production:
-//! nobody opts in. This one exposes job args, which are customer data.
-//!
-//! Every query here obeys one rule: no unbounded aggregate over the job table.
-//! Depth comes from the counter table, failures cluster on the fingerprint
-//! index, and the job list is `LIMIT`ed. This page refreshes every second for
-//! as long as someone leaves it open, which makes it the single most dangerous
-//! place in the system to run a `count(*)`.
+//! It refreshes every second: no query here may aggregate the job table unbounded.
 
-use super::ApiState;
+use super::{ApiState, trends};
 use crate::http::api::WakeupStatus;
 use rama::futures::stream;
 use rama::http::StatusCode;
@@ -29,31 +16,24 @@ use serde::Deserialize;
 use std::convert::Infallible;
 // `let _ = write!` into a String below: String's fmt::Write never errors.
 use std::fmt::Write as _;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::warn;
 
 /// How far back the destination and failure panels look.
 const WINDOW: Duration = Duration::from_secs(3600);
 
-/// How long a shared panel render is reused.
-///
-/// Matches the tick, so a single client sees no staleness at all and ten
-/// clients cost what one does.
+/// How long a shared panel render is reused; matches the tick.
 const PANEL_TTL: Duration = Duration::from_secs(1);
 
-/// Panels that are byte-identical for every client, and so are rendered once
-/// and shared.
+/// Panels identical for every client, rendered once and shared.
 ///
-/// **`queues`, `jobs` and `job` are deliberately NOT here.** They embed filter
-/// links, and those links carry the requesting client's TOKEN -- caching them
-/// would serve one operator's credential to another. They are also the cheap
-/// ones; the four below are the expensive queries (destination health, failure
-/// clustering, vacuum stats), so caching exactly these gets the benefit without
-/// the hazard.
-const SHARED: &[&str] = &["destinations", "failures", "schedules", "health"];
+/// Never `queues`, `jobs` or `job`: their links carry the client's token.
+const SHARED: &[&str] = &["destinations", "failures", "schedules", "health", "tenants"];
 
-/// Rows in the job list. Small on purpose -- see `Queue::recent_jobs` for why
-/// this is not free on a large partition.
+/// How long the tenant panel is reused; it groups live job rows, not a counter.
+const TENANT_TTL: Duration = Duration::from_secs(5);
+
+/// Rows in the job list; see `Queue::recent_jobs` for its cost.
 const JOB_LIMIT: i64 = 40;
 
 const INDEX: &str = r#"<!doctype html>
@@ -129,6 +109,13 @@ const INDEX: &str = r#"<!doctype html>
   nav a:hover { color: var(--cyan-500) }
   nav a.on { font-weight: 700; color: var(--cyan-500); border-bottom: 2px solid var(--cyan-500) }
   footer { color: var(--dim); margin-top: 2.5rem; font-size: .72rem }
+  /* Sparklines take their colour from the cell's class. */
+  .spark { display: block; width: 8rem; height: 1.5rem }
+  .spark polyline { fill: none; stroke: currentColor; stroke-width: 1.5;
+                    vector-effect: non-scaling-stroke }
+  .flow { color: var(--cyan-500) }
+  .bar { display: inline-block; height: .55rem; min-width: 1px;
+         background: var(--cyan-500); opacity: .75; vertical-align: middle }
 </style>
 </head>
 <body data-init="@get('/dashboard/stream?token=__TOKEN__&amp;q=__Q__&amp;s=__S__&amp;j=__J__')">
@@ -145,11 +132,15 @@ const INDEX: &str = r#"<!doctype html>
        Out here it costs nothing and the columns size to what actually lives
        in them. -->
   <div id="destinations"></div>
+  <!-- Full width: three sparklines per queue. -->
+  <div id="trends"></div>
   <div class="cols">
     <div id="queues">connecting…</div>
-    <div id="failures"></div>
+    <div id="tenants"></div>
     <div id="health"></div>
   </div>
+  <!-- Full width: in a column the error text was a word or two wide. -->
+  <div id="failures"></div>
   <!-- Full width, both of them: schedules needs ~770px for a cron rule plus a
        timezone and a DST policy, and the jobs list is the working area.
        Squeezing either into a column just moves the content behind a
@@ -162,11 +153,7 @@ const INDEX: &str = r#"<!doctype html>
 
 /// Dashboard credentials and filters.
 ///
-/// The token rides on the query string because the page must hand it to the SSE
-/// stream and `EventSource` cannot set headers. That puts the secret in server
-/// logs and browser history -- the honest cost of a dependency-free auth model.
-/// Deployments that care should front this with their own proxy and set no
-/// token at all.
+/// The token is in the query string because `EventSource` cannot set headers.
 #[derive(Debug, Deserialize, Default)]
 pub struct Params {
     #[serde(default)]
@@ -216,8 +203,7 @@ impl Params {
 
 pub async fn index(State(state): State<ApiState>, Query(p): Query<Params>) -> impl IntoResponse {
     if !state.dashboard_authorised(p.token.as_deref()) {
-        // 404, not 401: an unauthenticated caller has no business learning
-        // that a dashboard exists here.
+        // 404, not 401: do not reveal that a dashboard exists.
         return (StatusCode::NOT_FOUND, "not found").into_response();
     }
 
@@ -231,11 +217,7 @@ pub async fn index(State(state): State<ApiState>, Query(p): Query<Params>) -> im
     .into_response()
 }
 
-/// The live stream.
-///
-/// Polled rather than driven by LISTEN/NOTIFY: a dashboard is allowed to be a
-/// second stale, and a notification per job transition would put dashboard load
-/// on the channel workers depend on for wakeups.
+/// The live stream, polled so dashboard load stays off the workers' NOTIFY channel.
 pub async fn stream(State(state): State<ApiState>, Query(p): Query<Params>) -> impl IntoResponse {
     if !state.dashboard_authorised(p.token.as_deref()) {
         return (StatusCode::NOT_FOUND, "not found").into_response();
@@ -248,24 +230,28 @@ pub async fn stream(State(state): State<ApiState>, Query(p): Query<Params>) -> i
                 return Some((Ok::<_, Infallible>(ev), (state, p, pending, false)));
             }
 
-            // The first tick renders immediately; "connecting…" for a second
-            // makes a working dashboard look broken.
+            // The first tick renders immediately.
             if !first {
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
 
             // Built in reverse so `pop` emits them top-down.
-            //
-            // The global panels go through the shared cache, so N connected
-            // clients cost what one does. The job list and detail depend on
-            // this client's filters and are rendered per client.
             let mut next: Vec<_> = [
-                cached(&state, "health", render_health(&state)).await,
-                cached(&state, "schedules", render_schedules(&state)).await,
+                cached(&state, "health", PANEL_TTL, render_health(&state)).await,
+                cached(&state, "schedules", PANEL_TTL, render_schedules(&state)).await,
                 render_job(&state, &p).await,
                 render_jobs(&state, &p).await,
-                cached(&state, "failures", render_failures(&state)).await,
-                cached(&state, "destinations", render_destinations(&state)).await,
+                cached(&state, "tenants", TENANT_TTL, render_tenants(&state)).await,
+                cached(&state, "failures", PANEL_TTL, render_failures(&state)).await,
+                // In memory, no query: rendered per client, nothing to cache.
+                patch(&render_trends(&state.trends.snapshot(), Instant::now())),
+                cached(
+                    &state,
+                    "destinations",
+                    PANEL_TTL,
+                    render_destinations(&state),
+                )
+                .await,
                 render_queues(&state, &p).await,
                 render_wakeups(&state),
             ]
@@ -286,26 +272,21 @@ pub async fn stream(State(state): State<ApiState>, Query(p): Query<Params>) -> i
 }
 
 /// Share one render of a global panel across every connected client.
-async fn cached<F>(state: &ApiState, key: &'static str, f: F) -> Option<Event<PatchElements>>
+async fn cached<F>(
+    state: &ApiState,
+    key: &'static str,
+    ttl: Duration,
+    f: F,
+) -> Option<Event<PatchElements>>
 where
     F: std::future::Future<Output = Option<String>>,
 {
     debug_assert!(SHARED.contains(&key), "{key} is not a shared panel");
-    let html = state.panels.get(key, PANEL_TTL, f).await?;
+    let html = state.panels.get(key, ttl, f).await?;
     patch(&html)
 }
 
-/// How a wakeup status reads on the dashboard.
-///
-/// Split out from the render so it can be tested without a database: it is a
-/// pure decision about what the operator is told, and that is the part that
-/// can be wrong.
-///
-/// None of the three is an error -- the queue is correct while polling -- but
-/// the distinction matters. A --no-worker daemon has no listener BECAUSE IT
-/// HAS NO WORKERS, which is the recommended shape for a Rails deployment;
-/// flagging that amber implies a fault that is not there, and amber on a
-/// healthy system is how people learn to ignore amber.
+/// How a wakeup status reads on the dashboard; no workers is not a fault.
 pub(crate) fn wakeup_badge(status: WakeupStatus) -> (&'static str, &'static str) {
     match status {
         WakeupStatus::Live => ("ok", "wakeups live"),
@@ -321,45 +302,20 @@ fn render_wakeups(state: &ApiState) -> Option<Event<PatchElements>> {
     ))
 }
 
-/// Datastar itself, served from the binary.
+/// Datastar itself, served from the binary so the console works air-gapped.
 ///
-/// It used to be a `<script src>` pointing at jsdelivr, which meant the
-/// operator console required internet access -- and required it from the
-/// browser of whoever was looking at it, at the moment they were looking.
-/// That is backwards for the tool you open when production is unhappy: an
-/// air-gapped deployment got a blank page, and a CDN outage took the
-/// dashboard with it.
-///
-/// rama's embedded script was a REASON to choose rama -- no Node toolchain in
-/// the deployment, verifiably rather than aspirationally -- and then the
-/// dashboard loaded from a CDN anyway. The capability was argued for and not
-/// used.
-///
-/// rama's copy is 1.0.2; the CDN pin was v1.0.0. Taking rama's keeps the
-/// client in step with the `PatchElements` encoder that generates the events,
-/// which is the version that actually has to match.
+/// rama's copy matches the `PatchElements` encoder that generates the events.
 pub async fn script() -> impl IntoResponse {
     rama::http::service::web::response::DatastarScript::new()
 }
 
-/// The Datastar source map.
-///
-/// datastar.js ends with `//# sourceMappingURL=datastar.js.map`, so a browser
-/// with devtools open asks for this whether or not we serve it. Without the
-/// route that is a 404 in the console of the person debugging the dashboard,
-/// which is a bad first impression for an operator tool and sends them looking
-/// for a problem that is not there.
-///
-/// rama embeds the map next to the script (`DatastarSourceMap`, 185 KB). It is
-/// only fetched when devtools are open, so it costs nothing at runtime.
+/// The Datastar source map, which devtools request from datastar.js.
 pub async fn script_map() -> impl IntoResponse {
     rama::http::service::web::response::DatastarSourceMap::new()
 }
 
 async fn render_queues(state: &ApiState, p: &Params) -> Option<Event<PatchElements>> {
-    // The counter table, never count(*) over the jobs table. This runs once a
-    // second for as long as the page is open, which is exactly how an unbounded
-    // aggregate pins the xmin horizon and stops vacuum reclaiming.
+    // The counter table, never count(*): a per-second aggregate would pin xmin.
     let rows: Result<Vec<(String, String, i64)>, _> = sqlx::query_as(
         "SELECT queue, state, n FROM stampeded_queue_counts WHERE n <> 0 ORDER BY queue, state",
     )
@@ -377,8 +333,7 @@ async fn render_queues(state: &ApiState, p: &Params) -> Option<Event<PatchElemen
         html.push_str(r#"<tr><td colspan="4" class="dim">no jobs</td></tr>"#);
     }
     for (queue, st, n) in rows {
-        // Only for states that are actually waiting: the oldest COMPLETED job
-        // is retention, not backlog.
+        // Waiting states only: an old completed job is retention, not backlog.
         let age = if st == "available" || st == "retryable" {
             ages.iter()
                 .find(|(q, _)| *q == queue)
@@ -404,18 +359,7 @@ async fn render_queues(state: &ApiState, p: &Params) -> Option<Event<PatchElemen
     patch(&html)
 }
 
-/// Destination health.
-///
-/// **This is NOT a live read of any worker's circuit breaker.**
-/// `breaker-machines` state lives in the worker process's memory, and the
-/// dashboard is normally served by a `--no-worker` daemon: a different process,
-/// usually a different machine. Nothing here can see it, and pretending
-/// otherwise would be worse than showing less.
-///
-/// What it shows is the evidence a breaker reacts to, which is what an operator
-/// actually needs. A run of `refused` means some worker's circuit IS open,
-/// because that is what `breaker_open` records; a run of `failed` against one
-/// host means one is about to be.
+/// Destination health, inferred from job rows: breaker state lives in worker memory.
 async fn render_destinations(state: &ApiState) -> Option<String> {
     let rows = logged("destinations", state.queue.destination_health(WINDOW).await)?;
     if rows.is_empty() {
@@ -447,6 +391,42 @@ async fn render_destinations(state: &ApiState) -> Option<String> {
     Some(html)
 }
 
+/// Live jobs per tenant, busiest first, with each one's share of the backlog.
+async fn render_tenants(state: &ApiState) -> Option<String> {
+    let rows = logged("tenants", state.queue.tenant_load(15).await)?;
+    Some(tenant_panel(&rows))
+}
+
+fn tenant_panel(rows: &[crate::queue::TenantLoad]) -> String {
+    if rows.is_empty() {
+        return r#"<div id="tenants"></div>"#.to_string();
+    }
+    let backlog: i64 = rows.iter().map(|r| r.waiting).sum();
+    let mut html = String::from(
+        r#"<div id="tenants"><h2>tenants <span class="dim">· live jobs, busiest first</span></h2><div class="t"><table><tr><th>tenant</th><th class="n">waiting</th><th class="n">running</th><th class="n">throttled</th><th>share</th></tr>"#,
+    );
+    for r in rows {
+        // Share of the shown backlog, as a bar up to 6rem wide.
+        let share = if backlog > 0 {
+            r.waiting as f64 / backlog as f64
+        } else {
+            0.0
+        };
+        let _ = write!(
+            html,
+            r#"<tr><td>{t}</td><td class="n">{w}</td><td class="n">{run}</td><td class="n {tc}">{th}</td><td><span class="bar" style="width:{bar:.2}rem"></span></td></tr>"#,
+            t = esc(&r.tenant),
+            w = r.waiting,
+            run = r.running,
+            tc = if r.throttled > 0 { "warn" } else { "dim" },
+            th = r.throttled,
+            bar = share * 6.0,
+        );
+    }
+    html.push_str("</table></div></div>");
+    html
+}
+
 async fn render_failures(state: &ApiState) -> Option<String> {
     let rows = logged("failures", state.queue.failure_clusters(8).await)?;
     if rows.is_empty() {
@@ -458,9 +438,7 @@ async fn render_failures(state: &ApiState) -> Option<String> {
     );
     for r in rows {
         let kind = r.failure_kind.unwrap_or_default();
-        // The kind IS the diagnosis, so it is coloured by WHO IS AT FAULT:
-        // worker_* is infrastructure, breaker_open/throttled is us declining to
-        // run it, raised/timed_out is the job itself.
+        // Coloured by who is at fault: infrastructure, us declining, or the job.
         let class = match kind.as_str() {
             "worker_exited" | "worker_missing" | "heartbeat_lost" => "warn",
             "breaker_open" | "throttled" => "dim",
@@ -519,9 +497,7 @@ async fn render_jobs(state: &ApiState, p: &Params) -> Option<Event<PatchElements
     {
         Ok(jobs) => jobs,
         Err(e) => {
-            // Almost certainly the statement timeout: a rare state on a large
-            // partition is a seq scan (measured at 4,634 buffers for 20 rows in
-            // 200k). Saying so beats an empty table that looks like "no jobs".
+            // Almost always the statement timeout: a rare state on a large partition seq-scans.
             return patch(&format!(
                 r#"<div id="jobs"><h2>jobs</h2><p class="warn">this listing timed out -- a rare state on a large queue has no index to use, so it reads most of the partition. Narrow the filter, or query it directly.</p><p class="dim">{}</p></div>"#,
                 esc(&e.to_string())
@@ -583,11 +559,6 @@ async fn render_jobs(state: &ApiState, p: &Params) -> Option<Event<PatchElements
 }
 
 /// One job, expanded: its failure history and its remaining retry schedule.
-///
-/// Both render data that was already on the row -- the `errors` ring buffer,
-/// and the backoff policy columns, which exist precisely so this can be shown
-/// WITHOUT re-deriving a formula the dashboard would then have to keep in sync
-/// with the worker.
 async fn render_job(state: &ApiState, p: &Params) -> Option<Event<PatchElements>> {
     let Some(raw) = p.job() else {
         return patch(r#"<div id="job"></div>"#);
@@ -625,8 +596,7 @@ async fn render_job(state: &ApiState, p: &Params) -> Option<Event<PatchElements>
     );
 
     if j.deferrals > 0 {
-        // Neither attempts nor interruptions: how many times WE declined to
-        // run it. A high count means it is waiting on a sick dependency.
+        // How often we declined to run it, not failures.
         let _ = write!(
             html,
             r#"<tr><th>deferred</th><td colspan="3">{d} of {md} <span class="dim">· we declined to run it; no attempt charged</span></td></tr>"#,
@@ -658,19 +628,11 @@ async fn render_job(state: &ApiState, p: &Params) -> Option<Event<PatchElements>
     }
     html.push_str("</table></div>");
 
-    // The remaining retry schedule, from the policy ON THE ROW.
-    //
-    // Persisting the policy is what lets this be rendered without the
-    // dashboard re-implementing the backoff formula and then drifting from the
-    // worker's. Shown as the CEILING, because the worker uses full jitter --
-    // rand(0, ceiling) -- so any given retry lands somewhere below this. Saying
-    // "in 4m" when the truth is "in up to 4m" would be a lie an operator would
-    // plan around.
+    // Retry ceilings from the row's policy; full jitter lands each retry below them.
     if !j.state.is_terminal() && j.attempt < j.max_attempts {
         html.push_str(r#"<h2>retry schedule <span class="dim">· upper bound; the worker jitters below it</span></h2><div class="t"><table><tr><th>attempt</th><th>at most</th></tr>"#);
         for n in j.attempt..j.max_attempts.min(j.attempt + 6) {
-            // unsigned_abs is exact here: CHECK constraints keep the policy
-            // columns positive, and `n.max(1) - 1` cannot go below zero.
+            // unsigned_abs is exact: CHECKs keep the policy positive, `n.max(1) - 1` >= 0.
             let ceiling = u64::from(j.backoff_base_ms.unsigned_abs())
                 .saturating_mul(2u64.saturating_pow(u32::from((n.max(1) - 1).unsigned_abs())))
                 .min(u64::from(j.backoff_max_ms.unsigned_abs()));
@@ -684,16 +646,10 @@ async fn render_job(state: &ApiState, p: &Params) -> Option<Event<PatchElements>
         html.push_str("</table></div>");
     }
 
-    // The failure history: the structured ring buffer, not a formatted blob.
-    // This is what distinguishes a flaky job from a consistently broken one at
-    // a glance. The buffer is bounded, so keeping this history does not grow
-    // the row without limit.
     if let Some(errors) = j.errors.as_array().filter(|e| !e.is_empty()) {
         html.push_str(r#"<h2>history</h2><div class="t"><table><tr><th>attempt</th><th>kind</th><th>when</th><th>error</th></tr>"#);
         for e in errors {
             let exit = match e["exit_status"].as_i64() {
-                // The single highest-signal artefact a worker death leaves
-                // behind.
                 Some(137) => " [exit 137 = OOM]".to_string(),
                 Some(c) => format!(" [exit {c}]"),
                 None => String::new(),
@@ -720,12 +676,7 @@ async fn render_job(state: &ApiState, p: &Params) -> Option<Event<PatchElements>
     patch(&html)
 }
 
-/// Resume state, rendered for a human.
-///
-/// The checkpoint is opaque JSON by design -- it is the job's own cursor and we
-/// cannot know which field means "progress". So the SHAPE is reported rather
-/// than guessed at: step names when it looks like a step record, otherwise the
-/// raw cursor, truncated.
+/// Resume state: step names for a step record, otherwise the raw cursor, truncated.
 fn describe_progress(job: &crate::Job) -> String {
     let Some(cp) = &job.checkpoint else {
         return String::new();
@@ -753,13 +704,7 @@ fn describe_progress(job: &crate::Job) -> String {
         ));
     }
 
-    // A checkpoint is arbitrary user JSON, so it can contain any character --
-    // a filename, a customer name, a city, an error message. Slicing a String
-    // by BYTE index panics when the cut lands inside a multi-byte character,
-    // which `{"file":"xxx…é.pdf"}` does at exactly the wrong length. That
-    // panic would fire inside the SSE stream, taking out the job panel for the
-    // one job an operator is looking at -- the job that has a checkpoint,
-    // which is to say a long-running one they care about.
+    // Arbitrary user JSON: never cut inside a multi-byte character.
     esc(&truncate_chars(&cp.to_string(), 48))
 }
 
@@ -768,11 +713,7 @@ fn truncate_chars(s: &str, max: usize) -> String {
     s[..s.floor_char_boundary(max)].to_string()
 }
 
-/// Unwrap a panel query, logging the failure.
-///
-/// A failed panel is skipped for this tick rather than rendered empty, which
-/// would read as "nothing here". It is logged because a panel that silently
-/// stops updating is how a dashboard misleads during an incident.
+/// Unwrap a panel query, logging the failure; a failed panel skips this tick.
 fn logged<T>(panel: &str, result: Result<T, impl std::fmt::Display>) -> Option<T> {
     result
         .inspect_err(|e| warn!(panel, error = %e, "dashboard query failed"))
@@ -780,9 +721,7 @@ fn logged<T>(panel: &str, result: Result<T, impl std::fmt::Display>) -> Option<T
 }
 
 async fn render_health(state: &ApiState) -> Option<String> {
-    // Autovacuum falling behind never raises an error; it just makes everything
-    // slower, which presents as "the queue is mysteriously slow" and sends
-    // people reading their job code.
+    // A lagging autovacuum never errors; the queue just gets slower.
     let behind: Vec<_> = logged("health", state.queue.vacuum_health().await)?
         .into_iter()
         .filter(|r| r.needs_vacuum)
@@ -815,9 +754,7 @@ async fn render_health(state: &ApiState) -> Option<String> {
         html.push_str("</table></div>");
     }
 
-    // Partitions that cannot wake anybody. Not an error -- those queues still
-    // work -- but the symptom is silence: latency quietly becomes the poll
-    // interval for one queue, and nothing else would ever say why.
+    // Not an error, but latency silently becomes the poll interval there.
     if let Some(silent) = logged("health", state.queue.partitions_without_wakeup().await)
         && !silent.is_empty()
     {
@@ -839,8 +776,7 @@ async fn render_health(state: &ApiState) -> Option<String> {
         html.push_str(r#"<tr><td colspan="2" class="dim">none registered</td></tr>"#);
     }
     for (host, pid, age) in workers {
-        // Flagged past the reaper's default dead_after: this worker's jobs are
-        // about to be reclaimed, which is worth seeing before it happens.
+        // Past the reaper's default dead_after: its jobs are about to be reclaimed.
         let class = if age > 300.0 { "bad" } else { "dim" };
         let _ = write!(
             html,
@@ -851,6 +787,80 @@ async fn render_health(state: &ApiState) -> Option<String> {
     }
     html.push_str("</table></div></div>");
     Some(html)
+}
+
+/// Throughput, depth and backlog age per queue as sparklines, from the sampler's memory.
+fn render_trends(series: &[(String, Vec<trends::Point>)], now: Instant) -> String {
+    if series.is_empty() {
+        return r#"<div id="trends"></div>"#.to_string();
+    }
+    // Span the history that exists, at least a minute, not the full window.
+    let span = series
+        .iter()
+        .filter_map(|(_, points)| points.first())
+        .map(|p| now.duration_since(p.at).as_secs_f64())
+        .fold(0.0_f64, f64::max)
+        .clamp(60.0, trends::WINDOW.as_secs_f64());
+    let mut html = format!(
+        r#"<div id="trends"><h2>trends <span class="dim">· last {}</span></h2><div class="t"><table><tr><th>queue</th><th class="n">done/s</th><th></th><th class="n">waiting</th><th></th><th class="n">oldest</th><th></th></tr>"#,
+        format_age(span),
+    );
+    for (queue, points) in series {
+        let Some(latest) = points.last() else {
+            continue;
+        };
+        let age = |p: &trends::Point| now.duration_since(p.at).as_secs_f64();
+        let done: Vec<_> = points
+            .iter()
+            .filter_map(|p| Some((age(p), p.rate?)))
+            .collect();
+        let waiting: Vec<_> = points.iter().map(|p| (age(p), p.waiting as f64)).collect();
+        let oldest: Vec<_> = points
+            .iter()
+            .map(|p| (age(p), p.oldest_secs.unwrap_or(0.0)))
+            .collect();
+        let _ = write!(
+            html,
+            r#"<tr><td>{q}</td><td class="n ok">{rate}</td><td class="ok">{done}</td><td class="n flow">{w}</td><td class="flow">{wait}</td><td class="n warn">{o}</td><td class="warn">{old}</td></tr>"#,
+            q = esc(queue),
+            rate = latest
+                .rate
+                .map_or_else(|| "-".to_string(), |r| format!("{r:.1}")),
+            done = sparkline(&done, span),
+            w = latest.waiting,
+            wait = sparkline(&waiting, span),
+            o = latest
+                .oldest_secs
+                .map_or_else(|| "-".to_string(), format_age),
+            old = sparkline(&oldest, span),
+        );
+    }
+    html.push_str("</table></div></div>");
+    html
+}
+
+/// An inline SVG of `(seconds ago, value)` points across `span`, scaled to its own peak.
+fn sparkline(points: &[(f64, f64)], span: f64) -> String {
+    const W: f64 = 120.0;
+    const H: f64 = 24.0;
+    let peak = points
+        .iter()
+        .map(|&(_, v)| v)
+        .fold(0.0_f64, f64::max)
+        .max(f64::EPSILON);
+    let mut line = String::new();
+    if points.len() >= 2 {
+        for &(ago, value) in points {
+            let x = W * (1.0 - (ago / span).clamp(0.0, 1.0));
+            // Inset by a pixel so a flat line at the peak is not clipped.
+            let y = (value / peak).mul_add(-(H - 2.0), H - 1.0);
+            let _ = write!(line, "{x:.1},{y:.1} ");
+        }
+    }
+    format!(
+        r#"<svg class="spark" viewBox="0 0 {W} {H}" preserveAspectRatio="none"><polyline points="{}"/></svg>"#,
+        line.trim_end()
+    )
 }
 
 /// Compact age: "3847s" is harder to read at a glance than "1h4m".
@@ -869,15 +879,7 @@ fn format_age(secs: f64) -> String {
 }
 
 fn patch(html: &str) -> Option<Event<PatchElements>> {
-    // COLLAPSED TO ONE LINE FIRST.
-    //
-    // SSE is line-oriented: a newline inside the payload splits the frame
-    // across several `data:` lines. That is legal, and Datastar reassembles it
-    // -- but the panels here are built with multi-line Rust string literals, so
-    // the indentation in the source was being shipped to every client every
-    // second and the correctness of each frame depended on a reassembly step
-    // nothing here can test without a browser. Collapsing removes both the
-    // doubt and the bytes.
+    // One line, so each frame is a single `data:` line without source indentation.
     let html = html
         .split('\n')
         .map(str::trim)
@@ -885,8 +887,7 @@ fn patch(html: &str) -> Option<Event<PatchElements>> {
         .collect::<Vec<_>>()
         .join(" ");
 
-    // NonEmptyStr makes "nothing to patch" a type-level concern rather than a
-    // malformed event that would break the stream.
+    // An empty patch would be a malformed event.
     let elements = rama::utils::str::NonEmptyStr::try_from(html).ok()?;
     PatchElements::new(elements)
         .with_mode(ElementPatchMode::Outer)
@@ -894,13 +895,7 @@ fn patch(html: &str) -> Option<Event<PatchElements>> {
         .ok()
 }
 
-/// Escape for HTML.
-///
-/// Queue, task and host names are operator-controlled, but ERROR TEXT IS NOT --
-/// it contains whatever a failing library put in a message, which can include
-/// anything an attacker got into a request. It reaches the browser, so it is
-/// escaped. So is the token, which is echoed into the stream URL and is
-/// attacker-chosen by construction.
+/// Escape for HTML; error text and the token are attacker-controlled.
 fn esc(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")

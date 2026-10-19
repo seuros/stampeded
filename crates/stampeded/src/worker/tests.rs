@@ -285,3 +285,26 @@ fn a_row_carrying_the_schema_defaults_leaves_the_configured_policy_alone() {
          preference: worst of 200 draws was {worst}ms, within the schema default"
     );
 }
+
+#[test]
+fn hostname_falls_back_to_the_os_before_unknown() {
+    const UNKNOWN: &str = "unknown";
+    let s = |v: &str| Some(v.to_string());
+    let cases = [
+        (s("container-7"), s("box"), "container-7"),
+        (None, s("box"), "box"),
+        (s(""), s("box"), "box"),
+        (s("  "), s("box"), "box"),
+        (None, None, UNKNOWN),
+        (s(""), s(""), UNKNOWN),
+    ];
+    for (env, os, expected) in cases {
+        assert_eq!(
+            pick_hostname(env.clone(), os.clone()),
+            expected,
+            "env {env:?}, os {os:?}"
+        );
+    }
+    // The real lookup must name this machine whatever the shell exported.
+    assert_ne!(hostname(), UNKNOWN);
+}

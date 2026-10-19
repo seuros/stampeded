@@ -37,6 +37,7 @@ uuid.workspace = true
 jiff.workspace = true
 jiff-sqlx.workspace = true
 thiserror.workspace = true
+gethostname.workspace = true
 tracing.workspace = true
 
 state-machines.workspace = true

@@ -748,10 +748,19 @@ pub(crate) async fn record_failure(
     Ok(())
 }
 
+/// This machine's name, for the workers table and the dashboard.
 fn hostname() -> String {
-    std::env::var("HOSTNAME")
-        .ok()
-        .filter(|h| !h.is_empty())
+    pick_hostname(
+        std::env::var("HOSTNAME").ok(),
+        gethostname::gethostname().into_string().ok(),
+    )
+}
+
+/// `HOSTNAME` first, so a container can name itself, then the OS, then "unknown".
+fn pick_hostname(env: Option<String>, os: Option<String>) -> String {
+    env.into_iter()
+        .chain(os)
+        .find(|h| !h.trim().is_empty())
         .unwrap_or_else(|| "unknown".to_string())
 }
 

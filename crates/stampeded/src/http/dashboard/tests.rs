@@ -384,3 +384,86 @@ fn every_datastar_attribute_on_the_page_exists() {
     }
     assert!(seen > 0, "the page uses no Datastar attributes at all");
 }
+
+#[test]
+fn a_sparkline_spans_the_window_and_peaks_at_the_top() {
+    let svg = sparkline(&[(300.0, 0.0), (150.0, 5.0), (0.0, 10.0)], 300.0);
+    // Oldest bottom-left, newest top-right, inset one unit from the edge.
+    assert!(
+        svg.contains(r#"points="0.0,23.0 60.0,12.0 120.0,1.0""#),
+        "{svg}"
+    );
+
+    // One point has no shape; the box is still drawn so the row keeps its width.
+    let lone = sparkline(&[(0.0, 3.0)], 300.0);
+    assert!(lone.contains(r#"points="""#), "{lone}");
+}
+
+#[test]
+fn the_trends_panel_names_queues_safely_and_shows_the_latest_values() {
+    use crate::http::trends::Point;
+    let now = Instant::now();
+    let at = |ago: u64| now.checked_sub(Duration::from_secs(ago)).unwrap();
+    let series = vec![(
+        "<mail>".to_string(),
+        vec![
+            Point {
+                at: at(10),
+                rate: None,
+                waiting: 40,
+                oldest_secs: Some(90.0),
+            },
+            Point {
+                at: at(5),
+                rate: Some(12.5),
+                waiting: 30,
+                oldest_secs: Some(65.0),
+            },
+        ],
+    )];
+
+    let html = render_trends(&series, now);
+    assert!(
+        html.contains("&lt;mail&gt;"),
+        "queue names are escaped: {html}"
+    );
+    assert!(html.contains(">12.5<"), "latest rate: {html}");
+    assert!(html.contains(">30<"), "latest waiting: {html}");
+    assert!(html.contains(">1m5s<"), "latest oldest: {html}");
+
+    assert!(
+        html.contains("last 1m0s"),
+        "ten seconds of history is drawn across the one-minute floor: {html}"
+    );
+
+    assert_eq!(render_trends(&[], now), r#"<div id="trends"></div>"#);
+}
+
+#[test]
+fn the_tenant_panel_bars_each_tenants_share_of_the_backlog() {
+    use crate::queue::TenantLoad;
+    let row = |tenant: &str, waiting, running, throttled| TenantLoad {
+        tenant: tenant.to_string(),
+        waiting,
+        running,
+        throttled,
+    };
+    let html = tenant_panel(&[row("acme", 300, 4, 25), row("<globex>", 100, 1, 0)]);
+
+    assert!(
+        html.contains("width:4.50rem"),
+        "acme holds 75% of the backlog: {html}"
+    );
+    assert!(html.contains("width:1.50rem"), "{html}");
+    assert!(
+        html.contains(r#"<td class="n warn">25</td>"#),
+        "throttling is flagged: {html}"
+    );
+    assert!(
+        html.contains("&lt;globex&gt;"),
+        "tenant names are escaped: {html}"
+    );
+
+    // An empty table would read as "no tenants exist".
+    assert_eq!(tenant_panel(&[]), r#"<div id="tenants"></div>"#);
+}

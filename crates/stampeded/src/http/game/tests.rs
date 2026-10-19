@@ -43,6 +43,7 @@ fn game_world_serializes_to_json() {
         }],
         workers: vec![WorkerEntity {
             id: "worker-1".to_string(),
+            name: "host-a:4242".to_string(),
             queue: "default".to_string(),
             alive: true,
             last_heartbeat_secs_ago: 5,
@@ -61,6 +62,10 @@ fn game_world_serializes_to_json() {
     let json = serde_json::to_string(&world).expect("failed to serialize");
     assert!(json.contains("default"));
     assert!(json.contains("worker-1"));
+    assert!(
+        json.contains("host-a:4242"),
+        "the HUD names workers by host:pid"
+    );
     assert!(json.contains("api.example.com"));
     assert!(json.contains("1234567890"));
 }
