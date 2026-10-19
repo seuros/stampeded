@@ -1,0 +1,4 @@
+schema/
+libexec/
+pkg/
+*.gem

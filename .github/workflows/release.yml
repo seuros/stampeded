@@ -1,0 +1,182 @@
+name: release
+
+# release-please cuts the release; every platform gem is built natively, installed with no
+# Rust in reach, smoke-tested and attached. `rake gem:download gem:push_all` publishes.
+# workflow_dispatch builds them all without releasing.
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      releases_created: ${{ steps.release.outputs.releases_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v5
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  ruby:
+    name: platformless gem
+    needs: release-please
+    if: ${{ !cancelled() && (needs.release-please.outputs.releases_created == 'true' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name || github.ref }}
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "4.0"
+      - run: gem install rake --no-document && cd ruby && rake gem:ruby
+      - uses: actions/upload-artifact@v7
+        with:
+          name: gem-ruby
+          path: ruby/pkg/*.gem
+          if-no-files-found: error
+
+  linux:
+    name: ${{ matrix.platform }}
+    needs: release-please
+    if: ${{ !cancelled() && (needs.release-please.outputs.releases_created == 'true' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: x86_64-linux-gnu, runner: ubuntu-latest, image: "ruby:4.0-trixie" }
+          - { platform: aarch64-linux-gnu, runner: ubuntu-24.04-arm, image: "ruby:4.0-trixie" }
+          - { platform: x86_64-linux-musl, runner: ubuntu-latest, image: "ruby:4.0-alpine" }
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name || github.ref }}
+      - uses: seuros/setup-upkg@master
+      - run: sh tools/build_native_gem.sh ${{ matrix.platform }}
+      - name: Installs without Rust, loads the library, runs the daemon
+        run: |
+          mv "$HOME/.cargo" "$HOME/.cargo.off"
+          sh tools/smoke_gem.sh ruby/pkg/stampeded-*-${{ matrix.platform }}.gem
+      - uses: actions/upload-artifact@v7
+        with:
+          name: gem-${{ matrix.platform }}
+          path: ruby/pkg/*-${{ matrix.platform }}.gem
+          if-no-files-found: error
+
+  # JavaScript actions do not run in Alpine containers on arm64, so this one uses docker run.
+  linux-arm64-musl:
+    name: aarch64-linux-musl
+    needs: release-please
+    if: ${{ !cancelled() && (needs.release-please.outputs.releases_created == 'true' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name || github.ref }}
+      - run: docker run --rm -v "$PWD:/src" -w /src ruby:4.0-alpine sh tools/build_native_gem.sh aarch64-linux-musl
+      - name: Installs without Rust, loads the library, runs the daemon
+        run: docker run --rm -v "$PWD:/src:ro" ruby:4.0-alpine sh /src/tools/smoke_gem.sh /src/ruby/pkg/stampeded-*-aarch64-linux-musl.gem
+      - uses: actions/upload-artifact@v7
+        with:
+          name: gem-aarch64-linux-musl
+          path: ruby/pkg/*-aarch64-linux-musl.gem
+          if-no-files-found: error
+
+  macos:
+    name: ${{ matrix.platform }}
+    needs: release-please
+    if: ${{ !cancelled() && (needs.release-please.outputs.releases_created == 'true' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: arm64-darwin, runner: macos-latest }
+          - { platform: x86_64-darwin, runner: macos-26-intel }
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name || github.ref }}
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "4.0"
+      - uses: dtolnay/rust-toolchain@1.99
+      - run: gem install rake --no-document && cd ruby && rake "gem:native[${{ matrix.platform }}]"
+      - name: Installs without Rust, loads the library, runs the daemon
+        run: |
+          GEM_HOME="$(mktemp -d)"
+          export GEM_HOME GEM_PATH=
+          PATH="$(dirname "$(which ruby)"):/usr/bin:/bin" sh tools/smoke_gem.sh ruby/pkg/stampeded-*-${{ matrix.platform }}.gem
+      - uses: actions/upload-artifact@v7
+        with:
+          name: gem-${{ matrix.platform }}
+          path: ruby/pkg/*-${{ matrix.platform }}.gem
+          if-no-files-found: error
+
+  freebsd:
+    name: FreeBSD 15.1
+    needs: release-please
+    if: ${{ !cancelled() && (needs.release-please.outputs.releases_created == 'true' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name || github.ref }}
+      - uses: vmactions/freebsd-vm@v1
+        with:
+          release: "15.1"
+          usesh: true
+          copyback: true
+          prepare: |
+            fetch -qo /tmp/upkg-install.sh https://raw.githubusercontent.com/seuros/upkg/master/install.sh
+            sh /tmp/upkg-install.sh
+            upkg install ruby40 git curl llvm gmake libffi
+            printf '%s\n' '#!/bin/sh' 'exec ruby40 -e "require %q(rubygems/gem_runner); Gem::GemRunner.new.run(ARGV)" -- "$@"' > /usr/local/bin/gem
+            chmod +x /usr/local/bin/gem
+            ln -sf ruby40 /usr/local/bin/ruby
+            curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.99
+          run: |
+            . "$HOME/.cargo/env"
+            LIBCLANG_PATH="$(ls -d /usr/local/llvm*/lib | sort -V | tail -1)"
+            export LIBCLANG_PATH
+            gem install rake --no-document
+            (cd ruby && ruby -e 'require "rake"; Rake.application.run(["gem:native"])')
+            mv "$HOME/.cargo" "$HOME/.cargo.off"
+            sh tools/smoke_gem.sh ruby/pkg/stampeded-*-freebsd*.gem
+      - uses: actions/upload-artifact@v7
+        with:
+          name: gem-freebsd
+          path: ruby/pkg/*-freebsd*.gem
+          if-no-files-found: error
+
+  attach:
+    needs: [release-please, ruby, linux, linux-arm64-musl, macos, freebsd]
+    if: ${{ needs.release-please.outputs.releases_created == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: gems
+          merge-multiple: true
+      - name: One gem per platform, plus the platformless one
+        run: |
+          ls -l gems
+          test "$(find gems -name '*.gem' | wc -l)" -eq 8
+      - uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.release-please.outputs.tag_name }}
+          files: gems/*.gem

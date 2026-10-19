@@ -1,0 +1,58 @@
+[workspace]
+resolver = "3"
+members = ["crates/stampeded", "crates/stampeded-ffi"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.99"
+license = "BSD-3-Clause"
+repository = "https://github.com/seuros/stampeded"
+authors = ["Abdelkader Boudih"]
+
+[workspace.dependencies]
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "time", "signal", "sync"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "uuid", "json", "macros"] }
+uuid = { version = "1.28", features = ["v7", "serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+jiff = { version = "0.2", features = ["serde"] }
+jiff-sqlx = { version = "0.2", features = ["postgres"] }
+thiserror = "2"
+anyhow = "1.0.104"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Optional, behind features.
+rama = { version = "0.4", default-features = false, features = ["http-full"] }
+mcp-host = { version = "0.14", features = ["macros", "stdio"] }
+schemars = "1"
+
+# The machines family.
+state-machines = "0.32"
+chrono-machines = "0.9"
+breaker-machines = { version = "0.20", features = ["async"] }
+throttle-machines = "0.3"
+# The queue planner.
+behavior-machines = { version = "0.2", default-features = false }
+behavior-machines-circuit = "0.1"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+unused_must_use = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+doc_markdown = "allow"
+cast_precision_loss = "allow"
+must_use_candidate = "allow"
+missing_const_for_fn = "allow"
+too_many_lines = "allow"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

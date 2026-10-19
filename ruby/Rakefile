@@ -1,0 +1,109 @@
+# frozen_string_literal: true
+
+require "rake/testtask"
+
+Rake::TestTask.new(:test) do |t|
+  t.libs << "test" << "lib"
+  t.test_files = FileList["test/**/*_test.rb"]
+  t.warning = false
+end
+
+task test: %i[stage_schema native]
+
+desc "Build libstampeded_ffi for the tests, unless STAMPEDED_INSTALL_DIR names one"
+task :native do
+  next if ENV["STAMPEDED_INSTALL_DIR"]
+
+  sh "cargo build -p stampeded-ffi --manifest-path #{WORKSPACE}/Cargo.toml"
+  ENV["STAMPEDED_INSTALL_DIR"] = File.join(cargo_target_root, "debug")
+end
+
+task default: :test
+
+require "fileutils"
+require "json"
+require_relative "lib/stampeded/version"
+
+WORKSPACE = File.expand_path("..", __dir__)
+PKG = File.join(__dir__, "pkg")
+
+desc "Copy schema/*.sql and LICENSE in from the repo root, ready to package"
+task :stage_schema do
+  FileUtils.cp(File.join(WORKSPACE, "LICENSE"), File.join(__dir__, "LICENSE"))
+  dest = File.join(__dir__, "schema")
+  FileUtils.rm_rf(dest)
+  FileUtils.mkdir_p(dest)
+  FileUtils.cp(Dir[File.join(WORKSPACE, "schema", "*.sql")], dest)
+  puts "staged #{Dir[File.join(dest, '*.sql')].size} schema file(s)"
+end
+
+def cargo_target_root
+  @cargo_target_root ||= Dir.chdir(WORKSPACE) do
+    JSON.parse(`cargo metadata --no-deps --format-version 1`).fetch("target_directory")
+  end
+end
+
+def local_platform
+  local = Gem::Platform.local
+  local.os == "darwin" ? "#{local.cpu}-darwin" : local.to_s
+end
+
+def native_library(platform) = platform.include?("darwin") ? "libstampeded_ffi.dylib" : "libstampeded_ffi.so"
+
+def unbundled(&)
+  defined?(Bundler) ? Bundler.with_unbundled_env(&) : yield
+end
+
+def build_gem(platform)
+  FileUtils.mkdir_p(PKG)
+  name = ["stampeded", Stampeded::VERSION, platform].compact.join("-")
+  unbundled do
+    sh({ "STAMPEDED_GEM_PLATFORM" => platform }, "gem", "build", "stampeded.gemspec",
+       "--output", File.join(PKG, "#{name}.gem"))
+  end
+end
+
+namespace :gem do
+  desc "Build the platformless gem: no daemon or library"
+  task ruby: :stage_schema do
+    build_gem(nil)
+  end
+
+  desc "Build this machine's gem with the daemon and library (gem:native[platform] names the platform)"
+  task :native, [:platform] => :stage_schema do |_t, args|
+    platform = args[:platform] || local_platform
+    rustflags = platform.include?("musl") ? { "RUSTFLAGS" => "-C target-feature=-crt-static" } : {}
+    sh rustflags, "cargo", "build", "--release", "--locked", "--manifest-path", File.join(WORKSPACE, "Cargo.toml"),
+       "-p", "stampeded", "-p", "stampeded-ffi", "--bin", "stampeded", "--lib"
+
+    built = File.join(cargo_target_root, "release")
+    libexec = File.join(__dir__, "libexec")
+    FileUtils.rm_rf(libexec)
+    FileUtils.mkdir_p(libexec)
+    FileUtils.install(File.join(built, "stampeded"), libexec, mode: 0o755)
+    FileUtils.cp(File.join(built, native_library(platform)), libexec)
+    build_gem(platform)
+  ensure
+    FileUtils.rm_rf(libexec) if libexec
+  end
+
+  desc "Download a release's gems into pkg/ (gem:download[tag], default this version's)"
+  task :download, [:tag] do |_t, args|
+    tag = args[:tag] || "stampeded-v#{Stampeded::VERSION}"
+    FileUtils.mkdir_p(PKG)
+    sh "gh", "release", "download", tag, "--repo", "seuros/stampeded", "--pattern", "*.gem", "--dir", PKG, "--clobber"
+  end
+
+  desc "Push every gem in pkg/ for this version to RubyGems"
+  task :push_all do
+    gems = Dir[File.join(PKG, "stampeded-#{Stampeded::VERSION}*.gem")]
+    abort "no gems in pkg/ for #{Stampeded::VERSION}: rake gem:download first" if gems.empty?
+
+    gems.each { sh "gem", "push", it }
+  end
+end
+
+desc "Releases come from the release workflow"
+task :release do
+  abort "Merge the release PR; the release workflow builds every gem. Then: rake gem:download gem:push_all"
+end
