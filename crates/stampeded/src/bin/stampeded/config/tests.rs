@@ -183,6 +183,61 @@ fn redaction_survives_urls_with_no_credentials() {
 }
 
 #[test]
+fn redaction_hides_every_password_however_the_url_is_shaped() {
+    let cases = [
+        // As the Ruby gem hands it over: escaped userinfo, TLS settings in the query.
+        (
+            "postgres://app:hun%40ter2%3F%23%2Fx@db.internal:5433/prod?sslmode=verify-full&sslrootcert=%2Fcerts%2Fca%40corp.pem",
+            "postgres://app:***@db.internal:5433/prod?sslmode=verify-full&sslrootcert=%2Fcerts%2Fca%40corp.pem",
+        ),
+        // An `@` in the query is not the userinfo's.
+        (
+            "postgres://app:hunter2@db/prod?sslrootcert=/certs/ca@corp.pem",
+            "postgres://app:***@db/prod?sslrootcert=/certs/ca@corp.pem",
+        ),
+        (
+            "postgres://db/prod?sslrootcert=/certs/ca@corp.pem",
+            "postgres://db/prod?sslrootcert=/certs/ca@corp.pem",
+        ),
+        // sqlx also takes the password from the query.
+        (
+            "postgres://db/prod?user=app&password=hunter2&sslmode=require",
+            "postgres://db/prod?user=app&password=***&sslmode=require",
+        ),
+        (
+            "postgres://app@db/prod?sslkey=/k.pem&sslpassword=hunter2#frag",
+            "postgres://app:***@db/prod?sslkey=/k.pem&sslpassword=***#frag",
+        ),
+        // Unescaped `@`, `?` and `/` in the password.
+        (
+            "postgres://app:hun@ter2@db/prod",
+            "postgres://app:***@db/prod",
+        ),
+        (
+            "postgres://app:hun?ter2@db/prod",
+            "postgres://app:***@db/prod",
+        ),
+        (
+            "postgres://app:hun/ter2@db/prod?sslmode=require",
+            "postgres://app:***@db/prod?sslmode=require",
+        ),
+        (
+            "postgres://app:hunter2@[::1]:5432/prod",
+            "postgres://app:***@[::1]:5432/prod",
+        ),
+        (
+            "postgres://[::1]:5432/prod?sslmode=require",
+            "postgres://[::1]:5432/prod?sslmode=require",
+        ),
+    ];
+    for (url, expected) in cases {
+        let out = super::super::redact(url);
+        assert_eq!(out, expected, "redacting {url}");
+        assert!(!out.contains("ter2"), "password leaked: {out}");
+    }
+}
+
+#[test]
 fn a_connect_failure_names_its_fix() {
     // Error shapes as sqlx returns them.
     let cases = [

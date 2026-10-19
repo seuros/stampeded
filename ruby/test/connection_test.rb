@@ -21,9 +21,9 @@ class ConnectionTest < Minitest::Test
     super
   end
 
-  def with_active_record(host: "apphost", database: "app_db", username: "appuser", password: "pw", port: nil)
+  def with_active_record(host: "apphost", database: "app_db", username: "appuser", password: "pw", port: nil, **tls)
     cfg = Struct.new(:configuration_hash).new(
-      { host: host, port: port, database: database, username: username, password: password }
+      { host: host, port: port, database: database, username: username, password: password, **tls }
     )
     FakeAR::Base.db_config = cfg
     Object.const_set(:ActiveRecord, FakeAR)
@@ -80,6 +80,21 @@ class ConnectionTest < Minitest::Test
       assert_equal "5433", parsed["port"], url
       assert_equal "prod db", parsed["dbname"], url
       assert_equal 1, url.count("@"), "a raw @ would also defeat the daemon's log redaction: #{url}"
+    end
+  end
+
+  def test_the_daemon_url_keeps_the_apps_tls_settings
+    tls = { sslmode: "verify-full", sslrootcert: "/certs/ca bundle@corp#1?.pem",
+            sslcert: "/certs/client&cert=+.pem", sslkey: "/keys/client %41.key" }
+    with_active_record(password: "p@ss?w=rd&x", sslpassword: "key-secret", **tls) do
+      url = Stampeded.database_url_for_daemon
+      parsed = libpq_reads(url)
+
+      tls.each { |key, value| assert_equal value, parsed[key.to_s], "#{key} in #{url}" }
+      assert_equal "p@ss?w=rd&x", parsed["password"], url
+      refute_includes url, "key-secret",
+                      "sqlx has no sslpassword and logs unknown parameters with their values"
+      assert_equal 1, url.count("?"), "only the query separator may be raw: #{url}"
     end
   end
 

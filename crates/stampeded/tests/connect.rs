@@ -134,3 +134,35 @@ fn the_daemon_fails_promptly_and_names_the_fix() {
     }
     assert!(wrong.is_empty(), "{wrong:#?}");
 }
+
+#[cfg(all(feature = "cli", feature = "http"))]
+#[test]
+fn the_daemon_never_prints_a_password() {
+    let closed = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|l| l.local_addr())
+        .expect("free port")
+        .port();
+    // As the Ruby gem hands it over, plus a query password sqlx also accepts.
+    let url = format!(
+        "postgres://app:hun%40ter2@127.0.0.1:{closed}/none?sslmode=prefer&password=ter2hun"
+    );
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_stampeded"))
+        .env("STAMPEDED_DATABASE_URL", &url)
+        .env_remove("RUST_LOG")
+        .output()
+        .expect("run the daemon");
+    let printed = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(!out.status.success(), "nothing listens there: {printed}");
+    assert!(!printed.contains("ter2"), "password printed: {printed}");
+    assert!(
+        printed.contains(&format!(
+            "app:***@127.0.0.1:{closed}/none?sslmode=prefer&password=***"
+        )),
+        "the connecting line and the error should still name the target: {printed}"
+    );
+}

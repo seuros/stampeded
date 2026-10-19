@@ -201,16 +201,66 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Hide the password when echoing a connection URL.
+/// Hide the passwords when echoing a connection URL: the userinfo's and the query's.
 pub(crate) fn redact(url: &str) -> String {
-    match (url.find("://"), url.find('@')) {
-        (Some(scheme), Some(at)) if at > scheme + 3 => {
-            let userinfo = &url[scheme + 3..at];
-            let user = userinfo.split(':').next().unwrap_or("");
-            format!("{}{}:***{}", &url[..scheme + 3], user, &url[at..])
-        }
-        _ => url.to_string(),
-    }
+    let Some(start) = url.find("://").map(|i| i + 3) else {
+        return url.to_string();
+    };
+    // As the URL parser reads it: the authority ends at the first `/`, `?` or `#`,
+    // and its last `@` ends the userinfo.
+    let end = url[start..]
+        .find(['/', '?', '#'])
+        .map_or(url.len(), |i| start + i);
+    let at = match url[start..end].rfind('@') {
+        Some(i) => Some(start + i),
+        // Not host:port, so a raw `/`, `?` or `#` in the password cut it short.
+        None if !is_host_port(&url[start..end]) => Some(url.rfind('@').unwrap_or(url.len())),
+        None => None,
+    };
+    at.map_or_else(
+        || redact_query(url),
+        |at| {
+            let user = url[start..at].split(':').next().unwrap_or("");
+            format!("{}{user}:***{}", &url[..start], redact_query(&url[at..]))
+        },
+    )
+}
+
+/// Whether an authority with no `@` reads as `host[:port]`.
+fn is_host_port(authority: &str) -> bool {
+    let port = match authority.strip_prefix('[') {
+        Some(v6) => match v6.split_once(']') {
+            Some((_, "")) => return true,
+            Some((_, rest)) => rest.strip_prefix(':'),
+            None => None,
+        },
+        None => match authority.split_once(':') {
+            Some((_, port)) => Some(port),
+            None => return true,
+        },
+    };
+    port.is_some_and(|p| p.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// `rest` with the values of `password` and `sslpassword` in its query masked.
+fn redact_query(rest: &str) -> String {
+    let Some(q) = rest
+        .find(['?', '#'])
+        .filter(|&i| rest[i..].starts_with('?'))
+    else {
+        return rest.to_string();
+    };
+    let end = rest[q..].find('#').map_or(rest.len(), |i| q + i);
+    let query: Vec<String> = rest[q + 1..end]
+        .split('&')
+        .map(|pair| match pair.split_once('=') {
+            Some((key, _)) if key.to_ascii_lowercase().ends_with("password") => {
+                format!("{key}=***")
+            }
+            _ => pair.to_string(),
+        })
+        .collect();
+    format!("{}?{}{}", &rest[..q], query.join("&"), &rest[end..])
 }
 
 /// Turn a connection failure into something actionable.
