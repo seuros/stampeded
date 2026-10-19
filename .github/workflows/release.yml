@@ -1,0 +1,266 @@
+name: release
+
+# Compilation happens HERE, not on a laptop. `rake package[arm64-darwin]` works
+# on a Mac and cannot produce a linux-musl binary, so the matrix IS the build.
+#
+# release-please owns the version: a conventional-commit push to master opens a
+# release PR, and merging that PR creates the tag, which is what gates the
+# builds below. Nothing is PUBLISHED -- no rubygems push, no GitHub Packages.
+# The gems are attached to the GitHub Release as assets.
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      releases_created: ${{ steps.release.outputs.releases_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v5
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  binaries:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.releases_created == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS is DISABLED while this repo is private: GitHub bills macOS
+          # runners at 10x the Linux rate against a private repo's quota, and
+          # two darwin targets per release is not worth that during setup.
+          # Re-enable by uncommenting -- the rest of the pipeline is unchanged,
+          # and `rake package[arm64-darwin]` still builds them locally on a Mac.
+          #
+          # Until then darwin installs get the platformless gem, which says
+          # there is no build for the platform and how to point at a local one.
+          #
+          # ONE target to start with, so the first release proves the pipeline
+          # rather than debugging six cross-compilers at once. It is also the
+          # only entry that builds natively, so it smoke-tests the binary.
+          - { gem: x86_64-linux-gnu,   target: x86_64-unknown-linux-gnu,   os: ubuntu-latest }
+
+          # Add back once a release has gone green. musl is not optional
+          # long-term: most container images are Alpine, where a gnu binary
+          # fails at exec with a linker error rather than anything actionable.
+          #
+          # - { gem: aarch64-linux-gnu,  target: aarch64-unknown-linux-gnu,  os: ubuntu-latest, cross: true }
+          # - { gem: aarch64-linux-musl, target: aarch64-unknown-linux-musl, os: ubuntu-latest, cross: true }
+          # - { gem: x86_64-linux-musl,  target: x86_64-unknown-linux-musl,  os: ubuntu-latest, cross: true }
+          #
+          # macOS stays off while the repo is private: GitHub bills those
+          # runners at 10x against a private quota.
+          #
+          # - { gem: arm64-darwin,       target: aarch64-apple-darwin,       os: macos-14 }
+          # - { gem: x86_64-darwin,      target: x86_64-apple-darwin,        os: macos-13 }
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+
+      # mise owns the toolchain version, from mise.toml -- the same file used
+      # locally, so a release cannot be built with a Rust nobody tested on.
+      - uses: jdx/mise-action@v4
+
+      - name: Set up mbx
+        uses: jdx/mr-boxington-action@v1
+        with:
+          backend: github
+          github-cache-mode: target
+          cache-generation: stampeded-release-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+
+      - run: rustup target add ${{ matrix.target }}
+
+      # BEFORE the build, not after. rama-dns runs bindgen on Linux and needs
+      # libclang; installing it afterwards meant the build it was meant to fix
+      # had already failed.
+      - name: Install libclang
+        if: runner.os == 'Linux' && !matrix.cross
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev
+
+      - name: Build
+        run: mbx build --release --bin stampeded --target ${{ matrix.target }}
+
+      # The worker's library. musl links statically by default, and Rust drops
+      # a cdylib it cannot build that way without failing.
+      - name: Build the worker library
+        env:
+          RUSTFLAGS: ${{ contains(matrix.target, 'musl') && '-C target-feature=-crt-static' || '' }}
+        run: mbx build --release -p stampeded-ffi --lib --target ${{ matrix.target }}
+
+      # A binary that cannot start is not a release. --help exercises argument
+      # parsing without needing a database. Skipped for cross targets, which
+      # cannot execute on this host.
+      - name: Smoke test
+        if: '!matrix.cross'
+        run: ./target/${{ matrix.target }}/release/stampeded --help
+
+      # The platform travels in the FILENAME, not in a directory name.
+      # download-artifact flattens a single artifact into the download root, so
+      # the platform derived from the parent directory came out as "artifacts"
+      # and produced a gem called stampeded-<version>-artifacts.gem. Encoding
+      # it in the file removes the dependency on any layout at all.
+      - name: Name the binary after its platform
+        run: |
+          cp target/${{ matrix.target }}/release/stampeded stampeded-${{ matrix.gem }}
+          lib=$(ls target/${{ matrix.target }}/release/libstampeded_ffi.{so,dylib} 2>/dev/null | head -1)
+          [ -n "$lib" ] || { echo "no libstampeded_ffi for ${{ matrix.target }}"; exit 1; }
+          cp "$lib" "native-${{ matrix.gem }}.${lib##*.}"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: stampeded-${{ matrix.gem }}
+          path: |
+            stampeded-${{ matrix.gem }}
+            native-${{ matrix.gem }}.*
+          if-no-files-found: error
+
+  gems:
+    needs: [release-please, binaries]
+    if: ${{ needs.release-please.outputs.releases_created == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+
+      # Ruby comes from mise.toml, which declares >= the gemspec's floor. A
+      # version pinned in a workflow file is a version nobody checks against
+      # the gemspec -- that is how this built a >= 4.0 gem on 3.4.
+      - uses: jdx/mise-action@v4
+
+      - name: Install gems
+        working-directory: ruby
+        run: bundle install --jobs 4
+
+      - uses: actions/download-artifact@v8
+        with: { path: artifacts }
+
+      - name: Show what was downloaded
+        run: ls -R artifacts
+
+      - name: Assemble platform gems
+        working-directory: ruby
+        run: |
+          set -euo pipefail
+
+          # Copies schema/*.sql and LICENSE in from the repo root. Without it
+          # the gem ships no schema and every install fails at
+          # stampeded:install.
+          bundle exec rake stage_schema
+
+          # FIND the binaries rather than globbing a directory shape. The first
+          # version assumed ../artifacts/stampeded-<plat>/stampeded and matched
+          # nothing, which `set -e` turned into a failed release after the
+          # binary had already built successfully. download-artifact's layout is
+          # not something this script should be asserting.
+          mapfile -t bins < <(find ../artifacts -type f -name 'stampeded-*')
+          [ "${#bins[@]}" -gt 0 ] || { echo "no binaries in ../artifacts"; exit 1; }
+
+          for bin in "${bins[@]}"; do
+            plat="$(basename "$bin")"
+            plat="${plat#stampeded-}"
+            echo "staging $plat from $bin"
+
+            # libexec, NOT exe/<platform>/: exe/ holds the Ruby launcher that
+            # RubyGems installs as the `stampeded` command, and Daemon resolves
+            # the binary from libexec.
+            mkdir -p libexec
+            cp "$bin" libexec/stampeded
+            chmod +x libexec/stampeded
+
+            # The worker's library, from the same build.
+            rm -f libexec/libstampeded_ffi.*
+            lib="$(find ../artifacts -type f -name "native-$plat.*" | head -1)"
+            [ -n "$lib" ] || { echo "no worker library for $plat"; exit 1; }
+            cp "$lib" "libexec/libstampeded_ffi.${lib##*.}"
+
+            # Unbundled, and with the platform set for this invocation only:
+            # under `bundle exec` Bundler re-resolves the gemspec and rejects
+            # the platform triple.
+            env -u BUNDLE_GEMFILE -u RUBYOPT \
+              STAMPEDED_GEM_PLATFORM="$plat" gem build stampeded.gemspec
+          done
+
+          # And the platformless one, for targets we do not cross-compile. It
+          # must NOT carry a binary, so clear the staged one first.
+          rm -f libexec/stampeded libexec/libstampeded_ffi.*
+          env -u BUNDLE_GEMFILE -u RUBYOPT gem build stampeded.gemspec
+
+          ls -la ./*.gem
+
+      # Every gem must contain what its name promises. A platform gem without a
+      # binary installs cleanly and then cannot start the daemon -- which is
+      # exactly what a mis-set STAMPEDED_GEM_PLATFORM produces, silently.
+      - name: Verify gem contents
+        working-directory: ruby
+        run: |
+          set -euo pipefail
+          fail=0
+
+          # One platform gem per matrix target, plus the platformless one.
+          # Assert the COUNT: a matrix entry that silently failed to produce a
+          # gem, or a gemspec that stopped honouring STAMPEDED_GEM_PLATFORM and
+          # emitted the stub twice, both leave a release that looks fine and
+          # installs nothing usable.
+          expected=2
+          actual=$(ls -1 ./*.gem | wc -l | tr -d " ")
+          echo "gems built: $actual (expected $expected)"
+          ls -1 ./*.gem
+          [ "$actual" = "$expected" ] || { echo "WRONG NUMBER OF GEMS"; exit 1; }
+
+          for g in ./*.gem; do
+            listing=$(tar -xOf "$g" data.tar.gz | tar -tz)
+            echo "=== $g"
+            case "$g" in
+              *-darwin.gem|*-linux*.gem)
+                echo "$listing" | grep -qx "libexec/stampeded" \
+                  || { echo "  MISSING libexec/stampeded in a platform gem"; fail=1; }
+                echo "$listing" | grep -qE "^libexec/libstampeded_ffi\.(so|dylib)$" \
+                  || { echo "  MISSING libexec/libstampeded_ffi in a platform gem"; fail=1; } ;;
+              *)
+                echo "$listing" | grep -qx "libexec/stampeded" \
+                  && { echo "  platformless gem must not ship a binary"; fail=1; } ;;
+            esac
+            echo "$listing" | grep -qx "exe/stampeded" \
+              || { echo "  MISSING exe/stampeded (the launcher)"; fail=1; }
+            echo "$listing" | grep -q "^schema/.*\.sql$" \
+              || { echo "  MISSING schema/*.sql"; fail=1; }
+          done
+          exit $fail
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: gems
+          path: ruby/*.gem
+          if-no-files-found: error
+
+  attach:
+    needs: [release-please, gems]
+    if: ${{ needs.release-please.outputs.releases_created == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with: { name: gems, path: gems }
+
+      - run: ls -la gems
+
+      # Attached to the release, not pushed to any registry. Installation is
+      # `gem install ./stampeded-<version>-<platform>.gem` from the release
+      # page, or a git/path reference in a Gemfile.
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: gems/*.gem
+          tag_name: ${{ needs.release-please.outputs.tag_name }}

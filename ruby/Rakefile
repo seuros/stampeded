@@ -1,0 +1,97 @@
+# frozen_string_literal: true
+
+require "rake/testtask"
+
+Rake::TestTask.new(:test) do |t|
+  t.libs << "test" << "lib"
+  t.test_files = FileList["test/**/*_test.rb"]
+  t.warning = false
+end
+
+task test: %i[stage_schema native]
+
+desc "Build libstampeded_ffi for the tests, unless STAMPEDED_INSTALL_DIR names one"
+task :native do
+  next if ENV["STAMPEDED_INSTALL_DIR"]
+
+  sh "cargo build -p stampeded-ffi --manifest-path #{WORKSPACE}/Cargo.toml"
+  ENV["STAMPEDED_INSTALL_DIR"] = File.join(cargo_target_root, "debug")
+end
+
+task default: :test
+
+require "fileutils"
+require "json"
+
+PLATFORMS = {
+  "arm64-darwin"       => "aarch64-apple-darwin",
+  "x86_64-darwin"      => "x86_64-apple-darwin",
+  "aarch64-linux-gnu"  => "aarch64-unknown-linux-gnu",
+  "x86_64-linux-gnu"   => "x86_64-unknown-linux-gnu",
+  "aarch64-linux-musl" => "aarch64-unknown-linux-musl",
+  "x86_64-linux-musl"  => "x86_64-unknown-linux-musl"
+}.freeze
+
+WORKSPACE = File.expand_path("..", __dir__)
+
+desc "Copy schema/*.sql and LICENSE in from the repo root, ready to package"
+task :stage_schema do
+  FileUtils.cp(File.join(WORKSPACE, "LICENSE"), File.join(__dir__, "LICENSE"))
+  dest = File.join(__dir__, "schema")
+  FileUtils.rm_rf(dest)
+  FileUtils.mkdir_p(dest)
+  FileUtils.cp(Dir[File.join(WORKSPACE, "schema", "*.sql")], dest)
+  puts "staged #{Dir[File.join(dest, '*.sql')].size} schema file(s)"
+end
+
+def cargo_target_root
+  @cargo_target_root ||= Dir.chdir(WORKSPACE) do
+    JSON.parse(`cargo metadata --no-deps --format-version 1`).fetch("target_directory")
+  end
+end
+
+def build_gem(platform = nil)
+  Bundler.with_unbundled_env do
+    ENV["STAMPEDED_GEM_PLATFORM"] = platform
+    sh "gem build stampeded.gemspec"
+  end
+end
+
+def native_library(platform) = platform.include?("darwin") ? "libstampeded_ffi.dylib" : "libstampeded_ffi.so"
+
+desc "Build the daemon binary and the worker library for one rubygems platform"
+task :build_binary, [:platform] do |_t, args|
+  platform = args[:platform] or abort "usage: rake build_binary[arm64-darwin]"
+  target = PLATFORMS.fetch(platform) { abort "unknown platform #{platform}" }
+
+  sh "cargo build --release --bin stampeded --target #{target} " \
+     "--manifest-path #{WORKSPACE}/Cargo.toml"
+  rustflags = target.include?("musl") ? { "RUSTFLAGS" => "-C target-feature=-crt-static" } : {}
+  sh rustflags, "cargo build --release -p stampeded-ffi --lib --target #{target} " \
+                "--manifest-path #{WORKSPACE}/Cargo.toml"
+
+  dest = File.join(__dir__, "libexec")
+  built = File.join(cargo_target_root, target, "release")
+  FileUtils.mkdir_p(dest)
+  FileUtils.cp(File.join(built, "stampeded"), File.join(dest, "stampeded"))
+  FileUtils.chmod(0o755, File.join(dest, "stampeded"))
+  FileUtils.cp(File.join(built, native_library(platform)), File.join(dest, native_library(platform)))
+end
+
+desc "Package the gem for one platform, binary included"
+task :package, [:platform] => :stage_schema do |_t, args|
+  platform = args[:platform] or abort "usage: rake package[arm64-darwin]"
+  Rake::Task["build_binary"].invoke(platform)
+  build_gem(platform)
+end
+
+desc "Package the platformless gem: no binary, for platforms we do not build"
+task package_generic: :stage_schema do
+  ENV.delete("STAMPEDED_GEM_PLATFORM")
+  build_gem
+end
+
+desc "List shippable platforms"
+task :platforms do
+  PLATFORMS.each { |gem_plat, rust| puts format("  %-20s %s", gem_plat, rust) }
+end

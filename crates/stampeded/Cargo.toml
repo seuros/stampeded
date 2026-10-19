@@ -1,0 +1,73 @@
+[package]
+name = "stampeded"
+description = "A polyglot job processor on Postgres 18+: claim, execute, schedule, observe"
+version = "0.2.2"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords = ["jobs", "queue", "postgres", "background", "scheduler"]
+categories = ["asynchronous", "database"]
+
+[lints]
+workspace = true
+
+[features]
+default = ["cli", "http", "dashboard", "mcp"]
+
+cli = ["dep:tracing-subscriber", "dep:anyhow"]
+
+# HTTP API and the SSE job-event stream.
+http = ["dep:rama"]
+# The live dashboard.
+dashboard = ["http"]
+# MCP control plane.
+mcp = ["dep:mcp-host", "dep:schemars"]
+# 3D game world visualization of the job queue state.
+game = ["http"]
+
+[dependencies]
+sqlx.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+jiff.workspace = true
+jiff-sqlx.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+state-machines.workspace = true
+chrono-machines.workspace = true
+breaker-machines.workspace = true
+throttle-machines.workspace = true
+behavior-machines.workspace = true
+behavior-machines-circuit.workspace = true
+
+rama = { workspace = true, optional = true }
+mcp-host = { workspace = true, optional = true }
+schemars = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+anyhow = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+
+[[bin]]
+name = "stampeded"
+path = "src/bin/stampeded/main.rs"
+required-features = ["cli", "http"]
+
+[[bin]]
+name = "stampeded-mcp"
+path = "src/bin/stampeded-mcp.rs"
+required-features = ["cli", "mcp"]
+
+[[example]]
+name = "worker"
+path = "examples/worker.rs"
+
+[[example]]
+name = "cross_runtime"
+path = "examples/cross_runtime.rs"

@@ -1,0 +1,130 @@
+name: ci
+
+on:
+  push: { branches: [master] }
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        # 18, not latest: the schema uses uuidv7(), RETURNING OLD./NEW. and
+        # statement triggers with transition tables. On 17 it does not load.
+        image: postgres:18
+        env:
+          POSTGRES_USER: stampeded
+          POSTGRES_PASSWORD: stampeded
+          POSTGRES_DB: stampeded_test
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 20
+        ports: ["5432:5432"]
+    env:
+      STAMPEDED_TEST_DATABASE_URL: postgres://stampeded:stampeded@localhost/stampeded_test
+      # Any warning fails the step, from build, clippy or test alike. Cargo's
+      # own gate rather than RUSTFLAGS=-Dwarnings, which would also rebuild
+      # every dependency and split the cache from local builds.
+      CARGO_BUILD_WARNINGS: deny
+      STAMPEDED_CC: gcc-14
+    steps:
+      - uses: actions/checkout@v7
+
+      # mise owns the toolchain versions, from mise.toml. One place decides
+      # which Rust and which Ruby, and it is the same file used locally.
+      - uses: jdx/mise-action@v4
+
+      # First: it needs no compile, so a formatting slip fails in seconds.
+      - run: cargo fmt --all --check
+
+      # mbx wraps cargo with a cache that keys on the toolchain and target, so
+      # there is no second compiler cache layered on top of it.
+      - name: Set up mbx
+        uses: jdx/mr-boxington-action@v1
+        with:
+          backend: github
+          github-cache-mode: target
+          cache-generation: stampeded-ci-${{ hashFiles('Cargo.lock') }}
+
+      # rama-dns runs bindgen on Linux and needs libclang. Without it the build
+      # dies with "Unable to find libclang", which names nothing useful.
+      # gcc-14: the C ABI test compiles -std=c23, which the default gcc 13 lacks.
+      - run: sudo apt-get update && sudo apt-get install -y libclang-dev gcc-14
+
+      - run: mbx build --workspace
+      - run: mbx clippy --all-targets
+      # Both feature shapes: the game page is behind a flag, so a default
+      # clippy run sees its test helpers as dead code and a default test run
+      # never compiles its suite at all.
+      - run: mbx clippy --all-targets --features game
+      - run: mbx build --no-default-features --lib
+      - run: mbx test --workspace
+      - run: mbx test --workspace --features game
+
+      - run: psql "$STAMPEDED_TEST_DATABASE_URL" -f schema/schema.sql
+      - name: Schema is idempotent enough to diff
+        run: psql "$STAMPEDED_TEST_DATABASE_URL" -c "SELECT count(*) FROM stampeded_jobs"
+
+  ruby:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: stampeded
+          POSTGRES_PASSWORD: stampeded
+          POSTGRES_DB: stampeded_test
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 20
+        ports: ["5432:5432"]
+    env:
+      STAMPEDED_TEST_DATABASE_URL: postgres://stampeded:stampeded@localhost/stampeded_test
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v4
+
+      - name: Install gems
+        working-directory: ruby
+        run: bundle install --jobs 4
+
+      # The suite loads ruby/schema/schema.sql, a staged copy of the real
+      # schema. `rake test` depends on stage_schema so it cannot run against a
+      # stale one -- it did once, and passed against the previous schema.
+      - name: Test
+        working-directory: ruby
+        run: bundle exec rake test
+
+  go:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: stampeded
+          POSTGRES_PASSWORD: stampeded
+          POSTGRES_DB: stampeded_test
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 20
+        ports: ["5432:5432"]
+    env:
+      STAMPEDED_TEST_DATABASE_URL: postgres://stampeded:stampeded@localhost/stampeded_test
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v4
+
+      - run: cargo build -p stampeded-ffi
+
+      - name: Format and vet
+        working-directory: go
+        run: |
+          test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+          CGO_LDFLAGS="-L$GITHUB_WORKSPACE/target/debug" go vet ./...
+
+      - name: Test
+        working-directory: go
+        run: CGO_LDFLAGS="-L$GITHUB_WORKSPACE/target/debug -Wl,-rpath,$GITHUB_WORKSPACE/target/debug" go test -race ./...

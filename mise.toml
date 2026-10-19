@@ -1,0 +1,4 @@
+[tools]
+rust = { version = "1.99", components = "clippy,rustfmt" }
+ruby = "4.0"
+go = "1.26"

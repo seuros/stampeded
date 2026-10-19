@@ -1,0 +1,9 @@
+target/
+ruby/.bundle/
+ruby/Gemfile.lock
+ruby-daemon/exe/*/
+ruby-daemon/*.gem
+*.gem
+
+# Working notes, kept out of the repo.
+.tmp/
