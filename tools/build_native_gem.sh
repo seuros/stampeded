@@ -3,15 +3,16 @@
 #   docker run --rm -v "$PWD:/src" -w /src ruby:4.0-trixie tools/build_native_gem.sh x86_64-linux-gnu
 set -eu
 platform="$1"
-upkg_installer="https://raw.githubusercontent.com/seuros/upkg/master/install.sh"
+upkg_setup="https://raw.githubusercontent.com/seuros/setup-upkg/master/setup.sh"
 
+# setup.sh resolves the release with GITHUB_API_TOKEN when set; empty RUNNER_TEMP links upkg into /usr/local/bin.
 if ! command -v upkg >/dev/null 2>&1; then
   if command -v curl >/dev/null 2>&1; then
-    curl -fsSL -o /tmp/upkg-install.sh "$upkg_installer"
+    curl -fsSL -o /tmp/setup-upkg.sh "$upkg_setup"
   else
-    wget -qO /tmp/upkg-install.sh "$upkg_installer"
+    wget -qO /tmp/setup-upkg.sh "$upkg_setup"
   fi
-  sh /tmp/upkg-install.sh
+  RUNNER_TEMP='' INPUT_UPDATE=true sh /tmp/setup-upkg.sh
 fi
 
 if [ -f /etc/alpine-release ]; then

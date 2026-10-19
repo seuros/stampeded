@@ -105,7 +105,10 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.release-please.outputs.tag_name || github.ref }}
-      - run: docker run --rm -v "$PWD:/src" -w /src ruby:4.0-alpine sh tools/build_native_gem.sh aarch64-linux-musl
+      # The token goes in by name, so it stays off the command line.
+      - run: docker run --rm -e GITHUB_API_TOKEN -v "$PWD:/src" -w /src ruby:4.0-alpine sh tools/build_native_gem.sh aarch64-linux-musl
+        env:
+          GITHUB_API_TOKEN: ${{ github.token }}
       - name: Installs without Rust, loads the library, runs the daemon
         run: docker run --rm -v "$PWD:/src:ro" ruby:4.0-alpine sh /src/tools/smoke_gem.sh /src/ruby/pkg/stampeded-*-aarch64-linux-musl.gem
       - uses: actions/upload-artifact@v7
@@ -157,14 +160,22 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.release-please.outputs.tag_name || github.ref }}
+      # The VM's fetch sends no token: resolve the version here, pin it in there.
+      - uses: seuros/setup-upkg@master
+        id: upkg
+        with:
+          update: "false"
       - uses: vmactions/freebsd-vm@v1
+        env:
+          INPUT_VERSION: ${{ steps.upkg.outputs.version }}
         with:
           release: "15.1"
           usesh: true
           copyback: true
+          envs: INPUT_VERSION
           prepare: |
-            fetch -qo /tmp/upkg-install.sh https://raw.githubusercontent.com/seuros/upkg/master/install.sh
-            sh /tmp/upkg-install.sh
+            fetch -qo /tmp/setup-upkg.sh https://raw.githubusercontent.com/seuros/setup-upkg/master/setup.sh
+            sh /tmp/setup-upkg.sh
             upkg install ruby40 git curl llvm gmake libffi
             printf '%s\n' '#!/bin/sh' 'exec ruby40 -e "require %q(rubygems/gem_runner); Gem::GemRunner.new.run(ARGV)" -- "$@"' > /usr/local/bin/gem
             chmod +x /usr/local/bin/gem
