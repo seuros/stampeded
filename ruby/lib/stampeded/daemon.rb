@@ -44,8 +44,8 @@ module Stampeded
       false
     end
 
-    def exec!(*args)
-      Kernel.exec(executable, *args)
+    def exec!(*args, env: {})
+      Kernel.exec(env, executable, *args)
     end
   end
 end

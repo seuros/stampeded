@@ -25,8 +25,7 @@ namespace :stampeded do
   desc "Run the daemon (scheduler, reaper, pruner, dashboard). Not the worker."
   task daemon: :environment do
     require "stampeded/daemon"
-    args = ["--database-url", Stampeded.database_url_for_daemon, "--no-worker"]
-    args += ENV["STAMPEDED_ARGS"].to_s.split
-    Stampeded::Daemon.exec!(*args)
+    args = ["--no-worker", *ENV["STAMPEDED_ARGS"].to_s.split]
+    Stampeded::Daemon.exec!(*args, env: { "STAMPEDED_DATABASE_URL" => Stampeded.database_url_for_daemon })
   end
 end
