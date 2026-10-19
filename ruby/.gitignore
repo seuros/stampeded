@@ -1,0 +1,9 @@
+# Staged from the workspace root by `rake stage_schema`; the Rust side owns it.
+schema/
+
+# The compiled daemon, staged by `rake build_binary`. A 10 MB build artifact --
+# it belongs in the built gem, not in git. exe/ used to be listed here instead,
+# back when it held the binary; it now holds the Ruby launcher, which is source
+# and must be tracked, and ignoring it silently kept the gem's entry point out
+# of the repository.
+libexec/

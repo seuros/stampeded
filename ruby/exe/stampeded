@@ -1,0 +1,13 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "stampeded/version"
+require "stampeded/errors"
+require "stampeded/daemon"
+
+begin
+  Stampeded::Daemon.exec!(*ARGV)
+rescue Stampeded::DaemonNotFound => e
+  warn e.message
+  exit 1
+end
