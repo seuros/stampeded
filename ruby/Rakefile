@@ -73,7 +73,9 @@ namespace :gem do
   task :native, [:platform] => :stage_schema do |_t, args|
     platform = args[:platform] || local_platform
     rustflags = platform.include?("musl") ? { "RUSTFLAGS" => "-C target-feature=-crt-static" } : {}
-    sh rustflags, "cargo", "build", "--release", "--locked", "--manifest-path", File.join(WORKSPACE, "Cargo.toml"),
+    manifest = File.join(WORKSPACE, "Cargo.toml")
+    sh "cargo", "update", "--workspace", "--manifest-path", manifest
+    sh rustflags, "cargo", "build", "--release", "--locked", "--manifest-path", manifest,
        "-p", "stampeded", "-p", "stampeded-ffi", "--bin", "stampeded", "--lib"
 
     built = File.join(cargo_target_root, "release")
