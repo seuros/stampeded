@@ -13,10 +13,10 @@ pub const SCHEMA: &str = include_str!("../schema/schema.sql");
 
 /// The schema [`SCHEMA`] builds. A schema change adds its upgrade to
 /// `UPGRADES` and raises this.
-pub const VERSION: i32 = 1;
+pub const VERSION: i32 = 2;
 
 /// `UPGRADES[i]` takes a database from version `i + 1` to `i + 2`.
-const UPGRADES: &[&str] = &[];
+const UPGRADES: &[&str] = &[include_str!("../schema/upgrades/0002_dedup_key_period.sql")];
 
 /// One installer at a time, across processes (`"STAMPEDE"`).
 const LOCK: i64 = 0x5354_414d_5045_4445;

@@ -63,19 +63,65 @@ async fn every_start_may_migrate_and_concurrent_starts_take_turns() {
     assert_eq!(version(&pool).await, VERSION);
 }
 
-/// Installed by stampeded 0.3, before the schema recorded its version: that
-/// is schema 1, so migrate marks it.
+/// Schema 1's dedup key, before it named its period.
+const VERSION_1_DEDUP_KEY: &str =
+    "ALTER TABLE stampeded_jobs ALTER COLUMN dedup_key SET EXPRESSION AS (
+    sha256((dedup_scope || coalesce(':' || extract(
+        epoch FROM (date_trunc(dedup_period, inserted_at, 'UTC') - to_timestamp(0))
+    )::bigint::text, ''))::bytea))";
+
+/// An hourly and a daily unique job of one scope, both inserted at
+/// 00:30 UTC: their buckets start together.
+async fn hourly_and_daily_at_midnight(pool: &PgPool) -> Result<(), sqlx::Error> {
+    sqlx::raw_sql(
+        "INSERT INTO stampeded_jobs (queue, task, dedup_scope, dedup_period, inserted_at)
+         VALUES ('default', 'report', 'acct:42', 'hour', '2026-10-24T00:30:00Z'),
+                ('default', 'report', 'acct:42', 'day', '2026-10-24T00:30:00Z')",
+    )
+    .execute(pool)
+    .await
+    .map(drop)
+}
+
+/// A database at schema 1 gets the upgrades it lacks, and after them
+/// behaves like a fresh install.
 #[tokio::test]
-async fn an_unversioned_0_3_install_is_marked() {
+async fn a_version_1_database_is_upgraded_in_place() {
     let Some(pool) = empty().await else { return };
     schema::migrate(&pool).await.expect("install");
-    sqlx::query("DROP TABLE stampeded_schema")
-        .execute(&pool)
+    sqlx::raw_sql(AssertSqlSafe(format!(
+        "{VERSION_1_DEDUP_KEY}; UPDATE stampeded_schema SET version = 1"
+    )))
+    .execute(&pool)
+    .await
+    .expect("back to schema 1");
+    hourly_and_daily_at_midnight(&pool)
         .await
-        .expect("a 0.3 install");
+        .expect_err("schema 1 gives both one key");
 
-    schema::migrate(&pool).await.expect("mark");
-    assert_eq!(version(&pool).await, 1);
+    schema::migrate(&pool).await.expect("upgrade");
+    assert_eq!(version(&pool).await, VERSION);
+    hourly_and_daily_at_midnight(&pool)
+        .await
+        .expect("schema 2 keeps the windows apart");
+}
+
+/// Installed by stampeded 0.3, before the schema recorded its version: that
+/// is schema 1, so migrate marks it and upgrades it.
+#[tokio::test]
+async fn an_unversioned_0_3_install_is_marked_and_upgraded() {
+    let Some(pool) = empty().await else { return };
+    schema::migrate(&pool).await.expect("install");
+    sqlx::raw_sql(AssertSqlSafe(format!(
+        "{VERSION_1_DEDUP_KEY}; DROP TABLE stampeded_schema"
+    )))
+    .execute(&pool)
+    .await
+    .expect("a 0.3 install");
+
+    schema::migrate(&pool).await.expect("mark and upgrade");
+    assert_eq!(version(&pool).await, VERSION);
+    hourly_and_daily_at_midnight(&pool).await.expect("upgraded");
 }
 
 #[tokio::test]

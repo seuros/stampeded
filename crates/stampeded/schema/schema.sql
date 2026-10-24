@@ -65,10 +65,12 @@ CREATE TABLE stampeded_jobs (
     dedup_period    text        CHECK (dedup_period IN
                                   ('minute','hour','day','week','month')),
 
+    -- Scope, period and bucket: buckets of two periods start together (an
+    -- hour and its day at midnight UTC), so the period keeps them apart.
     dedup_key       bytea       GENERATED ALWAYS AS (
         sha256((
             dedup_scope || coalesce(
-                ':' || extract(
+                ':' || dedup_period || ':' || extract(
                     epoch FROM (date_trunc(dedup_period, inserted_at, 'UTC') - to_timestamp(0))
                 )::bigint::text,
                 ''
@@ -1055,4 +1057,4 @@ CREATE TABLE stampeded_schema (
     changed_at  timestamptz NOT NULL DEFAULT now()
 );
 CREATE UNIQUE INDEX stampeded_schema_one_row ON stampeded_schema ((true));
-INSERT INTO stampeded_schema (version) VALUES (1);
+INSERT INTO stampeded_schema (version) VALUES (2);

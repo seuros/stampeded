@@ -1476,6 +1476,29 @@ async fn different_windows_are_different_keys() {
 }
 
 #[tokio::test]
+async fn windows_that_start_together_are_still_different_windows() {
+    // 00:30 UTC: the hour and its day both start at midnight, so the key must
+    // name the period (it once did not, and this test then only failed in
+    // the first hour of a UTC day).
+    let q = q!();
+    let insert = |period: &'static str| {
+        sqlx::query(
+            "INSERT INTO stampeded_jobs (queue, task, dedup_scope, dedup_period, inserted_at)
+             VALUES ('default', 'r', 'k', $1, '2026-10-24T00:30:00Z')",
+        )
+        .bind(period)
+        .execute(q.pool())
+    };
+    insert("hour").await.expect("the hour's job");
+    insert("day")
+        .await
+        .expect("a different window is a different key");
+    insert("hour")
+        .await
+        .expect_err("the same window is the same key");
+}
+
+#[tokio::test]
 async fn an_unbucketed_unique_job_is_unique_forever() {
     // No period, no bucket: the key is the scope alone.
     let q = q!();
