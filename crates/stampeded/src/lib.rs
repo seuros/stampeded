@@ -55,3 +55,12 @@ compile_error!(
     "the `dashboard` feature requires `http`: the dashboard is served by the \
      same rama stack as the enqueue API. Enable `http`, or drop `dashboard`."
 );
+
+// rustls panics if two crypto-provider backends link into the same binary (no
+// single process-default CryptoProvider). Neither enabled is fine: the app
+// embedding this crate may supply its own Postgres TLS backend.
+#[cfg(all(feature = "tls-aws-lc", feature = "tls-ring"))]
+compile_error!(
+    "`tls-aws-lc` and `tls-ring` cannot both be enabled: rustls panics at the first TLS \
+     connection when two crypto-provider backends link into one binary. Pick one."
+);
