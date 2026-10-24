@@ -5,7 +5,6 @@
 use super::{ApiState, trends};
 use crate::http::api::WakeupStatus;
 use rama::futures::stream;
-use rama::http::StatusCode;
 use rama::http::header;
 use rama::http::service::web::extract::{Query, State};
 use rama::http::service::web::response::{Html, IntoResponse, Sse};
@@ -202,9 +201,8 @@ impl Params {
 }
 
 pub async fn index(State(state): State<ApiState>, Query(p): Query<Params>) -> impl IntoResponse {
-    if !state.dashboard_authorised(p.token.as_deref()) {
-        // 404, not 401: do not reveal that a dashboard exists.
-        return (StatusCode::NOT_FOUND, "not found").into_response();
+    if let Some(resp) = state.dashboard_guard(p.token.as_deref()) {
+        return resp.into_response();
     }
 
     Html(
@@ -219,8 +217,8 @@ pub async fn index(State(state): State<ApiState>, Query(p): Query<Params>) -> im
 
 /// The live stream, polled so dashboard load stays off the workers' NOTIFY channel.
 pub async fn stream(State(state): State<ApiState>, Query(p): Query<Params>) -> impl IntoResponse {
-    if !state.dashboard_authorised(p.token.as_deref()) {
-        return (StatusCode::NOT_FOUND, "not found").into_response();
+    if let Some(resp) = state.dashboard_guard(p.token.as_deref()) {
+        return resp.into_response();
     }
 
     let ticks = stream::unfold(

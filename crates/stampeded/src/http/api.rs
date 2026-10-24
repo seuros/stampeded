@@ -115,6 +115,15 @@ impl ApiState {
         }
         a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
     }
+
+    /// `Some(404)` if unauthorised; 404, not 401, so as not to reveal that a dashboard exists.
+    pub fn dashboard_guard(&self, presented: Option<&str>) -> Option<rama::http::Response> {
+        if self.dashboard_authorised(presented) {
+            None
+        } else {
+            Some((StatusCode::NOT_FOUND, "not found").into_response())
+        }
+    }
 }
 
 /// Path parameters for the per-job routes.

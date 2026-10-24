@@ -139,9 +139,8 @@ impl Maintenance {
 async fn reap_loop(queue: Queue, config: MaintenanceConfig, mut shutdown: watch::Receiver<bool>) {
     let mut ticker = tokio::time::interval(config.reap_interval);
     loop {
-        tokio::select! {
-            _ = ticker.tick() => {}
-            _ = shutdown.changed() => break,
+        if !tick_or_shutdown(&mut ticker, &mut shutdown).await {
+            break;
         }
 
         match with_advisory_lock(&queue, LOCK_REAPER, || queue.reap(config.dead_after)).await {
@@ -165,9 +164,8 @@ async fn prune_loop(
     let mut batch = config.prune_batch;
 
     loop {
-        tokio::select! {
-            _ = ticker.tick() => {}
-            _ = shutdown.changed() => break,
+        if !tick_or_shutdown(&mut ticker, &mut shutdown).await {
+            break;
         }
 
         let result = with_advisory_lock(&queue, LOCK_PRUNER, || async {
@@ -240,9 +238,8 @@ async fn expire_loop(
 ) {
     let mut ticker = tokio::time::interval(config.expire_interval);
     loop {
-        tokio::select! {
-            _ = ticker.tick() => {}
-            _ = shutdown.changed() => break,
+        if !tick_or_shutdown(&mut ticker, &mut shutdown).await {
+            break;
         }
 
         match queue.expire(100).await {
@@ -268,9 +265,8 @@ async fn health_loop(
 ) {
     let mut ticker = tokio::time::interval(config.health_interval);
     loop {
-        tokio::select! {
-            _ = ticker.tick() => {}
-            _ = shutdown.changed() => break,
+        if !tick_or_shutdown(&mut ticker, &mut shutdown).await {
+            break;
         }
 
         match queue.vacuum_health().await {
@@ -351,6 +347,17 @@ async fn health_loop(
     }
 }
 
+/// Waits for the next tick; `false` means shutdown fired first.
+async fn tick_or_shutdown(
+    ticker: &mut tokio::time::Interval,
+    shutdown: &mut watch::Receiver<bool>,
+) -> bool {
+    tokio::select! {
+        _ = ticker.tick() => true,
+        _ = shutdown.changed() => false,
+    }
+}
+
 /// Is this a `statement_timeout` firing (SQLSTATE 57014)?
 fn is_statement_timeout(e: &crate::Error) -> bool {
     matches!(e, crate::Error::Database(db) if db.as_database_error()
@@ -378,9 +385,8 @@ async fn schedule_loop(
 ) {
     let mut ticker = tokio::time::interval(config.schedule_interval);
     loop {
-        tokio::select! {
-            _ = ticker.tick() => {}
-            _ = shutdown.changed() => break,
+        if !tick_or_shutdown(&mut ticker, &mut shutdown).await {
+            break;
         }
 
         match queue.run_due_schedules(100).await {
@@ -406,9 +412,8 @@ async fn plan_loop(queue: Queue, config: MaintenanceConfig, mut shutdown: watch:
     let mut last: HashMap<String, Verdict> = HashMap::new();
 
     loop {
-        tokio::select! {
-            _ = ticker.tick() => {}
-            _ = shutdown.changed() => break,
+        if !tick_or_shutdown(&mut ticker, &mut shutdown).await {
+            break;
         }
 
         let snapshots = match queue.queue_snapshots().await {

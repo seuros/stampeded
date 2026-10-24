@@ -696,8 +696,8 @@ pub async fn index(
     State(state): State<ApiState>,
     Query(p): Query<GameParams>,
 ) -> impl IntoResponse {
-    if !state.dashboard_authorised(p.token.as_deref()) {
-        return (StatusCode::NOT_FOUND, "not found").into_response();
+    if let Some(resp) = state.dashboard_guard(p.token.as_deref()) {
+        return resp.into_response();
     }
     Html(INDEX).into_response()
 }
@@ -775,8 +775,8 @@ pub async fn stream(
     State(state): State<ApiState>,
     Query(p): Query<GameParams>,
 ) -> impl IntoResponse {
-    if !state.dashboard_authorised(p.token.as_deref()) {
-        return (StatusCode::NOT_FOUND, "not found").into_response();
+    if let Some(resp) = state.dashboard_guard(p.token.as_deref()) {
+        return resp.into_response();
     }
 
     // Subscribe to the shared feed; do not start a private poll loop.
@@ -969,130 +969,116 @@ async fn build_world_state(state: &ApiState) -> GameWorld {
     }
 }
 
+/// A static asset served whole, with its content type.
+fn asset(content_type: &'static str, bytes: &'static [u8]) -> rama::http::Response {
+    ([(header::CONTENT_TYPE, content_type)], bytes).into_response()
+}
+
 /// Serve Three.js library from embedded bytes.
 pub async fn three_module() -> impl IntoResponse {
-    const THREE_JS: &[u8] = include_bytes!("../../assets/three.module.min.js");
-
-    ([(header::CONTENT_TYPE, "application/javascript")], THREE_JS).into_response()
+    asset(
+        "application/javascript",
+        include_bytes!("../../assets/three.module.min.js"),
+    )
 }
 
 /// Serve GLTFLoader from embedded bytes.
 pub async fn gltf_loader() -> impl IntoResponse {
-    const GLTF_LOADER: &[u8] = include_bytes!("../../assets/gltf-loader.js");
-
-    (
-        [(header::CONTENT_TYPE, "application/javascript")],
-        GLTF_LOADER,
+    asset(
+        "application/javascript",
+        include_bytes!("../../assets/gltf-loader.js"),
     )
-        .into_response()
 }
 
 /// Serve three's core module, which three.module.min.js re-exports by this exact name.
 pub async fn three_core() -> impl IntoResponse {
-    const SRC: &[u8] = include_bytes!("../../assets/three.core.min.js");
-
-    ([(header::CONTENT_TYPE, "application/javascript")], SRC).into_response()
+    asset(
+        "application/javascript",
+        include_bytes!("../../assets/three.core.min.js"),
+    )
 }
 
 /// Serve GLTFLoader's addon dependencies from embedded bytes.
 ///
 /// GLTFLoader imports `../utils/`, so these must stay under /game/utils/.
 pub async fn buffer_geometry_utils() -> impl IntoResponse {
-    const SRC: &[u8] = include_bytes!("../../assets/utils/BufferGeometryUtils.js");
-
-    ([(header::CONTENT_TYPE, "application/javascript")], SRC).into_response()
+    asset(
+        "application/javascript",
+        include_bytes!("../../assets/utils/BufferGeometryUtils.js"),
+    )
 }
 
 /// See buffer_geometry_utils: GLTFLoader imports `clone` from this.
 pub async fn skeleton_utils() -> impl IntoResponse {
-    const SRC: &[u8] = include_bytes!("../../assets/utils/SkeletonUtils.js");
-
-    ([(header::CONTENT_TYPE, "application/javascript")], SRC).into_response()
+    asset(
+        "application/javascript",
+        include_bytes!("../../assets/utils/SkeletonUtils.js"),
+    )
 }
 
 /// Serve the Factory Kit's texture atlas, which every GLB references externally.
 ///
 /// Each Kenney kit has its own colormap; only Factory Kit's has the right colours.
 pub async fn model_texture() -> impl IntoResponse {
-    const SRC: &[u8] = include_bytes!("../../assets/models/Textures/colormap.png");
-
-    ([(header::CONTENT_TYPE, "image/png")], SRC).into_response()
+    asset(
+        "image/png",
+        include_bytes!("../../assets/models/Textures/colormap.png"),
+    )
 }
+
+/// Embedded 3D models, keyed by the filename `model()` is asked for.
+const MODELS: &[(&str, &[u8])] = &[
+    (
+        "box-small.glb",
+        include_bytes!("../../assets/models/box-small.glb"),
+    ),
+    (
+        "box-large.glb",
+        include_bytes!("../../assets/models/box-large.glb"),
+    ),
+    (
+        "conveyor-long.glb",
+        include_bytes!("../../assets/models/conveyor-long.glb"),
+    ),
+    (
+        "conveyor-corner.glb",
+        include_bytes!("../../assets/models/conveyor-corner.glb"),
+    ),
+    ("crane.glb", include_bytes!("../../assets/models/crane.glb")),
+    (
+        "robot-arm-a.glb",
+        include_bytes!("../../assets/models/robot-arm-a.glb"),
+    ),
+    (
+        "hopper-square.glb",
+        include_bytes!("../../assets/models/hopper-square.glb"),
+    ),
+    (
+        "hopper-high-square.glb",
+        include_bytes!("../../assets/models/hopper-high-square.glb"),
+    ),
+    (
+        "machine.glb",
+        include_bytes!("../../assets/models/machine.glb"),
+    ),
+    (
+        "pipe-large-long.glb",
+        include_bytes!("../../assets/models/pipe-large-long.glb"),
+    ),
+    (
+        "structure-tall.glb",
+        include_bytes!("../../assets/models/structure-tall.glb"),
+    ),
+    ("floor.glb", include_bytes!("../../assets/models/floor.glb")),
+    ("cog-a.glb", include_bytes!("../../assets/models/cog-a.glb")),
+    ("door.glb", include_bytes!("../../assets/models/door.glb")),
+];
 
 /// Serve a 3D model file from embedded assets.
 pub fn model(model_name: &str) -> rama::http::Response {
-    match model_name {
-        "box-small.glb" => (
-            [(header::CONTENT_TYPE, "model/gltf-binary")],
-            include_bytes!("../../assets/models/box-small.glb").as_ref(),
-        )
-            .into_response(),
-        "box-large.glb" => (
-            [(header::CONTENT_TYPE, "model/gltf-binary")],
-            include_bytes!("../../assets/models/box-large.glb").as_ref(),
-        )
-            .into_response(),
-        "conveyor-long.glb" => (
-            [(header::CONTENT_TYPE, "model/gltf-binary")],
-            include_bytes!("../../assets/models/conveyor-long.glb").as_ref(),
-        )
-            .into_response(),
-        "conveyor-corner.glb" => (
-            [(header::CONTENT_TYPE, "model/gltf-binary")],
-            include_bytes!("../../assets/models/conveyor-corner.glb").as_ref(),
-        )
-            .into_response(),
-        "crane.glb" => (
-            [(header::CONTENT_TYPE, "model/gltf-binary")],
-            include_bytes!("../../assets/models/crane.glb").as_ref(),
-        )
-            .into_response(),
-        "robot-arm-a.glb" => (
-            [(header::CONTENT_TYPE, "model/gltf-binary")],
-            include_bytes!("../../assets/models/robot-arm-a.glb").as_ref(),
-        )
-            .into_response(),
-        "hopper-square.glb" => (
-            [(header::CONTENT_TYPE, "model/gltf-binary")],
-            include_bytes!("../../assets/models/hopper-square.glb").as_ref(),
-        )
-            .into_response(),
-        "hopper-high-square.glb" => (
-            [(header::CONTENT_TYPE, "model/gltf-binary")],
-            include_bytes!("../../assets/models/hopper-high-square.glb").as_ref(),
-        )
-            .into_response(),
-        "machine.glb" => (
-            [(header::CONTENT_TYPE, "model/gltf-binary")],
-            include_bytes!("../../assets/models/machine.glb").as_ref(),
-        )
-            .into_response(),
-        "pipe-large-long.glb" => (
-            [(header::CONTENT_TYPE, "model/gltf-binary")],
-            include_bytes!("../../assets/models/pipe-large-long.glb").as_ref(),
-        )
-            .into_response(),
-        "structure-tall.glb" => (
-            [(header::CONTENT_TYPE, "model/gltf-binary")],
-            include_bytes!("../../assets/models/structure-tall.glb").as_ref(),
-        )
-            .into_response(),
-        "floor.glb" => (
-            [(header::CONTENT_TYPE, "model/gltf-binary")],
-            include_bytes!("../../assets/models/floor.glb").as_ref(),
-        )
-            .into_response(),
-        "cog-a.glb" => (
-            [(header::CONTENT_TYPE, "model/gltf-binary")],
-            include_bytes!("../../assets/models/cog-a.glb").as_ref(),
-        )
-            .into_response(),
-        "door.glb" => (
-            [(header::CONTENT_TYPE, "model/gltf-binary")],
-            include_bytes!("../../assets/models/door.glb").as_ref(),
-        )
-            .into_response(),
-        _ => (StatusCode::NOT_FOUND, "not found").into_response(),
+    match MODELS.iter().find(|(name, _)| *name == model_name) {
+        Some((_, bytes)) => asset("model/gltf-binary", bytes),
+        None => (StatusCode::NOT_FOUND, "not found").into_response(),
     }
 }
 
