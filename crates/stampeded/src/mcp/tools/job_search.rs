@@ -1,5 +1,6 @@
 use crate::mcp::{SearchArgs, StampededServer};
 use mcp_host::prelude::*;
+// `let _ = write!`/`writeln!` into a String below: fmt::Write on String never errors.
 use std::fmt::Write as _;
 
 impl StampededServer {

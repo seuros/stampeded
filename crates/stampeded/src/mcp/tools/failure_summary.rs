@@ -1,5 +1,6 @@
 use crate::mcp::{QueueArgs, StampededServer};
 use mcp_host::prelude::*;
+// `let _ = write!`/`writeln!` into a String below: fmt::Write on String never errors.
 use std::fmt::Write as _;
 
 /// One clustered failure signature as `failure_summary` reads it.
