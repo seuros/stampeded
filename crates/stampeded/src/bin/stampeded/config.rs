@@ -62,7 +62,7 @@ impl Config {
             "  --retain-for SECS      keep finished jobs this long (default: 1209600)\n",
             "  --no-worker            do not claim jobs (maintenance only)\n",
             "  --no-maintenance       do not reap or prune\n",
-            "  --migrate              apply the schema on startup\n",
+            "  --migrate              install or upgrade the schema on startup (safe on every start)\n",
             "  --http ADDR            serve the HTTP API on ADDR (e.g. 127.0.0.1:7878)\n",
             "  --dashboard-token TOK  serve the dashboard, gated on this token\n",
             "                         (or STAMPEDED_DASHBOARD_TOKEN; without either\n",

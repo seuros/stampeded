@@ -22,10 +22,11 @@ namespace :stampeded do
     worker.run
   end
 
-  desc "Run the daemon (scheduler, reaper, pruner, dashboard). Not the worker."
+  desc "Run the daemon (scheduler, reaper, pruner, dashboard). Not the worker. Upgrades the schema first."
   task daemon: :environment do
     require "stampeded/daemon"
-    args = ["--no-worker", *ENV["STAMPEDED_ARGS"].to_s.split]
+    # --migrate is safe on every start: it upgrades an older schema in place.
+    args = ["--no-worker", "--migrate", *ENV["STAMPEDED_ARGS"].to_s.split]
     Stampeded::Daemon.exec!(*args, env: { "STAMPEDED_DATABASE_URL" => Stampeded.database_url_for_daemon })
   end
 end

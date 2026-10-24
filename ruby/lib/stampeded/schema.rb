@@ -39,7 +39,8 @@ module Stampeded
         c.exec(<<~SQL)
           DROP TABLE IF EXISTS stampeded_cron_occurrences, stampeded_schedules,
                                stampeded_queue_policies, stampeded_queue_counts,
-                               stampeded_jobs, stampeded_workers CASCADE;
+                               stampeded_jobs, stampeded_workers,
+                               stampeded_schema CASCADE;
           DO $$
           DECLARE r record;
           BEGIN

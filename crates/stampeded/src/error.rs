@@ -30,6 +30,11 @@ pub enum Error {
     #[error("circuit open: {0}")]
     CircuitOpen(String),
 
+    /// The database holds a stampeded schema this version cannot use or
+    /// upgrade.
+    #[error("schema: {0}")]
+    Schema(String),
+
     /// The HTTP edge could not listen on its address.
     #[error("could not bind {addr}: {source}")]
     Bind {

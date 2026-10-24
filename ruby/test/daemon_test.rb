@@ -49,7 +49,8 @@ class DaemonTest < Minitest::Test
     RUBY
 
     against_a_fake_daemon({ "STAMPEDED_ARGS" => "--http 127.0.0.1:7878" }, "-e", task) do |argv, env_url|
-      assert_equal ["--no-worker", "--http", "127.0.0.1:7878"], argv
+      # --migrate: an older schema is upgraded before the daemon runs.
+      assert_equal ["--no-worker", "--migrate", "--http", "127.0.0.1:7878"], argv
       refute argv.any? { it.include?("s3cret-pw") },
              "argv is world-readable through ps and /proc: the password must not be in it"
       assert_equal url, env_url

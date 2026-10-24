@@ -1047,3 +1047,12 @@ CREATE TABLE stampeded_queue_policies (
     created_at     timestamptz NOT NULL DEFAULT now(),
     updated_at     timestamptz NOT NULL DEFAULT now()
 );
+
+-- Which schema this database holds, one row: `stampeded::schema::migrate`
+-- upgrades from it and refuses one newer than itself. Raised by each upgrade.
+CREATE TABLE stampeded_schema (
+    version     integer     NOT NULL CHECK (version > 0),
+    changed_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX stampeded_schema_one_row ON stampeded_schema ((true));
+INSERT INTO stampeded_schema (version) VALUES (1);
