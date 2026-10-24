@@ -69,6 +69,8 @@ jobs:
       # never compiles its suite at all.
       - run: mbx clippy --all-targets --features game
       - run: mbx build --no-default-features --lib
+      # The other TLS backend, so it keeps building.
+      - run: mbx build --no-default-features --features cli,http,tls-ring --bin stampeded
       - run: mbx test --workspace
       - run: mbx test --workspace --features game
       - if: always()

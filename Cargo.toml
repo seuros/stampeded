@@ -11,7 +11,9 @@ authors = ["Abdelkader Boudih"]
 
 [workspace.dependencies]
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "time", "signal", "sync"] }
-sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "uuid", "json", "macros"] }
+# No TLS backend here: each final artifact picks one (stampeded's `tls-aws-lc` /
+# `tls-ring`), so an app embedding the library keeps its own.
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "uuid", "json", "macros"] }
 uuid = { version = "1.28", features = ["v7", "serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

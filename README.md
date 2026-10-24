@@ -78,7 +78,9 @@ Rust handlers are registered in-process (`crates/stampeded/examples/worker.rs`).
 Or pull jobs and run them yourself: `Puller::next` hands out a `Lease`, which
 you `complete`, `fail` or `discard`; claiming, heartbeats and queue policies stay
 in the library. To embed only the queue in a Rust app:
-`cargo add stampeded --no-default-features`.
+`cargo add stampeded --no-default-features`. The library then brings no
+Postgres TLS of its own: keep your app's sqlx TLS feature, or turn on
+stampeded's `tls-aws-lc` (the binaries' default) or `tls-ring`.
 
 ## Rails
 

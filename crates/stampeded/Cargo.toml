@@ -15,7 +15,13 @@ categories = ["asynchronous", "database"]
 workspace = true
 
 [features]
-default = ["cli", "http", "dashboard", "mcp"]
+default = ["cli", "http", "dashboard", "mcp", "tls-aws-lc"]
+
+# Postgres TLS (rustls, Mozilla's roots built in) for stampeded's own
+# binaries: aws-lc-rs, or ring. A library user turns both off and keeps its own
+# sqlx TLS feature, so one binary links one crypto provider.
+tls-aws-lc = ["sqlx/tls-rustls-aws-lc-rs"]
+tls-ring = ["sqlx/tls-rustls-ring-webpki"]
 
 cli = ["dep:tracing-subscriber", "dep:anyhow"]
 

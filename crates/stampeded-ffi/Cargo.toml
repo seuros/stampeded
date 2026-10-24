@@ -14,6 +14,12 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 [lints]
 workspace = true
 
+[features]
+# The library is a final artifact (Ruby, Go, C load it): it picks the TLS backend.
+default = ["tls-aws-lc"]
+tls-aws-lc = ["stampeded/tls-aws-lc"]
+tls-ring = ["stampeded/tls-ring"]
+
 [dependencies]
 stampeded = { path = "../stampeded", default-features = false }
 tokio.workspace = true
