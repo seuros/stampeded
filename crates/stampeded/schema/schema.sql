@@ -67,15 +67,18 @@ CREATE TABLE stampeded_jobs (
 
     -- Scope, period and bucket: buckets of two periods start together (an
     -- hour and its day at midnight UTC), so the period keeps them apart.
+    -- Joined as bytea with a raw zero byte: no `text` value can ever decode
+    -- to one (chr(0) itself is refused), so a crafted dedup_scope can never
+    -- forge the separator and so never forge another row's key.
     dedup_key       bytea       GENERATED ALWAYS AS (
-        sha256((
-            dedup_scope || coalesce(
-                ':' || dedup_period || ':' || extract(
+        sha256(
+            dedup_scope::bytea || '\x00'::bytea || coalesce(
+                dedup_period::bytea || '\x00'::bytea || extract(
                     epoch FROM (date_trunc(dedup_period, inserted_at, 'UTC') - to_timestamp(0))
-                )::bigint::text,
-                ''
+                )::bigint::text::bytea,
+                ''::bytea
             )
-        )::bytea)
+        )
     ) STORED,
 
     failure_kind    text,
@@ -1057,4 +1060,5 @@ CREATE TABLE stampeded_schema (
     changed_at  timestamptz NOT NULL DEFAULT now()
 );
 CREATE UNIQUE INDEX stampeded_schema_one_row ON stampeded_schema ((true));
-INSERT INTO stampeded_schema (version) VALUES (2);
+-- Must match schema::VERSION.
+INSERT INTO stampeded_schema (version) VALUES (3);

@@ -83,6 +83,28 @@ async fn hourly_and_daily_at_midnight(pool: &PgPool) -> Result<(), sqlx::Error> 
     .map(drop)
 }
 
+/// The hourly job alone, so it actually commits instead of colliding.
+async fn insert_hourly_at_midnight(pool: &PgPool) -> Result<(), sqlx::Error> {
+    sqlx::raw_sql(
+        "INSERT INTO stampeded_jobs (queue, task, dedup_scope, dedup_period, inserted_at)
+         VALUES ('default', 'report', 'acct:42', 'hour', '2026-10-24T00:30:00Z')",
+    )
+    .execute(pool)
+    .await
+    .map(drop)
+}
+
+/// The daily job alone, to check it against an hourly row already stored.
+async fn insert_daily_at_midnight(pool: &PgPool) -> Result<(), sqlx::Error> {
+    sqlx::raw_sql(
+        "INSERT INTO stampeded_jobs (queue, task, dedup_scope, dedup_period, inserted_at)
+         VALUES ('default', 'report', 'acct:42', 'day', '2026-10-24T00:30:00Z')",
+    )
+    .execute(pool)
+    .await
+    .map(drop)
+}
+
 /// A database at schema 1 gets the upgrades it lacks, and after them
 /// behaves like a fresh install.
 #[tokio::test]
@@ -95,15 +117,74 @@ async fn a_version_1_database_is_upgraded_in_place() {
     .execute(&pool)
     .await
     .expect("back to schema 1");
+
+    // Commits under schema 1, so the rewrite below has a real row to touch.
+    insert_hourly_at_midnight(&pool)
+        .await
+        .expect("the lone hourly job commits under schema 1");
     hourly_and_daily_at_midnight(&pool)
         .await
         .expect_err("schema 1 gives both one key");
 
     schema::migrate(&pool).await.expect("upgrade");
     assert_eq!(version(&pool).await, VERSION);
-    hourly_and_daily_at_midnight(&pool)
+
+    // Still collides with its own scope+period: proof the ALTER COLUMN ...
+    // SET EXPRESSION AS rewrite recomputed the pre-existing row's key under
+    // the new expression, rather than leaving it stale.
+    insert_hourly_at_midnight(&pool)
+        .await
+        .expect_err("the row stored under schema 1 keeps its key after the rewrite");
+    // The daily job, against that same stored hourly row: no longer shares
+    // its key now that the period is part of it.
+    insert_daily_at_midnight(&pool)
         .await
         .expect("schema 2 keeps the windows apart");
+}
+
+/// Schema 2's dedup key (see `0002_dedup_key_period.sql`): a plain `':'` join
+/// let a crafted, period-less `dedup_scope` forge the exact key of an
+/// unrelated periodic job.
+const VERSION_2_DEDUP_KEY: &str = include_str!("../schema/upgrades/0002_dedup_key_period.sql");
+
+const SCHEMA_3_DEDUP_KEY: &str = include_str!("../schema/upgrades/0003_dedup_key_separator.sql");
+
+/// A forged, period-less scope shaped like `<scope>:<period>:<epoch>`, next
+/// to the real periodic job it targets: same scope, same period, the same
+/// hour -- `2025-01-01T00:00:00Z` truncates to itself, epoch `1735689600`.
+async fn forged_scope_and_the_job_it_targets(pool: &PgPool) -> Result<(), sqlx::Error> {
+    sqlx::raw_sql(
+        "INSERT INTO stampeded_jobs (queue, task, dedup_scope, dedup_period, inserted_at)
+         VALUES ('default', 'report', 'a:hour:1735689600', NULL, '2025-01-01T00:00:00Z'),
+                ('default', 'report', 'a', 'hour', '2025-01-01T00:00:00Z')",
+    )
+    .execute(pool)
+    .await
+    .map(drop)
+}
+
+/// Schema 2 let a crafted scope forge another job's periodic key; schema 3's
+/// chr(0) join closes it, since no `text` column can ever hold that byte.
+#[tokio::test]
+async fn a_crafted_scope_cannot_forge_a_periodic_jobs_key() {
+    let Some(pool) = empty().await else { return };
+    schema::migrate(&pool).await.expect("install");
+
+    sqlx::raw_sql(VERSION_2_DEDUP_KEY)
+        .execute(&pool)
+        .await
+        .expect("schema 2's dedup key");
+    forged_scope_and_the_job_it_targets(&pool)
+        .await
+        .expect_err("schema 2: the forged scope collides with the job it targets");
+
+    sqlx::raw_sql(SCHEMA_3_DEDUP_KEY)
+        .execute(&pool)
+        .await
+        .expect("schema 3's dedup key");
+    forged_scope_and_the_job_it_targets(&pool)
+        .await
+        .expect("schema 3: chr(0) cannot appear in dedup_scope, so the forgery no longer matches");
 }
 
 /// Installed by stampeded 0.3, before the schema recorded its version: that

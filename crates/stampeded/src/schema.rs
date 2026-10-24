@@ -13,10 +13,20 @@ pub const SCHEMA: &str = include_str!("../schema/schema.sql");
 
 /// The schema [`SCHEMA`] builds. A schema change adds its upgrade to
 /// `UPGRADES` and raises this.
-pub const VERSION: i32 = 2;
+pub const VERSION: i32 = 3;
 
 /// `UPGRADES[i]` takes a database from version `i + 1` to `i + 2`.
-const UPGRADES: &[&str] = &[include_str!("../schema/upgrades/0002_dedup_key_period.sql")];
+const UPGRADES: &[&str] = &[
+    include_str!("../schema/upgrades/0002_dedup_key_period.sql"),
+    include_str!("../schema/upgrades/0003_dedup_key_separator.sql"),
+];
+
+// Every schema bump needs exactly one matching upgrade, or `migrate` either
+// panics indexing `UPGRADES` or silently stamps an under-upgraded database.
+const _: () = assert!(
+    UPGRADES.len() + 1 == VERSION as usize,
+    "VERSION and UPGRADES are out of sync: add the missing upgrade, or fix VERSION"
+);
 
 /// One installer at a time, across processes (`"STAMPEDE"`).
 const LOCK: i64 = 0x5354_414d_5045_4445;
@@ -44,9 +54,19 @@ pub async fn migrate(pool: &PgPool) -> Result<()> {
                  upgrade stampeded"
             )));
         }
+        Some(version) if version == VERSION => {}
         Some(version) => {
-            let pending = usize::try_from(version - 1).unwrap_or(0);
-            for &upgrade in &UPGRADES[pending..] {
+            let pending = usize::try_from(version - 1).map_err(|_| {
+                Error::Schema(format!(
+                    "the database's schema version is {version}, which is not valid"
+                ))
+            })?;
+            let upgrades = UPGRADES.get(pending..).ok_or_else(|| {
+                Error::Schema(format!(
+                    "no upgrade path from schema {version} to {VERSION}"
+                ))
+            })?;
+            for &upgrade in upgrades {
                 sqlx::raw_sql(upgrade).execute(&mut *tx).await?;
             }
             sqlx::query("UPDATE stampeded_schema SET version = $1, changed_at = now()")
@@ -76,7 +96,12 @@ async fn installed(tx: &mut Transaction<'_, Postgres>) -> Result<Option<i32>> {
         return Ok(Some(version));
     }
     match (jobs, policies) {
-        (false, _) => Ok(None),
+        (false, false) => Ok(None),
+        (false, true) => Err(Error::Schema(
+            "stampeded_queue_policies exists without stampeded_jobs: an unrelated or \
+             partially dropped install. Resolve it by hand before migrating"
+                .into(),
+        )),
         // Installed by stampeded 0.3, before the schema recorded its version:
         // the same schema as version 1, so mark it.
         (true, true) => {
