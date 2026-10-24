@@ -384,6 +384,8 @@ impl Worker {
                     info!(%worker_id, "shutdown requested");
                     break;
                 }
+                // Saturated only: a freed permit wakes us, dropped right back as a signal.
+                _ = sem.acquire(), if next == NextPoll::Saturated => {}
             }
 
             // Claim only what can run; a job parked behind the semaphore looks like running work.
