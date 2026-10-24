@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.4.0](https://github.com/seuros/stampeded/compare/stampeded-v0.3.2...stampeded-v0.4.0) (2026-10-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* with default features off, the library brings no TLS; enable `tls-aws-lc`, `tls-ring` or a sqlx TLS feature for TLS connections.
+
+### Features
+
+* schema::migrate is safe on every start, and upgrades in place ([4075aea](https://github.com/seuros/stampeded/commit/4075aea9bbe7f078c166349e0e53acd21574bbd1))
+* the library leaves the Postgres TLS backend to the app ([a6ba009](https://github.com/seuros/stampeded/commit/a6ba009e3c3d6f1eb899662f844c4b10e6325915))
+
+
+### Bug Fixes
+
+* close a dedup_key forgery and harden schema::migrate ([c4c9679](https://github.com/seuros/stampeded/commit/c4c9679f1d12d2c8f1a9d92595cc1441e1b68bad))
+* refuse to build with both rustls crypto-provider features enabled ([4ddc328](https://github.com/seuros/stampeded/commit/4ddc328fc9851bacce1978c4097124ed162dcf77))
+* saturated workers wake when a slot frees, not just on NOTIFY or poll floor ([0b99400](https://github.com/seuros/stampeded/commit/0b994007769cf1d1cc745de4f7f0e5f517365326))
+* unique jobs of different periods no longer share a key when their windows start together ([14d2ca4](https://github.com/seuros/stampeded/commit/14d2ca446b867c0eb6b2d09eea9deb8f6bab4a46))
+
 ## [0.3.2](https://github.com/seuros/stampeded/compare/stampeded-v0.3.1...stampeded-v0.3.2) (2026-10-19)
 
 
