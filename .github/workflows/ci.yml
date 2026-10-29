@@ -76,10 +76,6 @@ jobs:
       - if: always()
         run: df -h /
 
-      - run: psql "$STAMPEDED_TEST_DATABASE_URL" -f crates/stampeded/schema/schema.sql
-      - name: Schema is idempotent enough to diff
-        run: psql "$STAMPEDED_TEST_DATABASE_URL" -c "SELECT count(*) FROM stampeded_jobs"
-
   ruby:
     runs-on: ubuntu-latest
     services:
@@ -103,7 +99,7 @@ jobs:
         working-directory: ruby
         run: bundle install --jobs 4
 
-      # The suite loads ruby/schema/schema.sql, a staged copy of the real
+      # The suite loads ruby/schema/*.sql, a staged copy of the real
       # schema. `rake test` depends on stage_schema so it cannot run against a
       # stale one -- it did once, and passed against the previous schema.
       - name: Test

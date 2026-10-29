@@ -1,6 +1,6 @@
 //! The job lifecycle, as a state machine.
 //!
-//! Mirrors the transitions `schema.sql` enforces, which stays authoritative.
+//! Mirrors the transitions the schema enforces, which stays authoritative.
 //! Dynamic mode: a row's state is only known at runtime.
 
 use crate::job::JobState;

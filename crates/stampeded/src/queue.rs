@@ -1,4 +1,4 @@
-//! Thin wrappers over the SQL functions in `schema/schema.sql`, which own claim semantics
+//! Thin wrappers over the SQL functions in `schema/*.sql`, which own claim semantics
 //! so every language's worker behaves the same; do not reimplement them here.
 
 use crate::cron::{Cron, DstPolicy};
@@ -132,7 +132,7 @@ impl Transition {
             _ => warn!(
                 %was, %now, event = %described,
                 "the database performed a transition the lifecycle does not declare; \
-                 schema/schema.sql and lifecycle.rs have drifted"
+                 the schema and lifecycle.rs have drifted"
             ),
         }
     }

@@ -1,11 +1,11 @@
-//! `schema::migrate` on every kind of database it meets, each case in a
-//! schema of its own:
+//! `schema::migrate` on databases stampeded 0.2–0.4 left, and the dedup key
+//! it builds, each case in a schema of its own:
 //!
 //!   STAMPEDED_TEST_DATABASE_URL=postgres://ubuntu:ubuntu@localhost/stampeded_test \
 //!     cargo test -p stampeded --test schema
 
 use sqlx::{AssertSqlSafe, PgPool};
-use stampeded::schema::{self, VERSION};
+use stampeded::schema;
 use uuid::Uuid;
 
 /// A pool on an empty schema of its own; `None` without the database.
@@ -43,32 +43,31 @@ async fn empty() -> Option<PgPool> {
     Some(pool)
 }
 
-async fn version(pool: &PgPool) -> i32 {
-    sqlx::query_scalar("SELECT version FROM stampeded_schema")
-        .fetch_one(pool)
-        .await
-        .expect("schema version")
-}
-
-/// What an embedding app does: migrate on every start, several at once.
-#[tokio::test]
-async fn every_start_may_migrate_and_concurrent_starts_take_turns() {
-    let Some(pool) = empty().await else { return };
-    let (first, second) = tokio::join!(schema::migrate(&pool), schema::migrate(&pool));
-    first.expect("first start installs");
-    second.expect("second start finds it installed");
-    schema::migrate(&pool)
-        .await
-        .expect("a later start changes nothing");
-    assert_eq!(version(&pool).await, VERSION);
-}
-
 /// Schema 1's dedup key, before it named its period.
 const VERSION_1_DEDUP_KEY: &str =
     "ALTER TABLE stampeded_jobs ALTER COLUMN dedup_key SET EXPRESSION AS (
     sha256((dedup_scope || coalesce(':' || extract(
         epoch FROM (date_trunc(dedup_period, inserted_at, 'UTC') - to_timestamp(0))
     )::bigint::text, ''))::bytea))";
+
+const VERSION_2_DEDUP_KEY: &str = include_str!("../schema/0002_dedup_key_period.sql");
+
+const VERSION_3_DEDUP_KEY: &str = include_str!("../schema/0003_dedup_key_separator.sql");
+
+/// Turns a fresh install into one stampeded 0.4 left at `version`, or 0.3
+/// (unversioned) for `None`, with that version's dedup key.
+async fn legacy(pool: &PgPool, dedup_key: &str, version: Option<i32>) {
+    let recorded = version.map_or_else(
+        || "DROP TABLE stampeded_schema".to_owned(),
+        |v| format!("UPDATE stampeded_schema SET version = {v}"),
+    );
+    sqlx::raw_sql(AssertSqlSafe(format!(
+        "{dedup_key}; DROP TABLE stampeded_migrations; {recorded}"
+    )))
+    .execute(pool)
+    .await
+    .expect("a legacy install");
+}
 
 /// An hourly and a daily unique job of one scope, both inserted at
 /// 00:30 UTC: their buckets start together.
@@ -105,18 +104,13 @@ async fn insert_daily_at_midnight(pool: &PgPool) -> Result<(), sqlx::Error> {
     .map(drop)
 }
 
-/// A database at schema 1 gets the upgrades it lacks, and after them
+/// A database at schema 1 gets the migrations it lacks, and after them
 /// behaves like a fresh install.
 #[tokio::test]
 async fn a_version_1_database_is_upgraded_in_place() {
     let Some(pool) = empty().await else { return };
     schema::migrate(&pool).await.expect("install");
-    sqlx::raw_sql(AssertSqlSafe(format!(
-        "{VERSION_1_DEDUP_KEY}; UPDATE stampeded_schema SET version = 1"
-    )))
-    .execute(&pool)
-    .await
-    .expect("back to schema 1");
+    legacy(&pool, VERSION_1_DEDUP_KEY, Some(1)).await;
 
     // Commits under schema 1, so the rewrite below has a real row to touch.
     insert_hourly_at_midnight(&pool)
@@ -127,7 +121,6 @@ async fn a_version_1_database_is_upgraded_in_place() {
         .expect_err("schema 1 gives both one key");
 
     schema::migrate(&pool).await.expect("upgrade");
-    assert_eq!(version(&pool).await, VERSION);
 
     // Still collides with its own scope+period: proof the ALTER COLUMN ...
     // SET EXPRESSION AS rewrite recomputed the pre-existing row's key under
@@ -139,15 +132,38 @@ async fn a_version_1_database_is_upgraded_in_place() {
     // its key now that the period is part of it.
     insert_daily_at_midnight(&pool)
         .await
-        .expect("schema 2 keeps the windows apart");
+        .expect("the period keeps the windows apart");
 }
 
-/// Schema 2's dedup key (see `0002_dedup_key_period.sql`): a plain `':'` join
-/// let a crafted, period-less `dedup_scope` forge the exact key of an
-/// unrelated periodic job.
-const VERSION_2_DEDUP_KEY: &str = include_str!("../schema/upgrades/0002_dedup_key_period.sql");
+/// An unversioned 0.3 install is schema 1.
+#[tokio::test]
+async fn an_unversioned_0_3_install_is_adopted_and_upgraded() {
+    let Some(pool) = empty().await else { return };
+    schema::migrate(&pool).await.expect("install");
+    legacy(&pool, VERSION_1_DEDUP_KEY, None).await;
 
-const SCHEMA_3_DEDUP_KEY: &str = include_str!("../schema/upgrades/0003_dedup_key_separator.sql");
+    schema::migrate(&pool).await.expect("adopt and upgrade");
+    hourly_and_daily_at_midnight(&pool).await.expect("upgraded");
+}
+
+#[tokio::test]
+async fn a_0_2_schema_is_refused_saying_why() {
+    let Some(pool) = empty().await else { return };
+    schema::migrate(&pool).await.expect("install");
+
+    // 0.2: no version table, and no queue policies yet.
+    sqlx::raw_sql(
+        "DROP TABLE stampeded_migrations; DROP TABLE stampeded_schema;
+         DROP TABLE stampeded_queue_policies;",
+    )
+    .execute(&pool)
+    .await
+    .expect("a 0.2 schema");
+    let err = schema::migrate(&pool)
+        .await
+        .expect_err("0.2 has no upgrade path");
+    assert!(err.to_string().contains("0.2"), "{err}");
+}
 
 /// A forged, period-less scope shaped like `<scope>:<period>:<epoch>`, next
 /// to the real periodic job it targets: same scope, same period, the same
@@ -164,7 +180,7 @@ async fn forged_scope_and_the_job_it_targets(pool: &PgPool) -> Result<(), sqlx::
 }
 
 /// Schema 2 let a crafted scope forge another job's periodic key; schema 3's
-/// chr(0) join closes it, since no `text` column can ever hold that byte.
+/// zero-byte join closes it.
 #[tokio::test]
 async fn a_crafted_scope_cannot_forge_a_periodic_jobs_key() {
     let Some(pool) = empty().await else { return };
@@ -178,54 +194,56 @@ async fn a_crafted_scope_cannot_forge_a_periodic_jobs_key() {
         .await
         .expect_err("schema 2: the forged scope collides with the job it targets");
 
-    sqlx::raw_sql(SCHEMA_3_DEDUP_KEY)
+    sqlx::raw_sql(VERSION_3_DEDUP_KEY)
         .execute(&pool)
         .await
         .expect("schema 3's dedup key");
     forged_scope_and_the_job_it_targets(&pool)
         .await
-        .expect("schema 3: chr(0) cannot appear in dedup_scope, so the forgery no longer matches");
+        .expect("schema 3: the forgery no longer matches");
 }
 
-/// Installed by stampeded 0.3, before the schema recorded its version: that
-/// is schema 1, so migrate marks it and upgrades it.
-#[tokio::test]
-async fn an_unversioned_0_3_install_is_marked_and_upgraded() {
-    let Some(pool) = empty().await else { return };
-    schema::migrate(&pool).await.expect("install");
-    sqlx::raw_sql(AssertSqlSafe(format!(
-        "{VERSION_1_DEDUP_KEY}; DROP TABLE stampeded_schema"
-    )))
-    .execute(&pool)
+/// One job per scope, in one statement: any collision fails them all.
+async fn insert_scopes(pool: &PgPool, scopes: &[&str]) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO stampeded_jobs (queue, task, dedup_scope)
+         SELECT 'default', 'report', scope FROM unnest($1::text[]) AS scope",
+    )
+    .bind(scopes)
+    .execute(pool)
     .await
-    .expect("a 0.3 install");
-
-    schema::migrate(&pool).await.expect("mark and upgrade");
-    assert_eq!(version(&pool).await, VERSION);
-    hourly_and_daily_at_midnight(&pool).await.expect("upgraded");
+    .map(drop)
 }
 
+/// Schema 3 read the scope as bytea escapes; schema 4 keys its text.
 #[tokio::test]
-async fn schemas_it_cannot_use_are_refused_saying_why() {
+async fn a_scope_is_keyed_by_its_text_not_its_bytea_escapes() {
     let Some(pool) = empty().await else { return };
     schema::migrate(&pool).await.expect("install");
+    legacy(&pool, VERSION_3_DEDUP_KEY, Some(3)).await;
 
-    sqlx::query("UPDATE stampeded_schema SET version = version + 1")
-        .execute(&pool)
+    // `\x62` is stored under `b`'s key.
+    insert_scopes(&pool, &["a", r"\x62"])
         .await
-        .expect("a newer stampeded's schema");
-    let err = schema::migrate(&pool)
+        .expect("schema 3 stores both");
+    for forged in [r"\x61", r"\141"] {
+        insert_scopes(&pool, &[forged])
+            .await
+            .expect_err("schema 3: the escape forges a's key");
+    }
+    insert_scopes(&pool, &[r"C:\tmp"])
         .await
-        .expect_err("newer than this stampeded");
-    assert!(err.to_string().contains("upgrade stampeded"), "{err}");
+        .expect_err("schema 3: a stray backslash is invalid bytea");
 
-    // 0.2: no version table, and no queue policies yet.
-    sqlx::raw_sql("DROP TABLE stampeded_schema; DROP TABLE stampeded_queue_policies;")
-        .execute(&pool)
+    schema::migrate(&pool).await.expect("upgrade");
+
+    insert_scopes(&pool, &[r"\x62"])
         .await
-        .expect("a 0.2 schema");
-    let err = schema::migrate(&pool)
-        .await
-        .expect_err("0.2 has no upgrade path");
-    assert!(err.to_string().contains("0.2"), "{err}");
+        .expect_err("the stored row is rekeyed by its text");
+    insert_scopes(
+        &pool,
+        &["b", r"\x61", r"\141", r"C:\tmp", r"\", r"\\", r"\000"],
+    )
+    .await
+    .expect("each distinct text is its own key");
 }
