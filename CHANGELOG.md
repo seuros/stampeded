@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/seuros/stampeded/compare/stampeded-v0.4.0...stampeded-v0.4.1) (2026-10-29)
+
+
+### Bug Fixes
+
+* key dedup scopes by their text, not their bytea escapes ([#10](https://github.com/seuros/stampeded/issues/10)) ([87e3ccf](https://github.com/seuros/stampeded/commit/87e3ccfa5e472bafa07b309789c4ccc610d4e42f))
+
 ## [0.4.0](https://github.com/seuros/stampeded/compare/stampeded-v0.3.2...stampeded-v0.4.0) (2026-10-24)
 
 
