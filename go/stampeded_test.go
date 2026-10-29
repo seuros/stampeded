@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -48,7 +49,16 @@ func database(t *testing.T) (string, func(string) string) {
 	t.Cleanup(func() {
 		_ = exec.Command("psql", "-XAtq", base, "-c", "SET client_min_messages TO WARNING", "-c", "DROP SCHEMA "+schema+" CASCADE").Run()
 	})
-	install := exec.Command("psql", "-XAtq", "-v", "ON_ERROR_STOP=1", base, "-f", "../crates/stampeded/schema/schema.sql")
+	// The migrations, in order: Glob sorts.
+	migrations, err := filepath.Glob("../crates/stampeded/schema/*.sql")
+	if err != nil || len(migrations) == 0 {
+		t.Fatalf("no migrations: %v", err)
+	}
+	args := []string{"-XAtq", "-v", "ON_ERROR_STOP=1", base}
+	for _, m := range migrations {
+		args = append(args, "-f", m)
+	}
+	install := exec.Command("psql", args...)
 	install.Env = append(os.Environ(), "PGOPTIONS=-c search_path="+schema)
 	if out, err := install.CombinedOutput(); err != nil {
 		t.Fatalf("install schema: %v\n%s", err, out)

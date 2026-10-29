@@ -1,8 +1,11 @@
 # frozen_string_literal: true
 
+require "digest"
+
 module Stampeded
   module Schema
-    FILES = %w[schema.sql].freeze
+    # Where the daemon's sqlx migrator records what it applied.
+    TABLE = "stampeded_migrations"
 
     module_function
 
@@ -15,15 +18,40 @@ module Stampeded
         raise(Error, "cannot find schema/*.sql (looked in #{candidates.join(", ")})")
     end
 
-    def sql
-      FILES.map { |f| File.read(File.join(root, f)) }.join("\n")
+    # [version, description, sql] per migration, in order: sqlx's names.
+    def migrations
+      Dir[File.join(root, "*.sql")].sort.map do |path|
+        version, name = File.basename(path, ".sql").split("_", 2)
+        [Integer(version, 10), name.tr("_", " "), File.read(path)]
+      end
     end
 
+    def sql = migrations.map(&:last).join("\n")
+
+    # A fresh install, recorded as sqlx records it, so the daemon's
+    # --migrate finds nothing to apply.
     def install!(conn = nil)
       run = lambda do |c|
         c.exec("BEGIN")
         begin
-          c.exec(sql)
+          c.exec(<<~SQL)
+            CREATE TABLE #{TABLE} (
+                version BIGINT PRIMARY KEY,
+                description TEXT NOT NULL,
+                installed_on TIMESTAMPTZ NOT NULL DEFAULT now(),
+                success BOOLEAN NOT NULL,
+                checksum BYTEA NOT NULL,
+                execution_time BIGINT NOT NULL
+            )
+          SQL
+          migrations.each do |version, description, sql|
+            c.exec(sql)
+            c.exec_params(
+              "INSERT INTO #{TABLE} (version, description, success, checksum, execution_time) " \
+              "VALUES ($1, $2, true, decode($3, 'hex'), 0)",
+              [version, description, Digest::SHA384.hexdigest(sql)]
+            )
+          end
           c.exec("COMMIT")
         rescue StandardError
           c.exec("ROLLBACK")
@@ -40,7 +68,7 @@ module Stampeded
           DROP TABLE IF EXISTS stampeded_cron_occurrences, stampeded_schedules,
                                stampeded_queue_policies, stampeded_queue_counts,
                                stampeded_jobs, stampeded_workers,
-                               stampeded_schema CASCADE;
+                               stampeded_schema, stampeded_migrations CASCADE;
           DO $$
           DECLARE r record;
           BEGIN

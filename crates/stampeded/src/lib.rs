@@ -1,6 +1,6 @@
 //! Stampeded: a Postgres-backed, polyglot job processor.
 //!
-//! The rules live in SQL (`schema/schema.sql`); this crate is a typed wrapper over them.
+//! The rules live in SQL (`schema/*.sql`); this crate is a typed wrapper over them.
 
 mod claim;
 pub mod cron;

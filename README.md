@@ -54,7 +54,7 @@ stampeded --migrate --database-url postgres://localhost/stampeded \
 `--migrate` installs the schema on a fresh database and upgrades an older one
 in place, so it is safe on every start; several daemons starting at once take
 turns. An app embedding the library calls `stampeded::schema::migrate` the same
-way. `schema.sql` is a fresh install at the current version, for `psql -f`.
+way.
 
 One process runs the worker, the reaper, the pruner, the scheduler, the HTTP API
 and the dashboard. Split roles with `--no-worker` and `--no-maintenance`;
@@ -402,7 +402,7 @@ included. The Ruby suite lives in `ruby/`.
 
 ```
 crates/stampeded/  queue, worker, scheduler, maintenance, planner
-  schema/          schema.sql, NOTES.md (design notes)
+  schema/          migrations (sqlx), NOTES.md (design notes)
   src/http/        HTTP API and dashboard    [feature: http]
   src/mcp/         MCP control plane         [feature: mcp]
   src/bin/         stampeded, stampeded-mcp

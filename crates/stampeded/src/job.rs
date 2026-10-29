@@ -1,6 +1,6 @@
 //! Job types and lifecycle states.
 //!
-//! The state set mirrors the CHECK constraint in `schema/schema.sql`; change both together.
+//! The state set mirrors the CHECK constraint in the schema; change both together.
 
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};

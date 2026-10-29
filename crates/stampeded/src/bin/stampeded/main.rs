@@ -70,7 +70,7 @@ async fn main() -> anyhow::Result<()> {
                     "the Stampeded schema is not installed in this database.\n\n\
                      Run once with --migrate to create it:\n\n    \
                      stampeded --database-url ... --migrate\n\n\
-                     Or apply schema/*.sql by hand. Postgres 18+ is required: the \
+                     Postgres 18+ is required: the \
                      schema uses uuidv7(), RETURNING OLD./NEW. and generated columns, \
                      with no compatibility shims."
                 )

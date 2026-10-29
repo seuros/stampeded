@@ -1,126 +1,110 @@
-//! The embedded database schema, so a host needs no `.sql` files.
+//! The embedded migrations, `schema/*.sql`, so a host needs no `.sql` files.
 //!
-//! [`migrate`] is safe on every start: a fresh database gets [`SCHEMA`], an
-//! older one the upgrades it lacks, a current one nothing.
+//! [`migrate`] is safe on every start: it applies what the database lacks.
 
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::PgPool;
+use sqlx::migrate::{Migrate, MigrateError, Migrator};
 
 use crate::{Error, Result};
 
-/// A fresh install, at [`VERSION`]. It records that version itself, so an
-/// install by hand (`psql -f schema.sql`) is versioned too.
-pub const SCHEMA: &str = include_str!("../schema/schema.sql");
+/// Applied migrations, apart from an app's own `_sqlx_migrations`.
+const TABLE: &str = "stampeded_migrations";
 
-/// The schema [`SCHEMA`] builds. A schema change adds its upgrade to
-/// `UPGRADES` and raises this.
-pub const VERSION: i32 = 3;
-
-/// `UPGRADES[i]` takes a database from version `i + 1` to `i + 2`.
-const UPGRADES: &[&str] = &[
-    include_str!("../schema/upgrades/0002_dedup_key_period.sql"),
-    include_str!("../schema/upgrades/0003_dedup_key_separator.sql"),
-];
-
-// Every schema bump needs exactly one matching upgrade, or `migrate` either
-// panics indexing `UPGRADES` or silently stamps an under-upgraded database.
-const _: () = assert!(
-    UPGRADES.len() + 1 == VERSION as usize,
-    "VERSION and UPGRADES are out of sync: add the missing upgrade, or fix VERSION"
-);
-
-/// One installer at a time, across processes (`"STAMPEDE"`).
+/// One adopter at a time, across processes (`"STAMPEDE"`).
 const LOCK: i64 = 0x5354_414d_5045_4445;
 
-/// Installs the schema, or upgrades it to [`VERSION`], in one transaction.
-/// Concurrent callers (several daemons starting) take turns.
+fn migrator() -> Migrator {
+    let mut migrator = sqlx::migrate!("./schema");
+    migrator.dangerous_set_table_name(TABLE);
+    migrator
+}
+
+/// Installs the schema, or applies the migrations it lacks. Concurrent
+/// callers (several daemons starting) take turns.
 ///
 /// # Errors
 ///
-/// The database's schema is newer than this stampeded, or predates the 0.3
-/// schema (stampeded 0.2 had no upgrade path: drop it and install again).
+/// A migration failed, the database is newer than this stampeded, or it
+/// predates the 0.3 schema (stampeded 0.2 had no upgrade path: drop it and
+/// install again).
 pub async fn migrate(pool: &PgPool) -> Result<()> {
+    let migrator = migrator();
+    adopt(pool, &migrator).await?;
+    migrator.run(pool).await.map_err(migrate_error)
+}
+
+/// Records the migrations a database installed before sqlx already holds.
+async fn adopt(pool: &PgPool, migrator: &Migrator) -> Result<()> {
     let mut tx = pool.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
         .bind(LOCK)
         .execute(&mut *tx)
         .await?;
-    match installed(&mut tx).await? {
-        None => {
-            sqlx::raw_sql(SCHEMA).execute(&mut *tx).await?;
+    let (tracked, versioned, jobs, policies): (bool, bool, bool, bool) = sqlx::query_as(
+        "SELECT to_regclass($1) IS NOT NULL,
+                to_regclass('stampeded_schema') IS NOT NULL,
+                to_regclass('stampeded_jobs') IS NOT NULL,
+                to_regclass('stampeded_queue_policies') IS NOT NULL",
+    )
+    .bind(TABLE)
+    .fetch_one(&mut *tx)
+    .await?;
+    let applied: i64 = match (tracked, versioned, jobs, policies) {
+        (true, ..) | (false, false, false, false) => return Ok(()),
+        // stampeded 0.4: versions 1 to 3.
+        (false, true, ..) => {
+            sqlx::query_scalar("SELECT version::bigint FROM stampeded_schema")
+                .fetch_one(&mut *tx)
+                .await?
         }
-        Some(version) if version > VERSION => {
-            return Err(Error::Schema(format!(
-                "the database holds schema {version}, newer than this stampeded's {VERSION}: \
-                 upgrade stampeded"
-            )));
+        // stampeded 0.3: version 1, unrecorded.
+        (false, false, true, true) => 1,
+        (false, false, true, false) => {
+            return Err(Error::Schema(
+                "the database holds the stampeded 0.2 schema, which has no upgrade path: \
+                 drop its stampeded_* tables and functions, then migrate again"
+                    .into(),
+            ));
         }
-        Some(version) if version == VERSION => {}
-        Some(version) => {
-            let pending = usize::try_from(version - 1).map_err(|_| {
-                Error::Schema(format!(
-                    "the database's schema version is {version}, which is not valid"
-                ))
-            })?;
-            let upgrades = UPGRADES.get(pending..).ok_or_else(|| {
-                Error::Schema(format!(
-                    "no upgrade path from schema {version} to {VERSION}"
-                ))
-            })?;
-            for &upgrade in upgrades {
-                sqlx::raw_sql(upgrade).execute(&mut *tx).await?;
-            }
-            sqlx::query("UPDATE stampeded_schema SET version = $1, changed_at = now()")
-                .bind(VERSION)
-                .execute(&mut *tx)
-                .await?;
+        (false, false, false, true) => {
+            return Err(Error::Schema(
+                "stampeded_queue_policies exists without stampeded_jobs: an unrelated or \
+                 partially dropped install. Resolve it by hand before migrating"
+                    .into(),
+            ));
         }
+    };
+    if !(1..=3).contains(&applied) {
+        return Err(Error::Schema(format!(
+            "stampeded_schema holds version {applied}, but {TABLE} is missing"
+        )));
+    }
+    tx.ensure_migrations_table(TABLE)
+        .await
+        .map_err(migrate_error)?;
+    for migration in migrator.iter().filter(|m| m.version <= applied) {
+        sqlx::query(
+            "INSERT INTO stampeded_migrations
+                 (version, description, success, checksum, execution_time)
+             VALUES ($1, $2, true, $3, 0)",
+        )
+        .bind(migration.version)
+        .bind(migration.description.as_ref())
+        .bind(migration.checksum.as_ref())
+        .execute(&mut *tx)
+        .await?;
     }
     tx.commit().await?;
     Ok(())
 }
 
-/// The schema version the database holds; `None` on a database without
-/// stampeded.
-async fn installed(tx: &mut Transaction<'_, Postgres>) -> Result<Option<i32>> {
-    let (jobs, versioned, policies): (bool, bool, bool) = sqlx::query_as(
-        "SELECT to_regclass('stampeded_jobs') IS NOT NULL,
-                to_regclass('stampeded_schema') IS NOT NULL,
-                to_regclass('stampeded_queue_policies') IS NOT NULL",
-    )
-    .fetch_one(&mut **tx)
-    .await?;
-    if versioned {
-        let version: i32 = sqlx::query_scalar("SELECT version FROM stampeded_schema")
-            .fetch_one(&mut **tx)
-            .await?;
-        return Ok(Some(version));
-    }
-    match (jobs, policies) {
-        (false, false) => Ok(None),
-        (false, true) => Err(Error::Schema(
-            "stampeded_queue_policies exists without stampeded_jobs: an unrelated or \
-             partially dropped install. Resolve it by hand before migrating"
-                .into(),
+fn migrate_error(e: MigrateError) -> Error {
+    match e {
+        MigrateError::Execute(e) => Error::Database(e),
+        MigrateError::VersionMissing(version) => Error::Schema(format!(
+            "the database holds migration {version}, which this stampeded lacks: \
+             upgrade stampeded"
         )),
-        // Installed by stampeded 0.3, before the schema recorded its version:
-        // the same schema as version 1, so mark it.
-        (true, true) => {
-            sqlx::raw_sql(
-                "CREATE TABLE stampeded_schema (
-                     version     integer     NOT NULL CHECK (version > 0),
-                     changed_at  timestamptz NOT NULL DEFAULT now()
-                 );
-                 CREATE UNIQUE INDEX stampeded_schema_one_row ON stampeded_schema ((true));
-                 INSERT INTO stampeded_schema (version) VALUES (1);",
-            )
-            .execute(&mut **tx)
-            .await?;
-            Ok(Some(1))
-        }
-        (true, false) => Err(Error::Schema(
-            "the database holds the stampeded 0.2 schema, which has no upgrade path: \
-             drop its stampeded_* tables and functions, then migrate again"
-                .into(),
-        )),
+        e => Error::Schema(e.to_string()),
     }
 }
