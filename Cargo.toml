@@ -10,6 +10,8 @@ repository = "https://github.com/seuros/stampeded"
 authors = ["Abdelkader Boudih"]
 
 [workspace.dependencies]
+# Path for the workspace, version for crates.io; release-please bumps both.
+stampeded = { path = "crates/stampeded", version = "0.4.0", default-features = false }
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "time", "signal", "sync"] }
 # No TLS backend here: each final artifact picks one (stampeded's `tls-aws-lc` /
 # `tls-ring`), so an app embedding the library keeps its own.
