@@ -68,7 +68,7 @@ typedef struct stampeded_puller_options {
 extern "C" {
 #endif // __cplusplus
 
-// This library's version, e.g. `"0.1.0"`. Static; never freed.
+// The stampeded release this library is, e.g. `"0.4.1"`. Static; never freed.
 STAMPEDED_NODISCARD const char *stampeded_version(void);
 
 // Log to stderr at `filter`, e.g. `"stampeded=debug"`, NULL for `"warn"`; silent until called.

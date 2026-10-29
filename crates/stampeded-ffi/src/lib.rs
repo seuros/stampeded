@@ -109,7 +109,7 @@ unsafe fn opt_arg<'a>(ptr: *const c_char, name: &str) -> Result<Option<&'a str>,
     }
 }
 
-/// This library's version, e.g. `"0.1.0"`. Static; never freed.
+/// The stampeded release this library is, e.g. `"0.4.1"`. Static; never freed.
 #[must_use]
 #[allow(unsafe_code, reason = "exported under its C name")]
 #[unsafe(no_mangle)]

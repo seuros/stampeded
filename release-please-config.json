@@ -12,6 +12,16 @@
           "jsonpath": "$.package.version"
         },
         {
+          "type": "toml",
+          "path": "crates/stampeded-ffi/Cargo.toml",
+          "jsonpath": "$.package.version"
+        },
+        {
+          "type": "toml",
+          "path": "Cargo.toml",
+          "jsonpath": "$.workspace.dependencies.stampeded.version"
+        },
+        {
           "type": "generic",
           "path": "ruby/lib/stampeded/version.rb"
         }
