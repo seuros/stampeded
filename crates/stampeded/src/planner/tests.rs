@@ -12,6 +12,14 @@ fn snapshot(
         max_wait_secs: max_wait,
         running,
         head_wait_secs: waited,
+        paused: false,
+    }
+}
+
+fn paused(snapshot: QueueSnapshot) -> QueueSnapshot {
+    QueueSnapshot {
+        paused: true,
+        ..snapshot
     }
 }
 
@@ -65,6 +73,16 @@ fn verdicts_follow_the_policy() {
             snapshot(Some(2), 1, Some(60), Some(600.0)),
             Verdict::Rush,
         ),
+        (
+            "paused, however far behind",
+            paused(snapshot(Some(2), 0, Some(60), Some(600.0))),
+            Verdict::Hold,
+        ),
+        (
+            "paused with no limits",
+            paused(snapshot(None, 0, None, None)),
+            Verdict::Hold,
+        ),
     ];
 
     for (name, snapshot, expected) in cases {
@@ -81,6 +99,10 @@ fn a_verdict_other_than_steady_says_why() {
 
     let rush = planner.decide(&snapshot(None, 0, Some(60), Some(90.4)));
     assert_eq!(rush.reason.as_deref(), Some("next job waited 90s, max 60s"));
+
+    // Also at its cap, but the pause is what an operator must undo.
+    let pause = planner.decide(&paused(snapshot(Some(1), 1, None, None)));
+    assert_eq!(pause.reason.as_deref(), Some("paused"));
 
     assert_eq!(planner.decide(&snapshot(None, 0, None, None)).reason, None);
 }

@@ -252,6 +252,19 @@ waited past `max_wait_secs` ("next job waited 122s, max 60s"), otherwise
 - `max_running` is approximate across processes. Each worker also enforces it
   for what it holds itself, daemon or not.
 
+To stop a queue outright, pause it:
+
+```sql
+INSERT INTO stampeded_queue_policies (queue, paused) VALUES ('mail', true)
+ON CONFLICT (queue) DO UPDATE SET paused = true;
+```
+
+`stampeded_claim` then hands out nothing from it, in every runtime and with no
+daemon. Jobs already running finish; enqueueing and schedules carry on, so the
+backlog waits for `paused = false`. The verdict reads `hold` ("paused"). From
+Rust it is `Queue::pause_queue`, from Ruby `Stampeded::QueuePolicy.pause`, and
+over MCP the `queue_pause` tool.
+
 The policy is a behavior tree from
 [behavior-machines](https://github.com/seuros/behavior-machines).
 

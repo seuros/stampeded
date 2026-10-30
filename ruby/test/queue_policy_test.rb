@@ -54,6 +54,27 @@ class QueuePolicyTest < Minitest::Test
     assert_equal "available", job_row(held)["state"]
   end
 
+  def test_a_paused_queue_waits_until_resumed_with_no_daemon
+    Stampeded::QueuePolicy.pause("frozen")
+    Stampeded::QueuePolicy.set("frozen", max_running: 5)
+    frozen = Stampeded.enqueue(queue: "frozen", task: "note")
+    open = Stampeded.enqueue(queue: "open", task: "note")
+
+    worker = Stampeded::Worker.new(queues: %w[frozen open], poll_interval: 0.05)
+    worker.register("note") { nil }
+    run_worker(worker) { job_row(open)["state"] == "completed" }
+    sleep 0.2
+
+    assert_equal "available", job_row(frozen)["state"]
+    assert_equal "t", Stampeded::QueuePolicy.all.find { it["queue"] == "frozen" }["paused"],
+                 "set keeps a pause"
+
+    Stampeded::QueuePolicy.resume("frozen")
+    worker = Stampeded::Worker.new(queues: %w[frozen], poll_interval: 0.05)
+    worker.register("note") { nil }
+    run_worker(worker) { job_row(frozen)["state"] == "completed" }
+  end
+
   def test_a_stale_hold_is_ignored
     Stampeded::QueuePolicy.set("held")
     verdict!("held", "hold", age: 60)

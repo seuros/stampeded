@@ -21,6 +21,34 @@ module Stampeded
       queue.to_s
     end
 
+    # No worker, in any runtime, claims from a paused queue; running jobs finish
+    # and enqueueing carries on. `set` keeps a pause; `remove` lifts it.
+    def pause(queue)
+      raise Error, "a queue policy needs a queue name" if queue.to_s.strip.empty?
+
+      Connection.translating_errors do
+        Connection.with do |c|
+          c.exec_params(<<~SQL, [queue.to_s])
+            INSERT INTO stampeded_queue_policies (queue, paused) VALUES ($1, true)
+            ON CONFLICT (queue) DO UPDATE SET paused = true, updated_at = now()
+          SQL
+        end
+      end
+      queue.to_s
+    end
+
+    def resume(queue)
+      Connection.translating_errors do
+        Connection.with do |c|
+          c.exec_params(<<~SQL, [queue.to_s])
+            UPDATE stampeded_queue_policies SET paused = false, updated_at = now()
+             WHERE queue = $1 AND paused
+          SQL
+        end
+      end
+      queue.to_s
+    end
+
     def remove(queue)
       Connection.with { |c| c.exec_params("DELETE FROM stampeded_queue_policies WHERE queue = $1", [queue.to_s]) }
     end
@@ -29,7 +57,7 @@ module Stampeded
       Connection.translating_errors do
         Connection.with do |c|
           c.exec(<<~SQL).to_a
-            SELECT queue, max_running, max_wait_secs, verdict, reason, decided_at
+            SELECT queue, max_running, max_wait_secs, paused, verdict, reason, decided_at
               FROM stampeded_queue_policies ORDER BY queue
           SQL
         end

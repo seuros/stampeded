@@ -12,9 +12,10 @@ const READS: [&str; 7] = [
     "system_health",
     "worker_status",
 ];
-const WRITES: [&str; 4] = [
+const WRITES: [&str; 5] = [
     "job_cancel",
     "job_retry",
+    "queue_pause",
     "schedule_pause",
     "schedule_upsert",
 ];

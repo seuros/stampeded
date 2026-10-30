@@ -116,6 +116,15 @@ pub struct ScheduleUpsertArgs {
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct QueuePauseArgs {
+    /// Queue name.
+    pub queue: String,
+    /// True to pause, false to resume.
+    #[serde(default)]
+    pub paused: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct ScheduleKeyArgs {
     /// Schedule key.
     pub key: String,

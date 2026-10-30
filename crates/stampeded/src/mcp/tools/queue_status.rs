@@ -17,15 +17,26 @@ impl StampededServer {
             .depth(&params.0.queue)
             .await
             .map_err(|e| ToolError::Internal(format!("depth query failed: {e}")))?;
+        let paused = self
+            .queue()
+            .paused_queues()
+            .await
+            .map_err(|e| ToolError::Internal(format!("pause lookup failed: {e}")))?
+            .contains(&params.0.queue);
+        let tag = if paused {
+            " (paused: nothing is claimed)"
+        } else {
+            ""
+        };
 
         if rows.is_empty() {
             return Ok(ToolOutput::text(format!(
-                "queue {:?} has no unfinished jobs",
+                "queue {:?}{tag} has no unfinished jobs",
                 params.0.queue
             )));
         }
 
-        let mut out = format!("queue {:?}\n", params.0.queue);
+        let mut out = format!("queue {:?}{tag}\n", params.0.queue);
         for (state, n) in rows {
             let _ = writeln!(out, "  {state:<12} {n}");
         }

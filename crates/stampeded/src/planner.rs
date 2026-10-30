@@ -49,6 +49,8 @@ pub struct QueueSnapshot {
     pub running: i64,
     /// How long the head of the claim order has been due; `None` when nothing is claimable.
     pub head_wait_secs: Option<f64>,
+    /// Paused by an operator; `stampeded_claim` refuses it whatever the verdict.
+    pub paused: bool,
 }
 
 /// A verdict and, unless the queue is steady, why.
@@ -60,6 +62,7 @@ pub struct Decision {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Leaf {
+    Paused,
     AtCapacity,
     Overdue,
     Verdict(Verdict),
@@ -68,6 +71,7 @@ enum Leaf {
 impl Leaf {
     fn status(self, snapshot: &QueueSnapshot) -> Status {
         let holds = match self {
+            Self::Paused => snapshot.paused,
             Self::AtCapacity => snapshot
                 .max_running
                 .is_some_and(|max| snapshot.running >= i64::from(max)),
@@ -85,11 +89,16 @@ impl Leaf {
     }
 }
 
-/// The policy. Order is precedence: a queue both full and behind is held.
+/// The policy. Order is precedence: a paused queue is held however late its jobs
+/// are, and a queue both full and behind is held.
 ///
 /// Every composite is reactive, so a verdict depends on the snapshot alone.
 fn policy() -> Node<Leaf> {
     Node::reactive_fallback([
+        Node::reactive_sequence([
+            Node::leaf(Leaf::Paused),
+            Node::leaf(Leaf::Verdict(Verdict::Hold)),
+        ]),
         Node::reactive_sequence([
             Node::leaf(Leaf::AtCapacity),
             Node::leaf(Leaf::Verdict(Verdict::Hold)),
@@ -150,6 +159,7 @@ impl Planner {
 
         let reason = match verdict {
             Verdict::Steady => None,
+            Verdict::Hold if snapshot.paused => Some("paused".to_owned()),
             Verdict::Hold => Some(format!(
                 "{} running, max {}",
                 snapshot.running,

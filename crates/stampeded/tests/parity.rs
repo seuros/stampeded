@@ -118,6 +118,40 @@ async fn every_queue_means_every_queue_with_work_except_the_excluded() {
 }
 
 #[tokio::test]
+async fn a_paused_queue_waits_with_no_daemon_and_starves_nothing() {
+    // No planner runs here, so no verdict: the claim alone keeps `frozen` waiting.
+    let q = q!();
+    q.pause_queue("frozen").await.unwrap();
+    let frozen = q
+        .enqueue(NewJob::new("frozen", "note"))
+        .await
+        .unwrap()
+        .unwrap();
+    for _ in 0..2 {
+        q.enqueue(NewJob::new("live", "note")).await.unwrap();
+    }
+
+    let (seen, count) = recorder();
+    let make = || {
+        let seen = seen.clone();
+        Worker::new(q.clone(), worker(Queues::parse("*").unwrap())).register("note", move |job| {
+            let seen = seen.clone();
+            async move {
+                seen.lock().expect("seen").push(job.queue.clone());
+                Ok(())
+            }
+        })
+    };
+    let after_live = count.clone();
+    run_until(make(), move || after_live() == 2).await;
+    assert_eq!(state(&q, "frozen", frozen).await, JobState::Available);
+
+    q.resume_queue("frozen").await.unwrap();
+    run_until(make(), move || count() == 3).await;
+    assert_eq!(state(&q, "frozen", frozen).await, JobState::Completed);
+}
+
+#[tokio::test]
 async fn a_held_queue_waits_and_a_rushed_one_goes_first() {
     let q = q!();
     policy(&q, "held", None, "hold").await;

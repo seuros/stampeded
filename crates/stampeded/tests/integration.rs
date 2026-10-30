@@ -1103,6 +1103,45 @@ async fn a_resurrected_job_gets_every_budget_back() {
     assert_eq!(killed().await.state, JobState::Retryable);
 }
 
+#[tokio::test]
+async fn a_paused_queue_hands_out_nothing_until_resumed() {
+    let q = q!();
+    q.create_queue("mail").await.unwrap();
+    let w = q
+        .register_worker("h", 1, &["default".into(), "mail".into()])
+        .await
+        .unwrap();
+    let enqueue = async |queue: &str| q.enqueue(NewJob::new(queue, "t")).await.unwrap().unwrap();
+    enqueue("default").await;
+    let running = q.claim("default", w, 1).await.unwrap().remove(0);
+    enqueue("default").await;
+    enqueue("mail").await;
+
+    q.pause_queue("default").await.unwrap();
+    q.pause_queue("default").await.unwrap();
+    assert_eq!(q.paused_queues().await.unwrap(), ["default"]);
+    assert!(
+        q.claim("default", w, 10).await.unwrap().is_empty(),
+        "the claim itself refuses, daemon or not"
+    );
+    assert_eq!(q.claim("mail", w, 10).await.unwrap().len(), 1);
+    assert!(
+        q.complete(&running, w).await.unwrap().owned,
+        "a running job finishes"
+    );
+    enqueue("default").await;
+    let snapshots = q.queue_snapshots().await.unwrap();
+    assert!(snapshots.iter().any(|s| s.queue == "default" && s.paused));
+
+    q.resume_queue("default").await.unwrap();
+    assert_eq!(q.paused_queues().await.unwrap(), Vec::<String>::new());
+    assert_eq!(
+        q.claim("default", w, 10).await.unwrap().len(),
+        2,
+        "the backlog waited"
+    );
+}
+
 // ---------------------------------------------------------- depth counters
 
 #[tokio::test]

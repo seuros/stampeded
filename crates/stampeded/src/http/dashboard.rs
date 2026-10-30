@@ -314,6 +314,7 @@ async fn render_queues(state: &ApiState, p: &Params) -> Option<Event<PatchElemen
     let rows = logged("queues", rows)?;
 
     let ages = logged("queues", state.queue.oldest_available_age().await).unwrap_or_default();
+    let paused = logged("queues", state.queue.paused_queues().await).unwrap_or_default();
 
     let mut html = String::from(r#"<div id="queues"><h2>queues</h2><div class="t"><table>"#);
     html.push_str(
@@ -337,11 +338,14 @@ async fn render_queues(state: &ApiState, p: &Params) -> Option<Event<PatchElemen
         } else {
             ""
         };
+        let is_paused = paused.contains(&queue);
         let _ = write!(
             html,
-            r#"<tr><td><a{on} data-on-click="@get('{href}')">{q}</a></td><td>{st}</td><td class="n">{n}</td><td class="n dim">{age}</td></tr>"#,
+            r#"<tr><td class="{cls}"><a{on} data-on-click="@get('{href}')">{q}</a>{tag}</td><td>{st}</td><td class="n">{n}</td><td class="n dim">{age}</td></tr>"#,
+            cls = if is_paused { "warn" } else { "" },
             href = p.link(Some(&queue), None, Some("")),
             q = esc(&queue),
+            tag = if is_paused { " [paused]" } else { "" },
             st = esc(&st),
         );
     }

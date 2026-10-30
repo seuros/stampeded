@@ -180,6 +180,14 @@ The daemon turns these into a verdict per queue every second; the worker claims
 rushed queues first and skips held ones. `max_running` also limits what one
 worker process holds from that queue, with or without the daemon.
 
+```ruby
+Stampeded::QueuePolicy.pause("mail")   # no worker in any language claims from it
+Stampeded::QueuePolicy.resume("mail")
+```
+
+Jobs already running finish, and `perform_later` and schedules keep queueing
+behind the pause. `set` keeps a pause; `remove` lifts it.
+
 ## Without Rails
 
 ```ruby

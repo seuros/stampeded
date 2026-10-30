@@ -670,7 +670,7 @@ impl Queue {
     /// The wait is the claim order's head, one index entry per queue, not the oldest due job.
     pub async fn queue_snapshots(&self) -> Result<Vec<QueueSnapshot>> {
         let rows = sqlx::query_as::<_, QueueSnapshot>(
-            "SELECT p.queue, p.max_running, p.max_wait_secs, \
+            "SELECT p.queue, p.max_running, p.max_wait_secs, p.paused, \
                     coalesce((SELECT sum(c.n) FROM stampeded_queue_counts c \
                                WHERE c.queue = p.queue \
                                  AND c.state IN ('claimed','executing')), 0)::bigint AS running, \
@@ -714,6 +714,41 @@ impl Queue {
         .execute(&self.pool)
         .await?;
         Ok(done.rows_affected())
+    }
+
+    /// Stop handing out this queue's jobs, in every runtime and with or without a
+    /// daemon. Jobs already running finish; enqueueing and schedules carry on, so
+    /// the backlog waits for [`Queue::resume_queue`].
+    pub async fn pause_queue(&self, queue: &str) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO stampeded_queue_policies (queue, paused) VALUES ($1, true) \
+             ON CONFLICT (queue) DO UPDATE SET paused = true, updated_at = now()",
+        )
+        .bind(queue)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Every paused queue, by name.
+    pub async fn paused_queues(&self) -> Result<Vec<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT queue FROM stampeded_queue_policies WHERE paused ORDER BY queue",
+        )
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Hand out a paused queue's jobs again; a queue that is not paused is left alone.
+    pub async fn resume_queue(&self, queue: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE stampeded_queue_policies SET paused = false, updated_at = now() \
+              WHERE queue = $1 AND paused",
+        )
+        .bind(queue)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     /// Ensure a queue has its own partition, with the settings a partition cannot inherit.
