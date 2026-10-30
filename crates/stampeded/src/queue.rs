@@ -511,21 +511,20 @@ impl Queue {
     /// Partitions without the wakeup trigger (made outside `stampeded_create_queue`), whose
     /// jobs are claimed only on the poll interval.
     pub async fn partitions_without_wakeup(&self) -> Result<Vec<String>> {
-        let rows: Vec<(String,)> = sqlx::query_as(
+        Ok(sqlx::query_scalar(
             "SELECT partition FROM stampeded_partition_health() WHERE NOT has_notify",
         )
         .fetch_all(&self.pool)
-        .await?;
-        Ok(rows.into_iter().map(|(n,)| n).collect())
+        .await?)
     }
 
     /// Indexes sparse enough to be worth rebuilding.
     pub async fn sparse_indexes(&self) -> Result<Vec<String>> {
-        let rows: Vec<(String,)> =
-            sqlx::query_as("SELECT indexname FROM stampeded_index_density() WHERE sparse")
+        Ok(
+            sqlx::query_scalar("SELECT indexname FROM stampeded_index_density() WHERE sparse")
                 .fetch_all(&self.pool)
-                .await?;
-        Ok(rows.into_iter().map(|(n,)| n).collect())
+                .await?,
+        )
     }
 
     /// Rebuild one index without blocking writes; CONCURRENTLY cannot run in a transaction.
@@ -635,12 +634,11 @@ impl Queue {
 
     /// Every queue that has rows, from the counters.
     pub async fn queues(&self) -> Result<Vec<String>> {
-        let rows: Vec<(String,)> = sqlx::query_as(
+        Ok(sqlx::query_scalar(
             "SELECT DISTINCT queue FROM stampeded_queue_counts WHERE n <> 0 ORDER BY 1",
         )
         .fetch_all(&self.pool)
-        .await?;
-        Ok(rows.into_iter().map(|(q,)| q).collect())
+        .await?)
     }
 
     /// Schedules and when they next fire.

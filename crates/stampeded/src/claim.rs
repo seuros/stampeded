@@ -222,14 +222,13 @@ impl Claimer {
 impl Queue {
     /// Every queue with claimable work, from the trigger-kept counter table, not a jobs scan.
     pub async fn queues_with_work(&self) -> Result<Vec<String>> {
-        let rows: Vec<(String,)> = sqlx::query_as(
+        Ok(sqlx::query_scalar(
             "SELECT DISTINCT queue FROM stampeded_queue_counts \
               WHERE state IN ('available', 'retryable') AND n > 0 \
               ORDER BY queue",
         )
         .fetch_all(self.pool())
-        .await?;
-        Ok(rows.into_iter().map(|(q,)| q).collect())
+        .await?)
     }
 
     /// Each queue's policy cap and verdict; `steady` once older than [`VERDICT_TTL`].
