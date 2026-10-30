@@ -78,8 +78,8 @@ module Stampeded
       nil
     end
 
+    # `args` as `recurring` takes them: a Hash is keywords, anything else positional.
     def envelope(job_class, args, queue, priority)
-      task = job_class.try(:stampeded_task)
       context = {
         "job_class" => job_class.name,
         "queue_name" => queue,
@@ -88,15 +88,8 @@ module Stampeded
         "timezone" => defined?(Time.zone) && Time.zone ? Time.zone.name : "UTC"
       }
 
-      kwargs = args.is_a?(Hash) ? args : ({} if Array(args).empty?)
-      if kwargs && Envelope.plain?(kwargs)
-        [task || job_class.name, JSON.parse(JSON.generate(kwargs)), { "activejob" => context }]
-      elsif task
-        raise PortableArgumentsError.new(job_class.name, task)
-      else
-        context["arguments"] = ActiveJob::Arguments.serialize(Array(args))
-        [job_class.name, {}, { "activejob" => context }]
-      end
+      arguments = args.is_a?(Hash) ? [Hash.ruby2_keywords_hash(args)] : Array(args)
+      Envelope.build(job_class, arguments, context)
     end
   end
 end

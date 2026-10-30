@@ -21,17 +21,22 @@ module Stampeded
     end
 
     def from_active_job(job)
-      task = job.class.try(:stampeded_task)
-      context = job.serialize.except("arguments", "provider_job_id")
-      kwargs = standard_arguments(job.arguments)
+      build(job.class, job.arguments, job.serialize.except("arguments", "provider_job_id"))
+    end
+
+    # [task, args, meta] for `arguments` as `perform` takes them: plain keywords
+    # become portable `args`, anything else rides in ActiveJob's own format.
+    def build(job_class, arguments, context)
+      task = job_class.try(:stampeded_task)
+      kwargs = standard_arguments(arguments)
 
       if kwargs
-        [task || job.class.name, kwargs, { "activejob" => context }]
+        [task || job_class.name, kwargs, { "activejob" => context }]
       elsif task
-        raise PortableArgumentsError.new(job.class.name, task)
+        raise PortableArgumentsError.new(job_class.name, task)
       else
-        context["arguments"] = ActiveJob::Arguments.serialize(job.arguments)
-        [job.class.name, {}, { "activejob" => context }]
+        context["arguments"] = ActiveJob::Arguments.serialize(arguments)
+        [job_class.name, {}, { "activejob" => context }]
       end
     end
 

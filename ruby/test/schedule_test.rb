@@ -8,6 +8,10 @@ class NightlyJob < ActiveJob::Base
   def perform(*args) = CRON_RAN << args
 end
 
+class DueAtJob < ActiveJob::Base
+  def perform(at:) = CRON_RAN << at
+end
+
 class ScheduleTest < Minitest::Test
   include StampededTest::Isolation
 
@@ -46,10 +50,9 @@ class ScheduleTest < Minitest::Test
     assert_nil meta.dig("activejob", "job_id")
   end
 
-  def test_a_fired_occurrence_is_executed_by_the_worker
-    Stampeded::Schedule.recurring(key: "n", job: NightlyJob, cron: "* * * * *", args: ["cron"])
+  # Fires every schedule now and runs the worker until one job has performed.
+  def fire_and_perform
     conn { |c| c.exec("UPDATE stampeded_schedules SET next_run_at = now() - interval '1 minute'") }
-
     fired = conn do |c|
       rows = c.exec("SELECT * FROM stampeded_claim_due_schedules(10)")
       rows.map { |r| c.exec_params("SELECT stampeded_fire_schedule($1, now() + interval '1 hour')", [r["key"]]) }
@@ -64,10 +67,23 @@ class ScheduleTest < Minitest::Test
     worker.stop
     t.join(5)
 
-    refute_empty CRON_RAN, "the occurrence was never executed"
-    assert_equal ["cron"], CRON_RAN.pop
+    refute_empty CRON_RAN, "the occurrence was never performed"
+    CRON_RAN.pop
   ensure
     t&.kill
+  end
+
+  def test_a_fired_occurrence_is_executed_by_the_worker
+    Stampeded::Schedule.recurring(key: "n", job: NightlyJob, cron: "* * * * *", args: ["cron"])
+
+    assert_equal ["cron"], fire_and_perform
+  end
+
+  def test_keyword_arguments_that_are_not_plain_json_arrive_as_keywords
+    at = Time.utc(2026, 10, 30, 3)
+    Stampeded::Schedule.recurring(key: "n", job: DueAtJob, cron: "* * * * *", args: { at: at })
+
+    assert_equal at, fire_and_perform
   end
 
   def test_the_job_id_is_filled_from_the_row_so_it_is_unique_per_occurrence
