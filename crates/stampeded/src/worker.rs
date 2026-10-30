@@ -3,7 +3,7 @@
 
 use crate::claim::Claimer;
 use crate::error::{Error, Result};
-use crate::fairness::{Fairness, TenantLimit};
+use crate::fairness::{Fairness, TenantLimit, now_secs};
 use crate::job::{FailureKind, Job};
 use crate::metrics::{Metrics, label, names};
 use crate::queue::Queue;
@@ -198,13 +198,6 @@ impl Default for WorkerConfig {
             shutdown_timeout: Duration::from_secs(25),
         }
     }
-}
-
-/// Monotonic-ish seconds for the GCRA gate. Same clock the fairness gate uses.
-fn now_secs() -> f64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0.0, |d| d.as_secs_f64())
 }
 
 /// Used when a backoff policy declines to produce a delay.

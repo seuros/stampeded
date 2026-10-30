@@ -944,9 +944,7 @@ async fn build_world_state(state: &ApiState) -> GameWorld {
         queues,
         workers,
         destinations,
-        timestamp_ms: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
+        timestamp_ms: u64::try_from(jiff::Timestamp::now().as_millisecond()).unwrap_or(0),
     }
 }
 

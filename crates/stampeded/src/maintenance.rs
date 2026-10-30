@@ -365,16 +365,12 @@ fn is_statement_timeout(e: &crate::Error) -> bool {
         .as_deref() == Some("57014"))
 }
 
-/// A duration roughly uniform in `[min, max)`, seeded from the clock's nanoseconds.
+/// A duration uniform in `[min, max)`; `min` when the range is empty.
 fn jittered(min: Duration, max: Duration) -> Duration {
-    let span = max.saturating_sub(min);
-    if span.is_zero() {
+    if max <= min {
         return min;
     }
-    let n = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| u64::from(d.subsec_nanos()));
-    min + Duration::from_nanos_u128(u128::from(n) % span.as_nanos().max(1))
+    chrono_machines::rand::random_range(min..max)
 }
 
 /// Fire due recurring schedules; SKIP LOCKED on the schedule row makes it safe on every node.

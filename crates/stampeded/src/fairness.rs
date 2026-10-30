@@ -1,8 +1,8 @@
 //! Per-tenant admission control (GCRA), so one noisy tenant cannot starve the rest.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{LazyLock, Mutex};
+use std::time::Instant;
 use throttle_machines::gate::Gate;
 use throttle_machines::gcra::{Gcra, GcraParams};
 
@@ -104,10 +104,11 @@ impl Admission {
     }
 }
 
-fn now_secs() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0.0, |d| d.as_secs_f64())
+/// Seconds on a monotonic clock, for the in-process GCRA gates. Not the wall clock:
+/// NTP stepping it back would make every tenant, and the claim pacer, wait out the step.
+pub(crate) fn now_secs() -> f64 {
+    static START: LazyLock<Instant> = LazyLock::new(Instant::now);
+    START.elapsed().as_secs_f64()
 }
 
 #[cfg(test)]
