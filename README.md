@@ -104,6 +104,15 @@ arguments become `args`. See [ruby/README.md](https://github.com/seuros/stampede
 
 ## Other languages
 
+| | binding | maintainer |
+|---|---|---|
+| Rust | [`stampeded`](https://crates.io/crates/stampeded) | [@seuros](https://github.com/seuros) |
+| Ruby | [`stampeded`](https://rubygems.org/gems/stampeded) | [@seuros](https://github.com/seuros) |
+| Go | [`github.com/seuros/stampeded/go`](https://github.com/seuros/stampeded/tree/master/go) | [@seuros](https://github.com/seuros) |
+| .NET | [Stampeded.NET](https://github.com/Mourad-Azouga/stampeded-dotnet) | [@Mourad-Azouga](https://github.com/Mourad-Azouga) |
+
+Bindings maintained outside this repository take their issues in their own.
+
 `libstampeded_ffi` exposes enqueueing and pulling over a C ABI, for any
 language with a C FFI. The header is
 [`crates/stampeded-ffi/include/stampeded.h`](https://github.com/seuros/stampeded/blob/master/crates/stampeded-ffi/include/stampeded.h).
