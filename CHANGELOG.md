@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.5.0](https://github.com/seuros/stampeded/compare/stampeded-v0.4.1...stampeded-v0.5.0) (2026-10-30)
+
+
+### ⚠ BREAKING CHANGES
+
+* public API changes since 0.4.1. ApiState::dashboard_guard is gone (the DashboardToken layer guards the dashboard); game::GameParams is gone and dashboard::index, game::index and game::stream lost their token parameters. JobLifecycleEvent has a Resurrect variant, EVENTS has eight entries, and stampeded_lifecycle_events() lists "resurrect". QueueSnapshot has a `paused` field. The daemon's planner reads schema 7: run it with --migrate.
+
+### Features
+
+* pause a queue ([e0d13c7](https://github.com/seuros/stampeded/commit/e0d13c72a5d0cb3a188f5d4328cef7941bfb147e))
+
+
+### Bug Fixes
+
+* a resurrected job gets every budget back ([d80729b](https://github.com/seuros/stampeded/commit/d80729bd71e65dd0ac60a33c5494349f1068e2e5))
+* an unknown schedule timezone no longer stops every schedule ([3381671](https://github.com/seuros/stampeded/commit/3381671656d36afa2beeb60feca317f9fdb84b4d))
+* build without libclang by taking only the rama features in use ([78dff18](https://github.com/seuros/stampeded/commit/78dff1818371737e8e6b0e4063d60761b322c5aa))
+* **ruby:** log worker failures when stdout is not a terminal ([43322f7](https://github.com/seuros/stampeded/commit/43322f7b54f20c2ef3ec9cfeeb1d495141248eb5))
+* **ruby:** recurring keyword arguments arrive as keywords ([eacf29c](https://github.com/seuros/stampeded/commit/eacf29c515f706f437822cfa51d2adf47d5a5bdd))
+* **ruby:** resolve a schedule's queue_as with its arguments ([a571f50](https://github.com/seuros/stampeded/commit/a571f50f0b4195767e2dbe5f4edce68492c6d9a9))
+
 ## [0.4.1](https://github.com/seuros/stampeded/compare/stampeded-v0.4.0...stampeded-v0.4.1) (2026-10-29)
 
 
