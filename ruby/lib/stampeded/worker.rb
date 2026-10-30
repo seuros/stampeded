@@ -17,6 +17,8 @@ module Stampeded
       @batch_size   = positive!(batch_size || Stampeded.config.batch_size, "batch_size")
       @poll_interval = poll_interval || Stampeded.config.poll_interval
       @handlers     = {}
+      @warned       = {}
+      @warned_lock  = Mutex.new
       @stopping     = false
       @wake_reader, @wake_writer = IO.pipe
     end
@@ -57,8 +59,8 @@ module Stampeded
 
       stragglers = @threads.count(&:alive?)
       if stragglers.positive?
-        log "#{stragglers} job(s) did not finish in #{Stampeded.config.shutdown_timeout}s; " \
-            "the reaper will reclaim them"
+        problem "#{stragglers} job(s) did not finish in #{Stampeded.config.shutdown_timeout}s; " \
+                "the reaper will reclaim them"
       end
       log "stopped"
     ensure
@@ -66,7 +68,7 @@ module Stampeded
       begin
         puller.stop(0) if puller && !stopped
       rescue Error => e
-        log "could not stop: #{e.message}"
+        problem "could not stop: #{e.message}"
       end
       @threads&.each { |t| t.join(@poll_interval * 2) }
       puller&.close if @threads.nil? || @threads.none?(&:alive?)
@@ -105,7 +107,7 @@ module Stampeded
             begin
               puller.next(@poll_interval)
             rescue Error => e
-              log "claim failed: #{e.message}"
+              problem "claim failed: #{e.message}"
               sleep @poll_interval
               next
             end
@@ -146,7 +148,7 @@ module Stampeded
       else lease.fail!(message, retry_in_ms: error.is_a?(RetryIn) ? error.delay_ms : nil)
       end
     rescue Error => e
-      log "could not report #{lease.row["id"]}: #{e.message}"
+      problem "could not report #{lease.row["id"]}: #{e.message}"
     end
 
     def with_job_timeout(job, &block)
@@ -155,7 +157,9 @@ module Stampeded
 
       expire = (job.row["expire_seconds"] || 3600).to_i
       if limit >= expire
-        log "job_timeout (#{limit}s) is not shorter than #{job.task}'s expire_seconds (#{expire}s): it may run twice"
+        once([job.task, expire]) do
+          problem "job_timeout (#{limit}s) is not shorter than #{job.task}'s expire_seconds (#{expire}s): it may run twice"
+        end
       end
 
       Timeout.timeout(limit, Timeout::Error, "job exceeded job_timeout of #{limit}s", &block)
@@ -215,10 +219,19 @@ module Stampeded
       log? ? "info" : "warn"
     end
 
+    # Progress: each job, start and stop. Only when asked for, or on a terminal.
     def log(message)
       return unless log?
 
       warn "[stampeded] #{message}"
+    end
+
+    # Something an operator must see, which a service manager's stdout is not.
+    def problem(message) = warn("[stampeded] #{message}")
+
+    def once(key)
+      first = @warned_lock.synchronize { @warned[key] ? false : (@warned[key] = true) }
+      yield if first
     end
   end
 end

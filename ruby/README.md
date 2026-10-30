@@ -164,8 +164,9 @@ config.except_queues = %w[payments_dlq]    # with :all
 - `SIGTERM` lets in-flight jobs finish before exiting. Jobs still running after
   `shutdown_timeout` are reclaimed by the daemon.
 - The worker runs on `libstampeded_ffi`, the same core every runtime's worker
-  uses; see [The binaries](#the-binaries). `STAMPEDED_LOG=1` logs each job;
-  `STAMPEDED_LOG=debug` (or `info`, `warn`, ...) also sets the core's level.
+  uses; see [The binaries](#the-binaries). Failures to claim or report go to
+  stderr always; `STAMPEDED_LOG=1` also logs each job, and
+  `STAMPEDED_LOG=debug` (or `info`, `warn`, ...) sets the core's level.
 
 ## Queue policies
 

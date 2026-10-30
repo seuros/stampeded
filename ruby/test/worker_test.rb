@@ -3,8 +3,19 @@
 require "test_helper"
 require "time"
 
+# As under systemd or k8s: stdout is no terminal and STAMPEDED_LOG is unset.
+module QuietWorker
+  def quietly(&)
+    saved = ENV.delete("STAMPEDED_LOG")
+    capture_io(&)
+  ensure
+    ENV["STAMPEDED_LOG"] = saved if saved
+  end
+end
+
 class WorkerTest < Minitest::Test
   include StampededTest::Isolation
+  include QuietWorker
 
   def run_worker(worker, timeout: 10, &until_done)
     thread = Thread.new { worker.run }
@@ -143,7 +154,19 @@ class WorkerTest < Minitest::Test
     Stampeded.config.job_timeout = 900.0
   end
 
+  def test_a_timeout_the_database_would_expire_first_is_warned_once_even_when_quiet
+    Stampeded.config.job_timeout = 5.0
+    2.times { Stampeded.enqueue(queue: "default", task: "short_lived", expire_seconds: 2) }
 
+    ran = Queue.new
+    worker = Stampeded::Worker.new(queue: "default", poll_interval: 0.05)
+    worker.register("short_lived") { ran << true }
+    _, err = quietly { run_worker(worker) { ran.size >= 2 } }
+
+    assert_equal 1, err.scan(/it may run twice/).size, err
+  ensure
+    Stampeded.config.job_timeout = 900.0
+  end
 
   def test_a_handler_can_choose_its_own_retry_delay
     id = Stampeded.enqueue(queue: "default", task: "ratelimited", max_attempts: 5)
@@ -240,5 +263,21 @@ class WorkerValidationTest < Minitest::Test
   ensure
     Stampeded.config.queues = nil
   end
+end
 
+class WorkerProblemsTest < Minitest::Test
+  include QuietWorker
+
+  # MOCKED: a lease whose outcome cannot reach the database.
+  Unreportable = Struct.new(:row) do
+    def complete! = raise(Stampeded::Error, "connection reset by peer")
+  end
+
+  def test_an_outcome_that_cannot_be_reported_is_logged_even_when_quiet
+    worker = Stampeded::Worker.new(queue: "default")
+    out, err = quietly { worker.send(:report, Unreportable.new({ "id" => "j1" }), nil) }
+
+    assert_match(/could not report j1: connection reset by peer/, err)
+    assert_empty out
+  end
 end
