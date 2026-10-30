@@ -259,36 +259,34 @@ async fn depth_reports_by_state() {
 }
 
 #[tokio::test]
-async fn the_dashboard_is_not_served_without_a_token() {
-    // Secure by default: the dashboard shows job args and offers a retry button.
+async fn every_dashboard_page_and_stream_needs_the_token() {
+    // Secure by default: the dashboard shows job args and offers a retry button,
+    // and a gated page with an open stream would only look protected.
     let (addr, _q, tx) = server!();
 
-    let (status, _) = request(&addr, "GET", "/dashboard", None).await;
-    assert_eq!(status, 404, "no token presented");
+    let mut gated = vec!["/dashboard", "/dashboard/stream"];
+    if cfg!(feature = "game") {
+        gated.extend(["/game", "/game/stream"]);
+    }
+    for path in gated {
+        for query in [
+            "",
+            "?token=",
+            "?token=wrong",
+            "?token=s3cre",
+            "?token=s3cret2",
+        ] {
+            // 404, not 401: an unauthenticated caller must not learn a dashboard exists.
+            let (status, _) = request(&addr, "GET", &format!("{path}{query}"), None).await;
+            assert_eq!(status, 404, "{path}{query}");
+        }
+    }
 
-    let (status, _) = request(&addr, "GET", "/dashboard?token=wrong", None).await;
-    assert_eq!(status, 404, "wrong token");
-
-    // 404, not 401: an unauthenticated caller must not learn a dashboard exists.
     let (status, body) = request(&addr, "GET", "/dashboard?token=s3cret", None).await;
     assert_eq!(status, 200);
     assert!(
         body.contains("Stampeded"),
         "the real dashboard should render"
-    );
-
-    let _ = tx.send(true);
-}
-
-#[tokio::test]
-async fn the_dashboard_stream_is_gated_too() {
-    // A gated page with an open stream would only look protected.
-    let (addr, _q, tx) = server!();
-
-    let (status, _) = request(&addr, "GET", "/dashboard/stream", None).await;
-    assert_eq!(
-        status, 404,
-        "the SSE stream must be gated as well as the page"
     );
 
     let _ = tx.send(true);

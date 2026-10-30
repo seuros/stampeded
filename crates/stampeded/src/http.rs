@@ -23,41 +23,54 @@ pub async fn serve(
     state: ApiState,
     mut shutdown: watch::Receiver<bool>,
 ) -> crate::Result<()> {
+    use api::DashboardToken;
     use rama::Layer;
     use rama::graceful::Shutdown;
     use rama::http::layer::error_handling::ErrorHandlerLayer;
+    #[cfg(feature = "game")]
+    use rama::http::service::web::extract::Path;
+    use rama::http::service::web::router::DefaultEndpointLayer;
     use rama::layer::ArcLayer;
     use rama::rt::Executor;
     use rama::tcp::server::TcpListener;
     use rama_http_backend::server::HttpServer;
 
     let app_router = {
+        // Static assets are public; the pages that load them are not.
         let r = router(state.clone())
-            .with_get("/dashboard", dashboard::index)
-            .with_get("/dashboard/stream", dashboard::stream)
             // Datastar served from the binary, not a CDN.
             .with_get("/dashboard/datastar.js", dashboard::script)
             .with_get("/dashboard/datastar.js.map", dashboard::script_map);
 
         #[cfg(feature = "game")]
-        {
-            r.with_get("/game", game::index)
-                .with_get("/game/stream", game::stream)
-                .with_get("/game/three.module.min.js", game::three_module)
-                .with_get("/game/three.core.min.js", game::three_core)
-                .with_get("/game/loaders/gltf-loader.js", game::gltf_loader)
-                .with_get("/game/utils/BufferGeometryUtils.js", game::buffer_geometry_utils)
-                .with_get("/game/utils/SkeletonUtils.js", game::skeleton_utils)
-                .with_get("/game/models/Textures/colormap.png", game::model_texture)
-                .with_get("/game/models/{name}", |rama::http::service::web::extract::Path(name): rama::http::service::web::extract::Path<String>| async move {
-                    game::model(&name)
-                })
-        }
+        let r = r
+            .with_get("/game/three.module.min.js", game::three_module)
+            .with_get("/game/three.core.min.js", game::three_core)
+            .with_get("/game/loaders/gltf-loader.js", game::gltf_loader)
+            .with_get(
+                "/game/utils/BufferGeometryUtils.js",
+                game::buffer_geometry_utils,
+            )
+            .with_get("/game/utils/SkeletonUtils.js", game::skeleton_utils)
+            .with_get("/game/models/Textures/colormap.png", game::model_texture)
+            .with_get(
+                "/game/models/{name}",
+                |Path(name): Path<String>| async move { game::model(&name) },
+            );
 
-        #[cfg(not(feature = "game"))]
-        {
-            r
-        }
+        // Every route from here on shows job data, so answers only with the token.
+        let r = r.with_endpoint_layer((
+            DashboardToken::layer(state.clone()),
+            DefaultEndpointLayer::default(),
+        ));
+
+        #[cfg(feature = "game")]
+        let r = r
+            .with_get("/game", game::index)
+            .with_get("/game/stream", game::stream);
+
+        r.with_get("/dashboard", dashboard::index)
+            .with_get("/dashboard/stream", dashboard::stream)
     };
 
     // Router is neither Clone nor infallible; ArcLayer and ErrorHandlerLayer fix both.

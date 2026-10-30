@@ -4,14 +4,15 @@
 
 use crate::{NewJob, Period, Queue};
 use rama::futures::stream;
-use rama::http::StatusCode;
 use rama::http::header;
+use rama::http::layer::validate_request::{ValidateRequest, ValidateRequestHeaderLayer};
 use rama::http::service::web::Router;
 use rama::http::service::web::extract::body::Json as JsonBody;
-use rama::http::service::web::extract::{Path, State};
+use rama::http::service::web::extract::{Path, Query, State};
 use rama::http::service::web::response::{IntoResponse, Json, Sse};
 use rama::http::sse::Event;
 use rama::http::sse::server::KeepAlive;
+use rama::http::{Body, Request, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -115,14 +116,40 @@ impl ApiState {
         }
         a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
     }
+}
 
-    /// `Some(404)` if unauthorised; 404, not 401, so as not to reveal that a dashboard exists.
-    pub fn dashboard_guard(&self, presented: Option<&str>) -> Option<rama::http::Response> {
-        if self.dashboard_authorised(presented) {
-            None
+/// Lets a request through only with the dashboard token as `?token=`. A layer, so a
+/// page or stream cannot forget to ask; 404, not 401, so as not to reveal that a
+/// dashboard exists.
+#[derive(Clone)]
+pub struct DashboardToken(ApiState);
+
+impl DashboardToken {
+    pub fn layer(state: ApiState) -> ValidateRequestHeaderLayer<Self> {
+        ValidateRequestHeaderLayer::custom(Self(state))
+    }
+}
+
+#[derive(Deserialize)]
+struct Presented {
+    token: Option<String>,
+}
+
+impl ValidateRequest<Body> for DashboardToken {
+    type ResponseBody = Body;
+
+    fn validate(
+        &self,
+        req: Request,
+    ) -> impl Future<Output = Result<Request, Response>> + Send + '_ {
+        let presented = Query::<Presented>::try_from_uri(req.uri())
+            .ok()
+            .and_then(|Query(p)| p.token);
+        std::future::ready(if self.0.dashboard_authorised(presented.as_deref()) {
+            Ok(req)
         } else {
-            Some((StatusCode::NOT_FOUND, "not found").into_response())
-        }
+            Err((StatusCode::NOT_FOUND, "not found").into_response())
+        })
     }
 }
 

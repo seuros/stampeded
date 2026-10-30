@@ -200,11 +200,7 @@ impl Params {
     }
 }
 
-pub async fn index(State(state): State<ApiState>, Query(p): Query<Params>) -> impl IntoResponse {
-    if let Some(resp) = state.dashboard_guard(p.token.as_deref()) {
-        return resp.into_response();
-    }
-
+pub async fn index(Query(p): Query<Params>) -> impl IntoResponse {
     Html(
         INDEX
             .replace("__TOKEN__", &p.tok())
@@ -217,10 +213,6 @@ pub async fn index(State(state): State<ApiState>, Query(p): Query<Params>) -> im
 
 /// The live stream, polled so dashboard load stays off the workers' NOTIFY channel.
 pub async fn stream(State(state): State<ApiState>, Query(p): Query<Params>) -> impl IntoResponse {
-    if let Some(resp) = state.dashboard_guard(p.token.as_deref()) {
-        return resp.into_response();
-    }
-
     let ticks = stream::unfold(
         (state, p, Vec::<Event<PatchElements>>::new(), true),
         move |(state, p, mut pending, first)| async move {

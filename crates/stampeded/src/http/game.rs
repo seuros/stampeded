@@ -6,24 +6,18 @@ use super::ApiState;
 use rama::futures::stream;
 use rama::http::StatusCode;
 use rama::http::header;
-use rama::http::service::web::extract::{Query, State};
+use rama::http::service::web::extract::State;
 use rama::http::service::web::response::Sse;
 use rama::http::service::web::response::{Html, IntoResponse};
 use rama::http::sse::Event;
 use rama::http::sse::server::KeepAlive;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
-
-#[derive(Debug, Deserialize, Default)]
-pub struct GameParams {
-    #[serde(default)]
-    pub token: Option<String>,
-}
 
 /// The game world as JSON state, streamed live.
 #[derive(Debug, Serialize, Clone)]
@@ -692,14 +686,8 @@ window.addEventListener("resize", () => {
 </body>
 </html>"#;
 
-pub async fn index(
-    State(state): State<ApiState>,
-    Query(p): Query<GameParams>,
-) -> impl IntoResponse {
-    if let Some(resp) = state.dashboard_guard(p.token.as_deref()) {
-        return resp.into_response();
-    }
-    Html(INDEX).into_response()
+pub async fn index() -> impl IntoResponse {
+    Html(INDEX)
 }
 
 /// A single world feed shared by every viewer, polled while anyone watches.
@@ -771,14 +759,7 @@ fn world_feed(state: &ApiState) -> watch::Receiver<Arc<GameWorld>> {
     rx
 }
 
-pub async fn stream(
-    State(state): State<ApiState>,
-    Query(p): Query<GameParams>,
-) -> impl IntoResponse {
-    if let Some(resp) = state.dashboard_guard(p.token.as_deref()) {
-        return resp.into_response();
-    }
-
+pub async fn stream(State(state): State<ApiState>) -> impl IntoResponse {
     // Subscribe to the shared feed; do not start a private poll loop.
     let ticks = stream::unfold(
         (world_feed(&state), true),
