@@ -140,31 +140,9 @@ fn the_wakeup_cooldown_does_not_cap_the_claim() {
     );
 }
 
-// MOCKED: stands in for the embedder's subscriber; keeps each event's level, ignores spans.
-#[derive(Default)]
-struct Levels(std::sync::Mutex<Vec<tracing::Level>>);
-
-impl tracing::Subscriber for Levels {
-    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-        true
-    }
-    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        tracing::span::Id::from_u64(1)
-    }
-    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-    fn event(&self, event: &tracing::Event<'_>) {
-        self.0
-            .lock()
-            .expect("levels poisoned")
-            .push(*event.metadata().level());
-    }
-    fn enter(&self, _: &tracing::span::Id) {}
-    fn exit(&self, _: &tracing::span::Id) {}
-}
-
 #[test]
 fn a_deferral_logs_at_debug_unless_it_discarded_the_job() {
+    use crate::test_support::Levels;
     use tracing::Level;
     // Deferrals log at debug so they do not bury real failures; a discard still warns.
     let job = job_with_backoff(SCHEMA_BACKOFF_BASE_MS, SCHEMA_BACKOFF_MAX_MS, 1);
@@ -179,11 +157,9 @@ fn a_deferral_logs_at_debug_unless_it_discarded_the_job() {
         (FailureKind::Unrecoverable, true, Level::WARN),
     ];
     for (kind, discarded, expected) in cases {
-        let levels = Arc::new(Levels::default());
-        tracing::subscriber::with_default(Arc::clone(&levels), || {
+        let ((), seen) = Levels::during(|| {
             log_failure(&job, kind, "boom", Some(Duration::from_secs(1)), discarded);
         });
-        let seen = levels.0.lock().expect("levels poisoned").clone();
         assert_eq!(seen, [expected], "{kind}, discarded: {discarded}");
     }
 }

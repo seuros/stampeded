@@ -697,6 +697,44 @@ async fn paused_schedules_never_fire() {
     assert_eq!(q.run_due_schedules(10).await.unwrap(), 0);
 }
 
+#[tokio::test]
+async fn an_unknown_timezone_fires_in_utc_and_does_not_stop_the_others() {
+    let q = q!();
+    q.upsert_schedule("good", "default", "tick", Duration::from_secs(60))
+        .await
+        .unwrap();
+    // Written in SQL, as the README shows, so nothing checked the zone on the way in.
+    sqlx::query(
+        "INSERT INTO stampeded_schedules (key, queue, task, cron_expr, timezone, dst_policy) \
+         VALUES ('typo', 'default', 'nightly', '0 3 * * *', 'Africa/Casablnca', 'wall_clock')",
+    )
+    .execute(q.pool())
+    .await
+    .unwrap();
+    sqlx::query("UPDATE stampeded_schedules SET next_run_at = now() - interval '1 minute'")
+        .execute(q.pool())
+        .await
+        .unwrap();
+
+    // A wall-clock key in a zone Postgres rejects used to roll back the whole tick.
+    assert_eq!(q.run_due_schedules(10).await.unwrap(), 2);
+
+    let tasks: Vec<String> = sqlx::query_scalar("SELECT task FROM stampeded_jobs ORDER BY task")
+        .fetch_all(q.pool())
+        .await
+        .unwrap();
+    assert_eq!(tasks, ["nightly", "tick"]);
+    // Firing in the wrong zone beats never firing: the next run is 03:00 UTC.
+    let next: String = sqlx::query_scalar(
+        "SELECT to_char(next_run_at AT TIME ZONE 'UTC', 'HH24:MI') \
+           FROM stampeded_schedules WHERE key = 'typo'",
+    )
+    .fetch_one(q.pool())
+    .await
+    .unwrap();
+    assert_eq!(next, "03:00");
+}
+
 // ------------------------------------------------------ failure accounting
 
 #[tokio::test]

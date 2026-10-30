@@ -17,6 +17,8 @@ pub mod queue;
 pub mod queues;
 pub mod schedule;
 pub mod steps;
+#[cfg(test)]
+mod test_support;
 mod timestamp;
 pub mod wakeup;
 pub mod worker;

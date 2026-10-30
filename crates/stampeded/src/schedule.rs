@@ -33,7 +33,7 @@ impl Schedule {
 
     /// When this schedule should fire after `next_run_at`; stepping from the target avoids drift.
     pub fn next_after(&self, now: Timestamp) -> Result<Timestamp> {
-        let tz = TimeZone::get(&self.timezone).unwrap_or(TimeZone::UTC);
+        let tz = self.zone();
         let from = self.next_run_at.to_zoned(tz.clone());
         let now_z = now.to_zoned(tz.clone());
 
@@ -60,8 +60,22 @@ impl Schedule {
 
     /// The first firing after `now`, for a row written without a cron parser.
     pub fn first_after(&self, now: Timestamp) -> Result<Timestamp> {
-        let tz = TimeZone::get(&self.timezone).unwrap_or(TimeZone::UTC);
+        let tz = self.zone();
         Ok(self.step(&now.to_zoned(tz.clone()), &tz)?.timestamp())
+    }
+
+    /// The zone cron fields are read in. Firing in the wrong zone beats never firing,
+    /// so an unknown one is UTC, with a warning: a row written in SQL is never checked.
+    /// An interval adds plain seconds, so its zone never matters.
+    fn zone(&self) -> TimeZone {
+        if self.cron_expr.is_none() {
+            return TimeZone::UTC;
+        }
+        TimeZone::get(&self.timezone).unwrap_or_else(|e| {
+            warn!(key = %self.key, timezone = %self.timezone, error = %e,
+                  "unknown timezone; firing in UTC");
+            TimeZone::UTC
+        })
     }
 
     /// One step forward. The only place the two rule kinds differ.

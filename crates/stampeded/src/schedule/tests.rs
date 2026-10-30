@@ -139,15 +139,23 @@ fn a_bad_cron_expression_is_an_error_not_a_panic() {
 
 #[test]
 fn an_unknown_timezone_falls_back_to_utc_rather_than_failing() {
-    // Firing in the wrong zone beats never firing.
+    use crate::test_support::Levels;
+    use tracing::Level;
+    // Firing in the wrong zone beats never firing, but not silently.
     let s = cron(
         "0 3 * * *",
         "Mars/Olympus_Mons",
         "instant",
         "2026-09-17T03:00:00Z",
     );
-    assert_eq!(
-        s.next_after(at("2026-09-17T03:00:05Z")).unwrap(),
-        at("2026-09-18T03:00:00Z")
-    );
+    let (next, seen) = Levels::during(|| s.next_after(at("2026-09-17T03:00:05Z")));
+    assert_eq!(next.unwrap(), at("2026-09-18T03:00:00Z"));
+    assert_eq!(seen, [Level::WARN]);
+
+    // An interval's zone never matters, so it is not worth a warning.
+    let mut s = interval(3600, "2026-09-17T10:00:00Z");
+    s.timezone = "Mars/Olympus_Mons".into();
+    let (next, seen) = Levels::during(|| s.next_after(at("2026-09-17T10:00:40Z")));
+    assert_eq!(next.unwrap(), at("2026-09-17T11:00:00Z"));
+    assert!(seen.is_empty(), "warned for an interval: {seen:?}");
 }
