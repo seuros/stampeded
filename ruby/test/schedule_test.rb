@@ -12,6 +12,11 @@ class DueAtJob < ActiveJob::Base
   def perform(at:) = CRON_RAN << at
 end
 
+class RegionalJob < ActiveJob::Base
+  queue_as { "reports_#{arguments.first.fetch(:region)}" }
+  def perform(region:) = CRON_RAN << region
+end
+
 class ScheduleTest < Minitest::Test
   include StampededTest::Isolation
 
@@ -27,6 +32,16 @@ class ScheduleTest < Minitest::Test
     queue = conn { |c| c.exec("SELECT queue FROM stampeded_schedules")[0]["queue"] }
     refute_match(/Proc|lambda|0x/, queue, "queue name is a stringified lambda: #{queue}")
     assert_equal "default", queue
+  end
+
+  def test_a_queue_as_block_is_resolved_with_the_schedules_arguments
+    Stampeded::Schedule.recurring(key: "eu", job: RegionalJob, cron: "* * * * *", args: { region: "eu" })
+    assert_equal "reports_eu", conn { |c| c.exec("SELECT queue FROM stampeded_schedules")[0]["queue"] }
+
+    error = assert_raises(Stampeded::Error) do
+      Stampeded::Schedule.recurring(key: "none", job: RegionalJob, cron: "* * * * *")
+    end
+    assert_match(/queue_as.*pass queue:/m, error.message)
   end
 
   def test_a_recurring_job_stores_a_payload_the_worker_can_deserialise

@@ -135,7 +135,8 @@ Stampeded::Schedule.recurring(
 
 The daemon fires it; a new schedule first runs at its next occurrence. An
 expression that names its hours runs once on a DST fall-back day; one using `*`
-or a step runs on real elapsed time. `Stampeded::Schedule.pause`, `.remove` and
+or a step runs on real elapsed time. The queue is `queue:`, or the job's
+`queue_as` evaluated with `args`. `Stampeded::Schedule.pause`, `.remove` and
 `.all` manage them.
 
 ## Workers

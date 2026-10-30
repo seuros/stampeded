@@ -13,9 +13,11 @@ module Stampeded
       suggested = check_cron!(cron, timezone)
       dst_policy ||= suggested
       job_class = job.is_a?(Class) ? job : job.class
-      queue ||= resolve_queue_name(job_class) || Stampeded.config.default_queue
+      # As `perform` takes them: a Hash is keywords, anything else positional.
+      arguments = args.is_a?(Hash) ? [Hash.ruby2_keywords_hash(args)] : Array(args)
+      queue ||= resolve_queue_name(job_class, arguments) || Stampeded.config.default_queue
 
-      task, standard_args, meta = envelope(job_class, args, queue, priority)
+      task, standard_args, meta = envelope(job_class, arguments, queue, priority)
 
       Connection.with do |c|
         c.exec_params(<<~SQL, [key, queue, task, JSON.generate(standard_args), JSON.generate(meta), cron, timezone, dst_policy, priority])
@@ -68,18 +70,19 @@ module Stampeded
       MSG
     end
 
-    def resolve_queue_name(job_class)
+    # A `queue_as` block sees the schedule's arguments, which are the same every run.
+    def resolve_queue_name(job_class, arguments)
       return nil unless job_class.respond_to?(:queue_name)
 
       name = job_class.queue_name
-      name = job_class.new.queue_name if name.respond_to?(:call)
+      name = job_class.new(*arguments).queue_name if name.respond_to?(:call)
       name&.to_s
-    rescue StandardError
-      nil
+    rescue StandardError => e
+      raise Error, "#{job_class.name}'s queue_as raised #{e.class}: #{e.message}; " \
+                   "pass queue: to name the schedule's queue"
     end
 
-    # `args` as `recurring` takes them: a Hash is keywords, anything else positional.
-    def envelope(job_class, args, queue, priority)
+    def envelope(job_class, arguments, queue, priority)
       context = {
         "job_class" => job_class.name,
         "queue_name" => queue,
@@ -88,7 +91,6 @@ module Stampeded
         "timezone" => defined?(Time.zone) && Time.zone ? Time.zone.name : "UTC"
       }
 
-      arguments = args.is_a?(Hash) ? [Hash.ruby2_keywords_hash(args)] : Array(args)
       Envelope.build(job_class, arguments, context)
     end
   end
