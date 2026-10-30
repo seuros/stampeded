@@ -4,43 +4,15 @@
 //!   STAMPEDED_TEST_DATABASE_URL=postgres://ubuntu:ubuntu@localhost/stampeded_test \
 //!     cargo test -p stampeded --test schema
 
+mod common;
+
 use sqlx::{AssertSqlSafe, PgPool};
 use stampeded::schema;
-use uuid::Uuid;
 
-/// A pool on an empty schema of its own; `None` without the database.
+/// A pool on an empty schema of its own; `None` to skip.
 async fn empty() -> Option<PgPool> {
-    let Ok(url) = std::env::var("STAMPEDED_TEST_DATABASE_URL") else {
-        assert!(
-            std::env::var_os("CI").is_none(),
-            "STAMPEDED_TEST_DATABASE_URL is not set and CI is; refusing to skip"
-        );
-        eprintln!("skipping: STAMPEDED_TEST_DATABASE_URL not set");
-        return None;
-    };
-    let name = format!("t_{}", Uuid::now_v7().simple());
-    let admin = PgPool::connect(&url).await.expect("connect");
-    // UUID-derived, not user input.
-    sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {name}")))
-        .execute(&admin)
-        .await
-        .expect("create schema");
-    admin.close().await;
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(4)
-        .after_connect(move |conn, _| {
-            let name = name.clone();
-            Box::pin(async move {
-                sqlx::query(AssertSqlSafe(format!("SET search_path TO {name}")))
-                    .execute(conn)
-                    .await?;
-                Ok(())
-            })
-        })
-        .connect(&url)
-        .await
-        .expect("pool");
-    Some(pool)
+    let url = common::database_url()?;
+    Some(common::pool_on(&url, &common::fresh_schema(&url).await).await)
 }
 
 /// Schema 1's dedup key, before it named its period.

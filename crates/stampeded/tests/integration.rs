@@ -5,9 +5,9 @@
 
 mod common;
 
-use common::db_now;
+use common::{database_url, db_now, pool_on};
 use jiff::{SignedDuration, Timestamp};
-use sqlx::{AssertSqlSafe, PgPool};
+use sqlx::AssertSqlSafe;
 use stampeded::{
     DstPolicy, FailureKind, JobState, NewJob, Period, Queue, Wakeup, Worker, WorkerConfig,
 };
@@ -16,28 +16,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
-/// A pool whose every connection searches `search_path`.
-async fn pool_on(url: &str, search_path: String) -> PgPool {
-    sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .after_connect(move |conn, _| {
-            let search_path = search_path.clone();
-            Box::pin(async move {
-                sqlx::query(AssertSqlSafe(format!("SET search_path TO {search_path}")))
-                    .execute(conn)
-                    .await?;
-                Ok(())
-            })
-        })
-        .connect(url)
-        .await
-        .expect("pool")
-}
-
 /// `common::setup`, against a database whose clock runs `skew` ahead of ours.
 async fn setup_with_db_clock_ahead(skew: &str) -> Option<Queue> {
-    let url = std::env::var("STAMPEDED_TEST_DATABASE_URL").ok()?;
     let q = common::setup().await?;
+    let url = database_url()?;
     let schema: String = sqlx::query_scalar("SELECT current_schema()")
         .fetch_one(q.pool())
         .await
@@ -54,38 +36,16 @@ async fn setup_with_db_clock_ahead(skew: &str) -> Option<Queue> {
     // pg_catalog last, so the shadow wins every unqualified now(); column
     // defaults keep the real one.
     Some(Queue::new(
-        pool_on(&url, format!("{schema}, pg_catalog")).await,
+        pool_on(&url, &format!("{schema}, pg_catalog")).await,
     ))
 }
 
 /// `common::setup`, plus the URL a listener needs (its channels are schema-qualified).
 async fn setup_with_url() -> Option<(Queue, String)> {
-    let url = std::env::var("STAMPEDED_TEST_DATABASE_URL").ok()?;
     let q = common::setup().await?;
+    let url = database_url()?;
     q.create_queue("default").await.expect("create queue");
     Some((q, url))
-}
-
-macro_rules! q {
-    () => {
-        q!(common::setup())
-    };
-    ($setup:expr) => {
-        match $setup.await {
-            Some(q) => q,
-            None => {
-                // Never under CI: a suite that skips everything reports green.
-                assert!(
-                    std::env::var_os("CI").is_none(),
-                    "STAMPEDED_TEST_DATABASE_URL is not set and CI is. Refusing \
-                     to skip the integration tests and report success. Check \
-                     the Postgres service container."
-                );
-                eprintln!("skipping: STAMPEDED_TEST_DATABASE_URL not set");
-                return;
-            }
-        }
-    };
 }
 
 #[tokio::test]
@@ -1199,13 +1159,6 @@ async fn depth_of(q: &Queue, state: &str) -> i64 {
 async fn the_trigger_notifies_and_the_listener_hears_it() {
     // A plain INSERT runs none of our code, so the database itself must notify.
     let Some((q, url)) = setup_with_url().await else {
-        // As in q!: never skip under CI.
-        assert!(
-            std::env::var_os("CI").is_none(),
-            "STAMPEDED_TEST_DATABASE_URL is not set and CI is. Refusing to skip \
-             the integration tests and report success."
-        );
-        eprintln!("skipping: STAMPEDED_TEST_DATABASE_URL not set");
         return;
     };
     let (_tx, rx) = tokio::sync::watch::channel(false);

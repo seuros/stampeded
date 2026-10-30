@@ -1,7 +1,8 @@
 //! Wire-level tests: a real server on a real port, since unit tests cannot see
 //! routing. Skipped unless `STAMPEDED_TEST_DATABASE_URL` is set.
 
-use sqlx::{AssertSqlSafe, PgPool};
+mod common;
+
 use stampeded::{NewJob, Queue};
 use std::fmt::Write as _;
 use std::time::Duration;
@@ -12,34 +13,7 @@ use uuid::Uuid;
 
 /// A server on an ephemeral port and its own schema: (address, queue, shutdown).
 async fn serve() -> Option<(String, Queue, watch::Sender<bool>)> {
-    let url = std::env::var("STAMPEDED_TEST_DATABASE_URL").ok()?;
-
-    let schema = format!("w_{}", Uuid::now_v7().simple());
-    let admin = PgPool::connect(&url).await.expect("connect");
-    sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
-        .execute(&admin)
-        .await
-        .expect("create schema");
-    admin.close().await;
-
-    let sp = schema.clone();
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .after_connect(move |conn, _| {
-            let sp = sp.clone();
-            Box::pin(async move {
-                sqlx::query(AssertSqlSafe(format!("SET search_path TO {sp}")))
-                    .execute(conn)
-                    .await?;
-                Ok(())
-            })
-        })
-        .connect(&url)
-        .await
-        .expect("pool");
-
-    stampeded::schema::migrate(&pool).await.expect("migrate");
-    let queue = Queue::new(pool);
+    let queue = common::setup().await?;
     queue.create_queue("default").await.expect("create queue");
     queue.create_queue("dead").await.expect("create dlq");
 
@@ -69,20 +43,7 @@ async fn serve() -> Option<(String, Queue, watch::Sender<bool>)> {
 
 macro_rules! server {
     () => {
-        match serve().await {
-            Some(s) => s,
-            None => {
-                // Never under CI: a suite that skips everything reports green.
-                assert!(
-                    std::env::var_os("CI").is_none(),
-                    "STAMPEDED_TEST_DATABASE_URL is not set and CI is. Refusing \
-                     to skip the integration tests and report success. Check \
-                     the Postgres service container."
-                );
-                eprintln!("skipping: STAMPEDED_TEST_DATABASE_URL not set");
-                return;
-            }
-        }
+        q!(serve())
     };
 }
 

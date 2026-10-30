@@ -3,25 +3,15 @@
 //!   STAMPEDED_TEST_DATABASE_URL=postgres://ubuntu:ubuntu@localhost/stampeded_test \
 //!     cargo test -p stampeded --test connect
 
+mod common;
+
+use common::database_url;
 use sqlx::postgres::PgPoolOptions;
 use std::assert_matches;
 use std::time::{Duration, Instant};
 
 /// Far below the daemon's 10 s acquire timeout, far above a refused connect.
 const PROMPTLY: Duration = Duration::from_secs(5);
-
-/// `STAMPEDED_TEST_DATABASE_URL`, or `None` to skip -- except under CI.
-fn database_url() -> Option<String> {
-    let url = std::env::var("STAMPEDED_TEST_DATABASE_URL").ok();
-    if url.is_none() {
-        assert!(
-            std::env::var_os("CI").is_none(),
-            "STAMPEDED_TEST_DATABASE_URL is not set and CI is; refusing to skip"
-        );
-        eprintln!("skipping the database cases: STAMPEDED_TEST_DATABASE_URL not set");
-    }
-    url
-}
 
 #[tokio::test]
 async fn a_host_that_never_answers_times_out_saying_so() {
