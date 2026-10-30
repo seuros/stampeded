@@ -23,29 +23,29 @@ fn jobs_without_a_tenant_are_always_admitted() {
 }
 
 #[test]
-fn a_tenant_is_paced_to_its_rate() {
-    let f = limiter(10.0, 0.0); // one job per 100ms, no burst
-    assert!(f.admit_at("acme", 1.0).is_allowed());
-    // Immediately again: too soon.
-    assert!(!f.admit_at("acme", 1.0).is_allowed());
-    // After the emission interval: allowed.
-    assert!(f.admit_at("acme", 1.1).is_allowed());
-}
-
-#[test]
-fn burst_is_tolerated_then_the_smooth_rate_applies() {
-    let f = limiter(10.0, 3.0); // 3 jobs of slack
-    let mut allowed = 0;
-    for _ in 0..10 {
-        if f.admit_at("acme", 1.0).is_allowed() {
-            allowed += 1;
+fn a_limit_is_an_interval_per_job_with_burst_jobs_of_slack() {
+    // GCRA itself is throttle-machines'; what is ours is how a limit maps onto it.
+    let cases = [
+        // jobs_per_second, burst -> emission_interval, delay_tolerance
+        ((4.0, 0.0), (0.25, 0.0)),
+        ((4.0, 2.0), (0.25, 0.5)),
+        // A misconfigured 0 rps must not divide by zero or admit everything.
+        ((0.0, 0.0), (f64::MAX, 0.0)),
+    ];
+    for ((jobs_per_second, burst), (interval, tolerance)) in cases {
+        let p = TenantLimit {
+            jobs_per_second,
+            burst,
         }
+        .params();
+        assert!(
+            p.emission_interval.total_cmp(&interval).is_eq()
+                && p.delay_tolerance.total_cmp(&tolerance).is_eq(),
+            "{jobs_per_second} rps, burst {burst}: {} / {}",
+            p.emission_interval,
+            p.delay_tolerance
+        );
     }
-    // The burst lets a few through at the same instant, but not all ten.
-    assert!(
-        (1..=5).contains(&allowed),
-        "admitted {allowed} at one instant"
-    );
 }
 
 #[test]
@@ -61,22 +61,6 @@ fn one_noisy_tenant_does_not_throttle_another() {
 }
 
 #[test]
-fn throttled_reports_how_long_to_wait() {
-    let f = limiter(1.0, 0.0);
-    assert!(f.admit_at("acme", 1.0).is_allowed());
-    match f.admit_at("acme", 1.0) {
-        Admission::Throttled { retry_after_secs } => {
-            assert!(retry_after_secs > 0.0, "retry_after should be positive");
-            assert!(
-                retry_after_secs <= 1.0,
-                "retry_after {retry_after_secs} exceeds the interval"
-            );
-        }
-        Admission::Allowed => panic!("second call at the same instant should be throttled"),
-    }
-}
-
-#[test]
 fn idle_tenants_are_evicted_so_state_does_not_leak() {
     let f = limiter(10.0, 0.0);
     f.admit_at("gone", 1.0);
@@ -84,12 +68,4 @@ fn idle_tenants_are_evicted_so_state_does_not_leak() {
 
     f.evict_idle(1000.0);
     assert_eq!(f.tracked_tenants(), 0);
-}
-
-#[test]
-fn zero_rate_blocks_everything_after_the_first() {
-    // A misconfigured 0 rps must not divide by zero or admit everything.
-    let f = limiter(0.0, 0.0);
-    f.admit_at("acme", 1.0);
-    assert!(!f.admit_at("acme", 1.0).is_allowed());
 }

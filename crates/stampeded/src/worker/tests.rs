@@ -14,57 +14,14 @@ fn default_config_heartbeats_well_inside_the_reap_window() {
 }
 
 #[test]
-fn default_backoff_uses_full_jitter() {
-    // A narrow jitter band also varies; only full jitter spreads well below the ceiling.
-    let policy = default_backoff();
-    let mut rng = chrono_machines::rand::rng();
-
-    let (mut min, mut max) = (u64::MAX, 0u64);
-    for _ in 0..200 {
-        if let Some(d) = policy.delay(4, &mut rng) {
-            min = min.min(d);
-            max = max.max(d);
-        }
-    }
-
-    assert!(max > 0, "backoff produced no delays");
-    assert!(
-        min < max / 2,
-        "spread {min}..{max} is too narrow for full jitter"
-    );
-}
-
-#[test]
-fn backoff_delay_is_bounded_and_varies() {
-    let policy = BackoffPolicy::Exponential(
-        ExponentialBackoff::new()
-            .base_delay_ms(1_000)
-            .max_delay_ms(60_000)
-            .jitter_factor(1.0)
-            .max_attempts(10),
-    );
-    let mut rng = chrono_machines::rand::rng();
-
-    let mut seen = std::collections::HashSet::new();
-    for _ in 0..50 {
-        let d = policy
-            .delay(5, &mut rng)
-            .expect("attempt 5 of 10 should retry");
-        assert!(d <= 60_000, "delay {d} exceeded max_delay_ms");
-        seen.insert(d);
-    }
-    assert!(seen.len() > 1, "full jitter produced a constant delay");
-}
-
-#[test]
-fn backoff_stops_at_max_attempts() {
-    let policy = BackoffPolicy::Exponential(ExponentialBackoff::new().max_attempts(3));
-    let mut rng = chrono_machines::rand::rng();
-    assert!(policy.delay(0, &mut rng).is_some());
-    assert!(
-        policy.delay(3, &mut rng).is_none(),
-        "exhausted budget must return None so the job is discarded"
-    );
+fn the_default_backoff_is_full_jitter_and_leaves_the_limit_to_the_database() {
+    let BackoffPolicy::Exponential(b) = default_backoff() else {
+        panic!("the default backoff is exponential");
+    };
+    // Full jitter spreads a retrying herd; a narrow band keeps it together.
+    assert!((b.jitter_factor - 1.0).abs() < f64::EPSILON, "{b:?}");
+    // A `None` delay past the crate's own limit would mean an immediate retry.
+    assert_eq!(b.max_attempts, u8::MAX);
 }
 
 #[test]

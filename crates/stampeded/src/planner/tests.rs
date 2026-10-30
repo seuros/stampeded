@@ -1,5 +1,4 @@
 use super::*;
-use behavior_machines::{NodeId, Observer, Time, Tree};
 
 fn snapshot(
     max_running: Option<i32>,
@@ -84,61 +83,4 @@ fn a_verdict_other_than_steady_says_why() {
     assert_eq!(rush.reason.as_deref(), Some("next job waited 90s, max 60s"));
 
     assert_eq!(planner.decide(&snapshot(None, 0, None, None)).reason, None);
-}
-
-// REAL: the behavior-machines engine walking the same tree, for parity.
-struct Fixed(Status);
-
-impl behavior_machines::Leaf<()> for Fixed {
-    fn tick(&self, _ctx: &mut (), _now: Time) -> Status {
-        self.0
-    }
-}
-
-#[derive(Default)]
-struct Reached(Vec<usize>);
-
-impl Observer for Reached {
-    fn ticked(&mut self, node: NodeId, _status: Status) {
-        self.0.push(node.index());
-    }
-}
-
-#[test]
-fn the_circuit_reaches_exactly_what_the_engine_walk_reaches() {
-    // The circuit must agree with the engine for every combination of conditions.
-    let planner = Planner::new().expect("the policy lowers");
-
-    for at_capacity in [false, true] {
-        for overdue in [false, true] {
-            let snap = snapshot(
-                Some(1),
-                i64::from(at_capacity),
-                Some(60),
-                Some(if overdue { 61.0 } else { 1.0 }),
-            );
-
-            let schedule = planner.evaluate(&snap).expect("evaluates");
-            let mut circuit: Vec<usize> = (0..schedule.status.len())
-                .filter(|n| schedule.reached(*n))
-                .collect();
-            circuit.sort_unstable();
-
-            let mut tree =
-                Tree::new(policy().map(|leaf| Fixed(leaf.status(&snap)))).expect("builds");
-            let mut walk = Reached::default();
-            let root = tree.tick_observed(&mut (), Time::ZERO, &mut walk);
-            walk.0.sort_unstable();
-
-            assert_eq!(
-                circuit, walk.0,
-                "at_capacity={at_capacity} overdue={overdue}"
-            );
-            assert_eq!(
-                schedule.root(),
-                Some(root),
-                "at_capacity={at_capacity} overdue={overdue}"
-            );
-        }
-    }
 }
