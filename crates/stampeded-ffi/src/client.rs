@@ -1,6 +1,6 @@
 //! Connecting, and enqueueing.
 
-use crate::{STAMPEDED_ERROR, STAMPEDED_NONE, STAMPEDED_OK, arg, guarded, opt_arg};
+use crate::{STAMPEDED_ERROR, STAMPEDED_NONE, STAMPEDED_OK, arg, guarded, json, opt_arg};
 use stampeded::{NewJob, Queue};
 use std::ffi::c_char;
 use std::sync::Arc;
@@ -132,8 +132,4 @@ pub unsafe extern "C" fn stampeded_enqueue(
         }
         Ok(STAMPEDED_OK)
     })
-}
-
-fn json(text: &str, name: &str) -> Result<serde_json::Value, String> {
-    serde_json::from_str(text).map_err(|e| format!("{name} is not valid JSON: {e}"))
 }

@@ -1,6 +1,6 @@
 //! Named steps: the record a job keeps in its checkpoint, shared by every runtime.
 
-use crate::{STAMPEDED_ERROR, STAMPEDED_NONE, STAMPEDED_OK, arg, guarded, opt_arg};
+use crate::{STAMPEDED_ERROR, STAMPEDED_NONE, STAMPEDED_OK, arg, guarded, json, opt_arg};
 use stampeded::StepState;
 use std::ffi::{CString, c_char};
 
@@ -18,10 +18,6 @@ impl Steps {
             .map_err(|e| e.to_string())?;
         Ok(self.out.as_ref().map_or(std::ptr::null(), |s| s.as_ptr()))
     }
-}
-
-fn json(text: &str, name: &str) -> Result<serde_json::Value, String> {
-    serde_json::from_str(text).map_err(|e| format!("{name} is not valid JSON: {e}"))
 }
 
 /// Read the step record out of a checkpoint (JSON, or NULL for none); a plain cursor

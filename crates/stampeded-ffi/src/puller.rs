@@ -1,7 +1,7 @@
 //! Pulling jobs, and settling them.
 
 use crate::client::Client;
-use crate::{STAMPEDED_ERROR, STAMPEDED_NONE, STAMPEDED_OK, arg, guarded, opt_arg};
+use crate::{STAMPEDED_ERROR, STAMPEDED_NONE, STAMPEDED_OK, arg, guarded, json, opt_arg};
 use stampeded::{Lease, PullConfig, Puller, Queues};
 use std::ffi::{CString, c_char};
 use std::sync::Arc;
@@ -291,9 +291,7 @@ pub unsafe extern "C" fn stampeded_lease_checkpoint(
     guarded(STAMPEDED_ERROR, || {
         // SAFETY: the caller's contract.
         let handle = unsafe { lease.as_ref() }.ok_or("lease is NULL")?;
-        let state: serde_json::Value =
-            serde_json::from_str(unsafe { arg(state_json, "state_json") }?)
-                .map_err(|e| format!("state_json is not valid JSON: {e}"))?;
+        let state = json(unsafe { arg(state_json, "state_json") }?, "state_json")?;
         let lease = handle.lease.as_ref().ok_or("lease is already settled")?;
 
         let still_ours = handle

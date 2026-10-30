@@ -109,6 +109,11 @@ unsafe fn opt_arg<'a>(ptr: *const c_char, name: &str) -> Result<Option<&'a str>,
     }
 }
 
+/// A JSON argument, already read as a string; the error names the argument.
+fn json(text: &str, name: &str) -> Result<serde_json::Value, String> {
+    serde_json::from_str(text).map_err(|e| format!("{name} is not valid JSON: {e}"))
+}
+
 /// The stampeded release this library is, e.g. `"0.4.1"`. Static; never freed.
 #[must_use]
 #[allow(unsafe_code, reason = "exported under its C name")]
