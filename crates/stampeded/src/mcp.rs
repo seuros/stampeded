@@ -78,6 +78,14 @@ pub struct JobIdArgs {
     pub id: String,
 }
 
+impl JobIdArgs {
+    /// The id, or the caller's error naming what was passed.
+    pub fn uuid(&self) -> Result<uuid::Uuid, ToolError> {
+        uuid::Uuid::parse_str(&self.id)
+            .map_err(|_| ToolError::InvalidArguments(format!("{:?} is not a UUID", self.id)))
+    }
+}
+
 /// No parameters; the tool contract still takes an object.
 #[derive(Debug, Default, Deserialize, Serialize, JsonSchema)]
 pub struct EmptyArgs {}

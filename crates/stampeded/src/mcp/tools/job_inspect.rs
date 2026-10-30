@@ -34,8 +34,7 @@ impl StampededServer {
         idempotent = true
     )]
     async fn job_inspect(&self, _ctx: Ctx<'_>, params: Parameters<JobIdArgs>) -> ToolResult {
-        let id = uuid::Uuid::parse_str(&params.0.id)
-            .map_err(|_| ToolError::InvalidArguments(format!("{:?} is not a UUID", params.0.id)))?;
+        let id = params.0.uuid()?;
 
         let row: Option<JobRow> = sqlx::query_as(
             "SELECT task, state::text AS state, attempt, max_attempts, \

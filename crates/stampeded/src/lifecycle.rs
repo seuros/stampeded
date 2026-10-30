@@ -57,6 +57,13 @@ mod machine {
                 transition: { from: Claimed, to: Retryable }
                 transition: { from: Executing, to: Retryable }
             }
+
+            // Operator action: a job given up on, run again from scratch. Nothing else
+            // leaves a finished state, and a completed job stays completed.
+            resurrect {
+                transition: { from: Discarded, to: Available }
+                transition: { from: Cancelled, to: Available }
+            }
         }
     }
 }
@@ -95,7 +102,7 @@ impl From<JobLifecycleState> for JobState {
 pub type Transitions = JobLifecycleEvent;
 
 /// Every event, in declaration order.
-pub const EVENTS: [Transitions; 7] = [
+pub const EVENTS: [Transitions; 8] = [
     Transitions::Claim,
     Transitions::Complete,
     Transitions::Retry,
@@ -103,6 +110,7 @@ pub const EVENTS: [Transitions; 7] = [
     Transitions::Discard,
     Transitions::Cancel,
     Transitions::Reclaim,
+    Transitions::Resurrect,
 ];
 
 /// The event's name, as other runtimes spell it.
@@ -115,6 +123,7 @@ pub const fn event_name(event: &Transitions) -> &'static str {
         Transitions::Discard => "discard",
         Transitions::Cancel => "cancel",
         Transitions::Reclaim => "reclaim",
+        Transitions::Resurrect => "resurrect",
     }
 }
 
@@ -138,6 +147,17 @@ pub fn apply(from: JobState, event: Transitions) -> Option<JobState> {
 /// Every event legal from this state.
 pub fn available_events(from: JobState) -> Vec<Transitions> {
     DynamicJobLifecycle::new_init_state((), from.into()).get_available_events()
+}
+
+/// The states `event` leaves, as SQL spells them, so a statement performing it
+/// matches exactly the rows the machine allows.
+pub fn sources(event: &Transitions) -> Vec<&'static str> {
+    let name = event_name(event);
+    JobState::ALL
+        .into_iter()
+        .filter(|s| available_events(*s).iter().any(|e| event_name(e) == name))
+        .map(JobState::as_str)
+        .collect()
 }
 
 #[cfg(test)]

@@ -77,6 +77,11 @@ fn the_lifecycle_answers_by_name() {
     );
     assert_eq!(apply("completed", "claim").0, STAMPEDED_NONE);
     assert_eq!(apply("executing", "cancel").0, STAMPEDED_NONE);
+    assert_eq!(
+        apply("cancelled", "resurrect"),
+        (STAMPEDED_OK, Some("available".into()))
+    );
+    assert_eq!(apply("completed", "resurrect").0, STAMPEDED_NONE);
 
     assert_eq!(apply("running", "claim").0, STAMPEDED_ERROR);
     assert!(last_error().contains("running"));

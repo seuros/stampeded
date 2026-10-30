@@ -36,7 +36,8 @@ impl JobState {
         Self::ALL.into_iter().find(|s| s.as_str() == name)
     }
 
-    /// Terminal states never transition again and are eligible for pruning.
+    /// Terminal states: no worker moves them again, only an operator's `resurrect`;
+    /// eligible for pruning.
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Discarded | Self::Cancelled)
     }

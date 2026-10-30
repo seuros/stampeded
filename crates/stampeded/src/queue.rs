@@ -4,6 +4,7 @@
 use crate::cron::{Cron, DstPolicy};
 use crate::error::{Error, Result};
 use crate::job::{FailureKind, Job, NewJob};
+use crate::lifecycle::{self, Transitions};
 use crate::planner::{Decision, QueueSnapshot};
 use crate::schedule::Schedule;
 use jiff::Timestamp;
@@ -901,6 +902,43 @@ impl Queue {
                 .fetch_optional(&self.pool)
                 .await?;
         Ok(job)
+    }
+
+    /// Cancel a job that has not started, freeing its dedup slot. `false` when it is
+    /// executing or finished: an executing job is its worker's, and flipping the row
+    /// would not stop the work.
+    pub async fn cancel(&self, queue: &str, id: Uuid) -> Result<bool> {
+        let n = sqlx::query(
+            "UPDATE stampeded_jobs \
+                SET state = 'cancelled', failure_kind = 'cancelled', \
+                    finished_at = now(), dedup_scope = NULL \
+              WHERE queue = $1 AND id = $2 AND state = ANY($3)",
+        )
+        .bind(queue)
+        .bind(id)
+        .bind(lifecycle::sources(&Transitions::Cancel))
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(n == 1)
+    }
+
+    /// Run a discarded or cancelled job again, its attempts reset. `false` in any
+    /// other state.
+    pub async fn resurrect(&self, queue: &str, id: Uuid) -> Result<bool> {
+        let n = sqlx::query(
+            "UPDATE stampeded_jobs \
+                SET state = 'available', attempt = 0, failure_kind = NULL, \
+                    last_error = NULL, finished_at = NULL, scheduled_at = now() \
+              WHERE queue = $1 AND id = $2 AND state = ANY($3)",
+        )
+        .bind(queue)
+        .bind(id)
+        .bind(lifecycle::sources(&Transitions::Resurrect))
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(n == 1)
     }
 
     /// Nonzero queue depth by state from the counters; a `count(*)` here would pin the xmin

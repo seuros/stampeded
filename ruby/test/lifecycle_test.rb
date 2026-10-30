@@ -12,8 +12,11 @@ class LifecycleTest < Minitest::Test
     %i[completed discarded cancelled].each do |s|
       refute Stampeded::Lifecycle.legal?(s, :claim), "#{s} must not be claimable"
       assert Stampeded::Lifecycle.terminal?(s)
-      assert_empty Stampeded::Lifecycle.events_from(s), "#{s} must be a dead end"
+      assert_equal(s == :completed ? [] : [:resurrect], Stampeded::Lifecycle.events_from(s),
+                   "#{s} must be a dead end to everything but an operator")
     end
+    assert_equal :available, Stampeded::Lifecycle.apply(:discarded, :resurrect)
+    refute Stampeded::Lifecycle.terminal?(:retryable)
   end
 
   def test_an_executing_job_cannot_be_cancelled_from_under_its_worker

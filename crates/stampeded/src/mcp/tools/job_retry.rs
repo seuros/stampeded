@@ -10,23 +10,14 @@ impl StampededServer {
         visible = "crate::mcp::operator_may_write(ctx)"
     )]
     async fn job_retry(&self, _ctx: Ctx<'_>, params: Parameters<JobIdArgs>) -> ToolResult {
-        let id = uuid::Uuid::parse_str(&params.0.id)
-            .map_err(|_| ToolError::InvalidArguments(format!("{:?} is not a UUID", params.0.id)))?;
+        let id = params.0.uuid()?;
+        let resurrected = self
+            .queue()
+            .resurrect(&params.0.queue, id)
+            .await
+            .map_err(|e| ToolError::Internal(format!("retry failed: {e}")))?;
 
-        let n = sqlx::query(
-            "UPDATE stampeded_jobs \
-                SET state = 'available', attempt = 0, failure_kind = NULL, \
-                    last_error = NULL, finished_at = NULL, scheduled_at = now() \
-              WHERE queue = $1 AND id = $2 AND state IN ('discarded','cancelled')",
-        )
-        .bind(&params.0.queue)
-        .bind(id)
-        .execute(self.queue().pool())
-        .await
-        .map_err(|e| ToolError::Internal(format!("retry failed: {e}")))?
-        .rows_affected();
-
-        Ok(ToolOutput::text(if n == 1 {
+        Ok(ToolOutput::text(if resurrected {
             format!("job {id} reset to available")
         } else {
             format!("job {id} was not in a retryable terminal state; nothing changed")

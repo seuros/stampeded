@@ -24,10 +24,23 @@ fn a_finished_job_can_never_run_again() {
             "{terminal} must not be claimable"
         );
         assert!(
-            available_events(terminal).is_empty(),
-            "{terminal} must be a dead end"
+            available_events(terminal)
+                .iter()
+                .all(|e| event_name(e) == "resurrect"),
+            "{terminal} must be a dead end to everything but an operator"
         );
     }
+}
+
+#[test]
+fn only_a_job_given_up_on_can_be_resurrected() {
+    for s in JobState::ALL {
+        let back =
+            matches!(s, JobState::Discarded | JobState::Cancelled).then_some(JobState::Available);
+        assert_eq!(apply(s, Transitions::Resurrect), back, "{s}");
+    }
+    assert_eq!(sources(&Transitions::Resurrect), ["discarded", "cancelled"]);
+    assert_eq!(sources(&Transitions::Cancel), ["available", "retryable"]);
 }
 
 #[test]
@@ -122,7 +135,9 @@ fn terminal_states_agree_with_the_transition_table() {
     ] {
         assert_eq!(
             s.is_terminal(),
-            available_events(s).is_empty(),
+            available_events(s)
+                .iter()
+                .all(|e| event_name(e) == "resurrect"),
             "{s}: is_terminal and the transition table disagree"
         );
     }

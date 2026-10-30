@@ -1022,6 +1022,85 @@ async fn touching_a_long_job_keeps_it_alive() {
     );
 }
 
+// --------------------------------------------------------- operator actions
+
+#[tokio::test]
+async fn cancel_takes_only_a_job_that_has_not_started() {
+    let q = q!();
+    let w = q
+        .register_worker("h", 1, &["default".into()])
+        .await
+        .unwrap();
+    let running = q
+        .enqueue(NewJob::new("default", "t"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(q.claim("default", w, 1).await.unwrap()[0].id, running);
+    let waiting = q
+        .enqueue(NewJob::new("default", "t").unique("acct:1"))
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(
+        !q.cancel("default", running).await.unwrap(),
+        "an executing job is its worker's"
+    );
+    assert!(q.cancel("default", waiting).await.unwrap());
+    assert!(
+        !q.cancel("default", waiting).await.unwrap(),
+        "already cancelled"
+    );
+    let job = q.fetch("default", waiting).await.unwrap().unwrap();
+    assert_eq!(job.state, JobState::Cancelled);
+    assert!(
+        q.enqueue(NewJob::new("default", "t").unique("acct:1"))
+            .await
+            .unwrap()
+            .is_some(),
+        "cancelling frees the dedup slot"
+    );
+}
+
+#[tokio::test]
+async fn resurrect_runs_a_job_given_up_on_again_and_nothing_else() {
+    let q = q!();
+    let w = q
+        .register_worker("h", 1, &["default".into()])
+        .await
+        .unwrap();
+    let id = q
+        .enqueue(NewJob::new("default", "t").max_attempts(1))
+        .await
+        .unwrap()
+        .unwrap();
+    let job = q.claim("default", w, 1).await.unwrap().remove(0);
+    q.fail(&job, w, FailureKind::Raised, "boom", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        q.fetch("default", id).await.unwrap().unwrap().state,
+        JobState::Discarded
+    );
+
+    assert!(q.resurrect("default", id).await.unwrap());
+    let job = q.fetch("default", id).await.unwrap().unwrap();
+    assert_eq!((job.state, job.attempt), (JobState::Available, 0));
+    assert!(
+        !q.resurrect("default", id).await.unwrap(),
+        "an available job is not given up on"
+    );
+    let job = q.claim("default", w, 1).await.unwrap().remove(0);
+    assert_eq!(job.id, id, "claimable again");
+
+    q.complete(&job, w).await.unwrap();
+    assert!(
+        !q.resurrect("default", id).await.unwrap(),
+        "a completed job stays completed"
+    );
+}
+
 // ---------------------------------------------------------- depth counters
 
 #[tokio::test]

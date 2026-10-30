@@ -18,7 +18,8 @@ module Stampeded
 
     def events_from(state) = events.select { legal?(state, it) }
 
-    def terminal?(state) = events_from(state).empty?
+    # No worker moves it again; only an operator's resurrect does.
+    def terminal?(state) = events_from(state).all?(:resurrect)
 
     def claimable?(state) = legal?(state, :claim)
 

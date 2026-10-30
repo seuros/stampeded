@@ -11,24 +11,14 @@ impl StampededServer {
         visible = "crate::mcp::operator_may_write(ctx)"
     )]
     async fn job_cancel(&self, _ctx: Ctx<'_>, params: Parameters<JobIdArgs>) -> ToolResult {
-        let id = uuid::Uuid::parse_str(&params.0.id)
-            .map_err(|_| ToolError::InvalidArguments(format!("{:?} is not a UUID", params.0.id)))?;
+        let id = params.0.uuid()?;
+        let cancelled = self
+            .queue()
+            .cancel(&params.0.queue, id)
+            .await
+            .map_err(|e| ToolError::Internal(format!("cancel failed: {e}")))?;
 
-        // Never an executing job: the worker owns that row.
-        let n = sqlx::query(
-            "UPDATE stampeded_jobs \
-                SET state = 'cancelled', failure_kind = 'cancelled', \
-                    finished_at = now(), dedup_scope = NULL \
-              WHERE queue = $1 AND id = $2 AND state IN ('available','retryable')",
-        )
-        .bind(&params.0.queue)
-        .bind(id)
-        .execute(self.queue().pool())
-        .await
-        .map_err(|e| ToolError::Internal(format!("cancel failed: {e}")))?
-        .rows_affected();
-
-        Ok(ToolOutput::text(if n == 1 {
+        Ok(ToolOutput::text(if cancelled {
             format!("job {id} cancelled")
         } else {
             format!(
