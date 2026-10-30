@@ -28,7 +28,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Optional, behind features.
-rama = { version = "0.4", default-features = false, features = ["http-full"] }
+rama = { version = "0.4", default-features = false, features = ["http-backend", "tcp"] }
+# rama re-exports its HTTP server only under `http-full`, which also brings DNS
+# (bindgen, so libclang), compression (zstd, zlib) and WebSockets; none is used.
+rama-http-backend = { version = "0.4", default-features = false }
 mcp-host = { version = "0.14", features = ["macros", "stdio"] }
 schemars = "1"
 

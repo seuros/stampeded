@@ -26,10 +26,10 @@ pub async fn serve(
     use rama::Layer;
     use rama::graceful::Shutdown;
     use rama::http::layer::error_handling::ErrorHandlerLayer;
-    use rama::http::server::HttpServer;
     use rama::layer::ArcLayer;
     use rama::rt::Executor;
     use rama::tcp::server::TcpListener;
+    use rama_http_backend::server::HttpServer;
 
     let app_router = {
         let r = router(state.clone())

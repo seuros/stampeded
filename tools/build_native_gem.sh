@@ -16,9 +16,9 @@ if ! command -v upkg >/dev/null 2>&1; then
 fi
 
 if [ -f /etc/alpine-release ]; then
-  upkg install build-base clang-dev curl git
+  upkg install build-base curl git
 else
-  upkg install build-essential clang libclang-dev curl git
+  upkg install build-essential curl git
 fi
 
 curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.99

@@ -390,7 +390,6 @@ One million jobs against a real 8.7 GB database:
 ## Requirements
 
 - Postgres 18 or newer.
-- Building on Linux needs `libclang` (`upkg install libclang-dev`).
 - The C ABI test compiles C23: GCC 14 or newer (`STAMPEDED_CC` picks the
   compiler; `gcc-16` is used when on `PATH`).
 

@@ -26,7 +26,7 @@ tls-ring = ["sqlx/tls-rustls-ring-webpki"]
 cli = ["dep:tracing-subscriber", "dep:anyhow"]
 
 # HTTP API and the SSE job-event stream.
-http = ["dep:rama"]
+http = ["dep:rama", "dep:rama-http-backend"]
 # The live dashboard.
 dashboard = ["http"]
 # MCP control plane.
@@ -54,6 +54,7 @@ behavior-machines.workspace = true
 behavior-machines-circuit.workspace = true
 
 rama = { workspace = true, optional = true }
+rama-http-backend = { workspace = true, optional = true }
 mcp-host = { workspace = true, optional = true }
 schemars = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }

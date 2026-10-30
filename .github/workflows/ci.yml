@@ -57,10 +57,8 @@ jobs:
           github-cache-mode: target
           cache-generation: stampeded-ci-${{ hashFiles('Cargo.lock') }}
 
-      # rama-dns runs bindgen on Linux and needs libclang. Without it the build
-      # dies with "Unable to find libclang", which names nothing useful.
       # gcc-14: the C ABI test compiles -std=c23, which the default gcc 13 lacks.
-      - run: sudo apt-get update && sudo apt-get install -y libclang-dev gcc-14
+      - run: sudo apt-get update && sudo apt-get install -y gcc-14
 
       - run: mbx build --workspace
       - run: mbx clippy --all-targets
