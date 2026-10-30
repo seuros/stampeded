@@ -923,13 +923,14 @@ impl Queue {
         Ok(n == 1)
     }
 
-    /// Run a discarded or cancelled job again, its attempts reset. `false` in any
-    /// other state.
+    /// Run a discarded or cancelled job again with every budget it was given up on
+    /// reset: attempts, interruptions and deferrals. `false` in any other state.
     pub async fn resurrect(&self, queue: &str, id: Uuid) -> Result<bool> {
         let n = sqlx::query(
             "UPDATE stampeded_jobs \
-                SET state = 'available', attempt = 0, failure_kind = NULL, \
-                    last_error = NULL, finished_at = NULL, scheduled_at = now() \
+                SET state = 'available', attempt = 0, interruptions = 0, deferrals = 0, \
+                    failure_kind = NULL, last_error = NULL, finished_at = NULL, \
+                    scheduled_at = now() \
               WHERE queue = $1 AND id = $2 AND state = ANY($3)",
         )
         .bind(queue)

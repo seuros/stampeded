@@ -1101,6 +1101,48 @@ async fn resurrect_runs_a_job_given_up_on_again_and_nothing_else() {
     );
 }
 
+#[tokio::test]
+async fn a_resurrected_job_gets_every_budget_back() {
+    // Discarded for killing its workers, it must not be discarded again by the next death.
+    let q = q!();
+    let id = q
+        .enqueue(NewJob::new("default", "segfaults"))
+        .await
+        .unwrap()
+        .unwrap();
+    let w = q
+        .register_worker("h", 1, &["default".into()])
+        .await
+        .unwrap();
+    let killed = async || {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let job = q.claim("default", w, 1).await.unwrap().remove(0);
+        q.fail_with_exit(
+            &job,
+            w,
+            FailureKind::WorkerExited,
+            "killed",
+            None,
+            Some(137),
+        )
+        .await
+        .unwrap();
+        q.fetch("default", id).await.unwrap().unwrap()
+    };
+    killed().await;
+    assert_eq!(killed().await.state, JobState::Discarded);
+    // As if it had also been throttled to its limit.
+    sqlx::query("UPDATE stampeded_jobs SET deferrals = max_deferrals")
+        .execute(q.pool())
+        .await
+        .unwrap();
+
+    assert!(q.resurrect("default", id).await.unwrap());
+    let job = q.fetch("default", id).await.unwrap().unwrap();
+    assert_eq!((job.attempt, job.interruptions, job.deferrals), (0, 0, 0));
+    assert_eq!(killed().await.state, JobState::Retryable);
+}
+
 // ---------------------------------------------------------- depth counters
 
 #[tokio::test]
