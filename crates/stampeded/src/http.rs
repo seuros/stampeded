@@ -60,7 +60,7 @@ pub async fn serve(
 
         // Every route from here on shows job data, so answers only with the token.
         let r = r.with_endpoint_layer((
-            DashboardToken::layer(state.clone()),
+            DashboardToken::layer(&state),
             DefaultEndpointLayer::default(),
         ));
 

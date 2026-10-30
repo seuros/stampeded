@@ -107,26 +107,31 @@ impl ApiState {
 
     /// Constant-time token comparison.
     pub fn dashboard_authorised(&self, presented: Option<&str>) -> bool {
-        let (Some(expected), Some(given)) = (&self.dashboard_token, presented) else {
-            return false;
-        };
-        let (a, b) = (expected.as_bytes(), given.as_bytes());
-        if a.len() != b.len() {
-            return false;
-        }
-        a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+        token_matches(self.dashboard_token.as_deref(), presented)
     }
+}
+
+/// Constant-time, so the comparison does not time how much of a guess was right.
+fn token_matches(expected: Option<&String>, presented: Option<&str>) -> bool {
+    let (Some(expected), Some(given)) = (expected, presented) else {
+        return false;
+    };
+    let (a, b) = (expected.as_bytes(), given.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// Lets a request through only with the dashboard token as `?token=`. A layer, so a
 /// page or stream cannot forget to ask; 404, not 401, so as not to reveal that a
 /// dashboard exists.
 #[derive(Clone)]
-pub struct DashboardToken(ApiState);
+pub struct DashboardToken(Option<Arc<String>>);
 
 impl DashboardToken {
-    pub fn layer(state: ApiState) -> ValidateRequestHeaderLayer<Self> {
-        ValidateRequestHeaderLayer::custom(Self(state))
+    pub fn layer(state: &ApiState) -> ValidateRequestHeaderLayer<Self> {
+        ValidateRequestHeaderLayer::custom(Self(state.dashboard_token.clone()))
     }
 }
 
@@ -145,7 +150,7 @@ impl ValidateRequest<Body> for DashboardToken {
         let presented = Query::<Presented>::try_from_uri(req.uri())
             .ok()
             .and_then(|Query(p)| p.token);
-        std::future::ready(if self.0.dashboard_authorised(presented.as_deref()) {
+        std::future::ready(if token_matches(self.0.as_deref(), presented.as_deref()) {
             Ok(req)
         } else {
             Err((StatusCode::NOT_FOUND, "not found").into_response())
@@ -226,16 +231,12 @@ async fn enqueue(
     if let Some(m) = body.max_attempts
         && m < 1
     {
-        return (
+        return error(
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "max_attempts must be at least 1: the claim predicate is \
-                        `attempt < max_attempts`, so 0 would make the job \
-                        permanently unclaimable"
-                    .into(),
-            }),
-        )
-            .into_response();
+            "max_attempts must be at least 1: the claim predicate is \
+             `attempt < max_attempts`, so 0 would make the job \
+             permanently unclaimable",
+        );
     }
 
     let mut job = NewJob::new(body.queue, body.task).args(body.args);
@@ -253,15 +254,10 @@ async fn enqueue(
             Ok(Some(p)) => job.unique_per(u, p),
             Ok(None) => job.unique(u),
             Err(bad) => {
-                return (
+                return error(
                     StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse {
-                        error: format!(
-                            "unique_period must be minute, hour, day, week or month, got {bad:?}"
-                        ),
-                    }),
-                )
-                    .into_response();
+                    format!("unique_period must be minute, hour, day, week or month, got {bad:?}"),
+                );
             }
         };
     }
@@ -285,10 +281,7 @@ async fn enqueue(
             }),
         )
             .into_response(),
-        Err(e) => {
-            warn!(error = %e, "enqueue failed");
-            internal("enqueue failed")
-        }
+        Err(e) => internal("enqueue failed", &e),
     }
 }
 
@@ -301,10 +294,7 @@ async fn depth(State(state): State<ApiState>, Path(queue): Path<String>) -> impl
                 .collect();
             Json(serde_json::json!({ "queue": queue, "depth": map })).into_response()
         }
-        Err(e) => {
-            warn!(error = %e, "depth query failed");
-            internal("depth query failed")
-        }
+        Err(e) => internal("depth query failed", &e),
     }
 }
 
@@ -313,29 +303,18 @@ async fn job_status(
     State(state): State<ApiState>,
     Path(JobPath { queue, id }): Path<JobPath>,
 ) -> impl IntoResponse {
-    let Ok(id) = uuid::Uuid::parse_str(&id) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "id is not a UUID".into(),
-            }),
-        )
-            .into_response();
+    let id = match job_id(&id) {
+        Ok(id) => id,
+        Err(bad) => return bad.into_response(),
     };
 
     match state.queue.fetch(&queue, id).await {
         Ok(Some(job)) => Json(job_json(&job)).into_response(),
-        Ok(None) => (
+        Ok(None) => error(
             StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: format!("no job {id} in queue {queue:?}"),
-            }),
-        )
-            .into_response(),
-        Err(e) => {
-            warn!(error = %e, "job lookup failed");
-            internal("job lookup failed")
-        }
+            format!("no job {id} in queue {queue:?}"),
+        ),
+        Err(e) => internal("job lookup failed", &e),
     }
 }
 
@@ -344,14 +323,9 @@ async fn job_events(
     State(state): State<ApiState>,
     Path(JobPath { queue, id }): Path<JobPath>,
 ) -> impl IntoResponse {
-    let Ok(id) = uuid::Uuid::parse_str(&id) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "id is not a UUID".into(),
-            }),
-        )
-            .into_response();
+    let id = match job_id(&id) {
+        Ok(id) => id,
+        Err(bad) => return bad.into_response(),
     };
 
     let stream = stream::unfold(
@@ -425,14 +399,27 @@ fn parse_period(s: &str) -> Result<Period, String> {
     }
 }
 
-fn internal(msg: &str) -> rama::http::Response {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ErrorResponse {
-            error: msg.to_string(),
-        }),
-    )
-        .into_response()
+/// A per-job route's id that is not a UUID: the caller's error, a 400.
+struct NotAUuid;
+
+impl IntoResponse for NotAUuid {
+    fn into_response(self) -> Response {
+        error(StatusCode::BAD_REQUEST, "id is not a UUID")
+    }
+}
+
+fn job_id(id: &str) -> Result<uuid::Uuid, NotAUuid> {
+    uuid::Uuid::parse_str(id).map_err(|_| NotAUuid)
+}
+
+fn error(status: StatusCode, msg: impl Into<String>) -> Response {
+    (status, Json(ErrorResponse { error: msg.into() })).into_response()
+}
+
+/// A 500 naming what failed; the cause goes to the log, not to the caller.
+fn internal(what: &str, cause: &crate::Error) -> Response {
+    warn!(error = %cause, "{what}");
+    error(StatusCode::INTERNAL_SERVER_ERROR, what)
 }
 
 #[cfg(test)]
