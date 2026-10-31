@@ -53,6 +53,14 @@ impl Error {
     pub fn is_unrecoverable(&self) -> bool {
         matches!(self, Self::UnknownTask(_) | Self::Serde(_))
     }
+
+    /// A handler returning one of this crate's errors keeps its kind; anything else is `Handler`.
+    pub fn from_handler(src: Box<dyn std::error::Error + Send + Sync>) -> Self {
+        match src.downcast::<Self>() {
+            Ok(own) => *own,
+            Err(src) => Self::Handler(src),
+        }
+    }
 }
 
 /// A handler error that overrides the backoff policy with a specific delay.

@@ -9,9 +9,33 @@
 //!   INSERT INTO stampeded_jobs (queue, task, args)
 //!   VALUES ('default', 'greet', '{"name":"world"}'::jsonb);
 
-use stampeded::{NewJob, Queue, Worker, WorkerConfig};
+use serde::{Deserialize, Serialize};
+use stampeded::{AsyncJob, JobContext, JobResult, NewJob, Queue, Worker, WorkerConfig};
 use std::time::Duration;
 use tokio::sync::watch;
+
+#[derive(Serialize, Deserialize)]
+struct Extract {
+    name: String,
+    version: String,
+}
+
+impl AsyncJob for Extract {
+    const TASK: &'static str = "crate.extract";
+    type Output = u64;
+
+    async fn run(&self, ctx: &JobContext) -> JobResult<u64> {
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM stampeded_jobs WHERE task = $1")
+            .bind(Self::TASK)
+            .fetch_one(ctx.pool())
+            .await?;
+        println!(
+            "extracting {}@{} (attempt {})",
+            self.name, self.version, ctx.attempt
+        );
+        Ok(n.unsigned_abs())
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -41,6 +65,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .enqueue(NewJob::new("default", "greet").unique("only-once"))
         .await?;
     println!("duplicate enqueue returned {dup:?} (None means deduplicated)");
+    queue
+        .enqueue_job(Extract {
+            name: "serde".into(),
+            version: "1.0.228".into(),
+        })
+        .await?;
 
     let worker = Worker::new(
         queue,
@@ -70,7 +100,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Retried with full-jitter backoff, then discarded at max_attempts.
         println!("flaky attempt {}", job.attempt);
         Err("this task always fails".into())
-    });
+    })
+    .register_job::<Extract>();
 
     let (tx, rx) = watch::channel(false);
     tokio::spawn(async move {

@@ -204,6 +204,11 @@ impl Job {
         serde_json::from_value(self.checkpoint.clone()?).ok()
     }
 
+    /// `args` as `T`; `Error::Serde` (unrecoverable) when they do not fit.
+    pub fn payload<T: serde::de::DeserializeOwned>(&self) -> crate::Result<T> {
+        Ok(serde_json::from_value(self.args.clone())?)
+    }
+
     pub fn is_last_attempt(&self) -> bool {
         self.attempts_remaining() == 0
     }

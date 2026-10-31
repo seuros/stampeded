@@ -79,7 +79,29 @@ roots built in; a private CA goes in `sslrootcert`, so on RDS:
   | `GET /queues/{queue}/depth` | depth by state |
   | `GET /health` | |
 
-Rust handlers are registered in-process (`crates/stampeded/examples/worker.rs`).
+Rust handlers are registered in-process (`crates/stampeded/examples/worker.rs`),
+as closures or as typed jobs:
+
+```rust
+#[derive(Serialize, Deserialize)]
+struct CrateExtractor { name: String, version: String, tarball_path: String }
+
+impl AsyncJob for CrateExtractor {
+    const TASK: &'static str = "crate.extract";
+    type Output = ExtractionResult;
+
+    async fn run(&self, ctx: &JobContext) -> JobResult<ExtractionResult> {
+        insert(ctx.pool(), extract(&self.tarball_path)?).await
+    }
+}
+
+Worker::new(queue.clone(), config).register_job::<CrateExtractor>();
+queue.enqueue_job(CrateExtractor { .. }).await?;
+```
+
+The payload is the job's `args`, so it must be a struct with named fields. One
+that no longer deserializes is discarded as `unrecoverable`. The output is
+logged, not stored.
 Or pull jobs and run them yourself: `Puller::next` hands out a `Lease`, which
 you `complete`, `fail` or `discard`; claiming, heartbeats and queue policies stay
 in the library. To embed only the queue in a Rust app:

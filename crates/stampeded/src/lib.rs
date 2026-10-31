@@ -2,6 +2,7 @@
 //!
 //! The rules live in SQL (`schema/*.sql`); this crate is a typed wrapper over them.
 
+pub mod async_job;
 mod claim;
 pub mod cron;
 pub mod error;
@@ -31,6 +32,7 @@ pub mod http;
 #[cfg(feature = "mcp")]
 pub mod mcp;
 
+pub use async_job::{AsyncJob, JobError, JobResult};
 pub use claim::VERDICT_TTL;
 pub use cron::{Cron, DstPolicy};
 pub use error::{Error, Result, RetryIn};
@@ -47,7 +49,7 @@ pub use queues::Queues;
 pub use schedule::Schedule;
 pub use steps::StepState;
 pub use wakeup::{NextPoll, Wakeup};
-pub use worker::{Worker, WorkerConfig};
+pub use worker::{JobContext, Worker, WorkerConfig};
 
 pub mod schema;
 

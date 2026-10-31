@@ -228,6 +228,11 @@ impl Queue {
         Ok(id)
     }
 
+    /// `enqueue` of `job.new_job()`. See [`crate::async_job`].
+    pub async fn enqueue_job<T: crate::AsyncJob>(&self, job: T) -> Result<Option<Uuid>> {
+        self.enqueue(job.new_job()?).await
+    }
+
     /// Claim up to `limit` jobs for this worker.
     pub async fn claim(&self, queue: &str, worker_id: Uuid, limit: i32) -> Result<Vec<Job>> {
         let jobs = sqlx::query_as::<_, Job>("SELECT * FROM stampeded_claim($1, $2, $3, NULL)")

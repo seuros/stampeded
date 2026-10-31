@@ -92,6 +92,15 @@ impl JobContext {
         &self.queue
     }
 
+    pub fn pool(&self) -> &sqlx::PgPool {
+        self.queue.pool()
+    }
+
+    /// See [`Job::payload`].
+    pub fn payload<T: DeserializeOwned>(&self) -> Result<T> {
+        self.job.payload()
+    }
+
     /// The worker that holds this job.
     pub const fn worker_id(&self) -> Uuid {
         self.worker_id
@@ -317,6 +326,12 @@ impl Worker {
         self.handlers
             .insert(task, Arc::new(move |ctx| Box::pin(f(ctx)) as HandlerFuture));
         self
+    }
+
+    /// Register `T` under `T::TASK`. See [`crate::async_job`].
+    #[must_use]
+    pub fn register_job<T: crate::AsyncJob>(self) -> Self {
+        self.register(T::TASK, crate::async_job::run_typed::<T>)
     }
 
     /// Run until `shutdown` fires. Returns once in-flight jobs have settled.
@@ -580,7 +595,7 @@ async fn execute(
                 // Cancels the future but cannot kill a blocking thread; sync handlers
                 // must use spawn_blocking.
                 tokio::select! {
-                    res = h(ctx.clone()) => res.map_err(Error::Handler),
+                    res = h(ctx.clone()) => res.map_err(Error::from_handler),
                     () = tokio::time::sleep(timeout) => Err(Error::Timeout(timeout)),
                 }
             };
