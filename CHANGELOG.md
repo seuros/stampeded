@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/seuros/stampeded/compare/stampeded-v0.5.0...stampeded-v0.6.0) (2026-10-31)
+
+
+### Features
+
+* typed jobs with AsyncJob ([73e26a4](https://github.com/seuros/stampeded/commit/73e26a4d56a43f7973923c0b3ecc87d592e99373))
+
 ## [0.5.0](https://github.com/seuros/stampeded/compare/stampeded-v0.4.1...stampeded-v0.5.0) (2026-10-30)
 
 
