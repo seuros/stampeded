@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.7.0](https://github.com/seuros/stampeded/compare/stampeded-v0.6.0...stampeded-v0.7.0) (2026-11-03)
+
+
+### Features
+
+* propagate worker cancellation scopes ([ca73bb8](https://github.com/seuros/stampeded/commit/ca73bb817d7a357af6715ca4031e131cef296541))
+
+
+### Bug Fixes
+
+* preserve configured retry and expiry limits in scheduled jobs ([c50747d](https://github.com/seuros/stampeded/commit/c50747da9b616bde0ee21d6d31e027f6311e3121))
+* retain recoverable claims and join executions during shutdown ([33288b5](https://github.com/seuros/stampeded/commit/33288b5bb52c9cd9ba2bf0ec8cdce1ba93884d05))
+
 ## [0.6.0](https://github.com/seuros/stampeded/compare/stampeded-v0.5.0...stampeded-v0.6.0) (2026-10-31)
 
 
