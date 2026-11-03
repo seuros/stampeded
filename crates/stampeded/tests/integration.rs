@@ -1910,12 +1910,14 @@ async fn a_graceful_shutdown_lets_jobs_finish_and_charges_nothing() {
 
 #[tokio::test]
 async fn a_wedged_job_does_not_block_shutdown_forever() {
-    // An unbounded drain holds the deploy until SIGKILL, and nothing deregisters.
+    // A bounded drain cancels the handler but keeps its claim recoverable.
     let q = q!();
     q.enqueue(NewJob::new("default", "wedged")).await.unwrap();
 
     let started = Arc::new(tokio::sync::Notify::new());
     let ready = started.clone();
+    let cancelled = Arc::new(tokio::sync::Notify::new());
+    let dropped = cancelled.clone();
 
     let worker = Worker::new(
         q.clone(),
@@ -1928,7 +1930,15 @@ async fn a_wedged_job_does_not_block_shutdown_forever() {
     )
     .register("wedged", move |_job| {
         let ready = ready.clone();
+        let dropped = dropped.clone();
         async move {
+            struct OnDrop(Arc<tokio::sync::Notify>);
+            impl Drop for OnDrop {
+                fn drop(&mut self) {
+                    self.0.notify_one();
+                }
+            }
+            let _on_drop = OnDrop(dropped);
             ready.notify_one();
             // Longer than any test should wait.
             tokio::time::sleep(Duration::from_secs(120)).await;
@@ -1949,12 +1959,29 @@ async fn a_wedged_job_does_not_block_shutdown_forever() {
         .expect("join")
         .expect("run");
 
-    // Deregistered, so the reaper need not wait out dead_after.
+    tokio::time::timeout(Duration::from_secs(1), cancelled.notified())
+        .await
+        .expect("timed-out handler must be dropped before run returns");
+    // The reaper joins existing worker rows: deletion would strand this claim.
     let workers: i64 = sqlx::query_scalar("SELECT count(*) FROM stampeded_workers")
         .fetch_one(q.pool())
         .await
         .unwrap();
-    assert_eq!(workers, 0, "a bounded shutdown must still deregister");
+    assert_eq!(workers, 1, "an unsettled claim must retain its worker row");
+    sqlx::query("UPDATE stampeded_workers SET last_heartbeat = now() - interval '6 minutes'")
+        .execute(q.pool())
+        .await
+        .unwrap();
+    assert_eq!(q.reap(Duration::from_secs(300)).await.unwrap(), 1);
+    let recovered: (String, i16, Option<String>) =
+        sqlx::query_as("SELECT state, interruptions, failure_kind FROM stampeded_jobs")
+            .fetch_one(q.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        recovered,
+        ("retryable".into(), 1, Some("worker_missing".into()))
+    );
 }
 
 // ------------------------------------------------------------- checkpoints

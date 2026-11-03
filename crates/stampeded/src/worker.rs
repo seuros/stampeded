@@ -184,7 +184,9 @@ pub struct WorkerConfig {
     pub tenant_limit: Option<TenantLimit>,
     /// Consecutive failures that trip a task's circuit. `None` disables it.
     pub breaker_failure_threshold: Option<usize>,
-    /// How long in-flight jobs may finish on shutdown; stragglers are left to the reaper.
+    /// How long in-flight jobs may finish on shutdown; remaining handler futures are
+    /// cancelled and joined, and their claims are left to the reaper.
+    /// Handlers must yield; work they spawn themselves cannot be cancelled by the worker.
     pub shutdown_timeout: Duration,
 
     /// Minimum gap between claim round trips, however many wakeups arrive.
@@ -334,7 +336,8 @@ impl Worker {
         self.register(T::TASK, crate::async_job::run_typed::<T>)
     }
 
-    /// Run until `shutdown` fires. Returns once in-flight jobs have settled.
+    /// Run until `shutdown` fires. Drain for `shutdown_timeout`, then cancel and join
+    /// remaining handlers before returning. Unsettled claims stay eligible for reaping.
     pub async fn run(self, mut shutdown: watch::Receiver<bool>) -> Result<()> {
         let worker_id = register_worker(&self.queue, &self.config.queues).await?;
         let queues_label = self.config.queues.label();
@@ -344,22 +347,21 @@ impl Worker {
         // If the heartbeat stops, the reaper reclaims our jobs, as intended.
         let hb_queue = self.queue.clone();
         let hb_interval = self.config.heartbeat_interval;
-        let mut hb_shutdown = shutdown.clone();
-        let heartbeat = tokio::spawn(async move {
+        // Keep ownership alive during the drain, even if it exceeds dead_after.
+        // JoinSet also aborts the heartbeat if the run future itself is dropped.
+        let mut heartbeat = tokio::task::JoinSet::new();
+        heartbeat.spawn(async move {
             let mut ticker = tokio::time::interval(hb_interval);
             loop {
-                tokio::select! {
-                    _ = ticker.tick() => {
-                        if let Err(e) = hb_queue.heartbeat(worker_id).await {
-                            // Keep beating through a blip; the reaper is the backstop.
-                            warn!(error = %e, "heartbeat failed");
-                        }
-                    }
-                    _ = hb_shutdown.changed() => break,
+                ticker.tick().await;
+                if let Err(e) = hb_queue.heartbeat(worker_id).await {
+                    // Keep beating through a blip; the reaper is the backstop.
+                    warn!(error = %e, "heartbeat failed");
                 }
             }
         });
 
+        let mut executions = tokio::task::JoinSet::new();
         let sem = Arc::new(tokio::sync::Semaphore::new(self.config.max_concurrency));
         let mut wakeups = self
             .wakeup
@@ -376,11 +378,24 @@ impl Worker {
         let mut tat = 0.0f64;
         let mut next = NextPoll::Idle;
 
-        loop {
+        'admissions: loop {
+            // Reap completed handles even when a hot queue keeps the poll branch
+            // ready; task tracking must not grow with the worker's lifetime.
+            while let Some(result) = executions.try_join_next() {
+                log_execution_exit(result);
+            }
+            if shutdown_requested(&shutdown) {
+                break;
+            }
             let delay = next.delay(self.config.poll_interval);
 
             // The poll floor stays on, notifications or not.
             tokio::select! {
+                biased;
+                _ = shutdown.changed() => {
+                    info!(%worker_id, "shutdown requested");
+                    break;
+                }
                 () = tokio::time::sleep(delay) => {}
                 () = async {
                     match wakeups.as_mut() {
@@ -388,12 +403,12 @@ impl Worker {
                         None => std::future::pending().await,
                     }
                 } => {}
-                _ = shutdown.changed() => {
-                    info!(%worker_id, "shutdown requested");
-                    break;
-                }
                 // Saturated only: a freed permit wakes us, dropped right back as a signal.
                 _ = sem.acquire(), if next == NextPoll::Saturated => {}
+                Some(result) = executions.join_next() => {
+                    log_execution_exit(result);
+                    continue;
+                }
             }
 
             // Claim only what can run; a job parked behind the semaphore looks like running work.
@@ -414,10 +429,13 @@ impl Worker {
             );
             tat = decision.state;
             if !decision.allowed {
-                tokio::time::sleep(Duration::from_secs_f64(
-                    decision.retry_after.clamp(0.0, 1.0),
-                ))
-                .await;
+                tokio::select! {
+                    biased;
+                    _ = shutdown.changed() => break,
+                    () = tokio::time::sleep(Duration::from_secs_f64(
+                        decision.retry_after.clamp(0.0, 1.0),
+                    )) => {}
+                }
             }
 
             let want = i32::try_from(available)
@@ -425,6 +443,11 @@ impl Worker {
                 .min(self.config.batch_size);
 
             let claim_started = std::time::Instant::now();
+            if shutdown_requested(&shutdown) {
+                break;
+            }
+            // Do not cancel a claim query: it may commit at the server after its
+            // future is dropped. Finish the round, then stop admitting handlers.
             let jobs = match claimer
                 .round(worker_id, usize::try_from(want).unwrap_or(0))
                 .await
@@ -450,6 +473,9 @@ impl Worker {
             );
 
             for (job, held) in jobs {
+                if shutdown_requested(&shutdown) {
+                    break 'admissions;
+                }
                 // Fairness after claiming, since a flood is legitimately first in line; a
                 // throttled job goes back with a short delay rather than held.
                 if let Some(f) = &self.fairness
@@ -483,7 +509,7 @@ impl Worker {
                     .map(|t| self.breaker_for(&job.task, t));
                 let metrics = self.metrics.clone();
 
-                tokio::spawn(async move {
+                executions.spawn(async move {
                     // The slot and this queue's cap stay taken until the outcome is reported.
                     let _slot = (permit, held);
                     execute(
@@ -494,16 +520,18 @@ impl Worker {
             }
         }
 
-        // Drain: in-flight jobs report their own outcome; every permit back means all finished.
+        // Drain the tasks themselves, not just their permits: dropping a JoinHandle
+        // detaches its task and would allow stale work to outlive this worker.
         let in_flight = self.config.max_concurrency - sem.available_permits();
         if in_flight > 0 {
             info!(%worker_id, in_flight, "draining");
         }
 
-        let drained = tokio::time::timeout(
-            self.config.shutdown_timeout,
-            sem.acquire_many(u32::try_from(self.config.max_concurrency).unwrap_or(u32::MAX)),
-        )
+        let drained = tokio::time::timeout(self.config.shutdown_timeout, async {
+            while let Some(result) = executions.join_next().await {
+                log_execution_exit(result);
+            }
+        })
         .await
         .is_ok();
 
@@ -515,12 +543,38 @@ impl Worker {
                 still_running = self.config.max_concurrency - sem.available_permits(),
                 "jobs did not finish draining; the reaper will reclaim them"
             );
+            executions.abort_all();
+            while let Some(result) = executions.join_next().await {
+                log_execution_exit(result);
+            }
         }
 
-        heartbeat.abort();
-        self.queue.deregister_worker(worker_id).await?;
+        heartbeat.shutdown().await;
+        // The reaper joins existing worker rows. Never orphan an unsettled claim,
+        // even when a handler panicked or its outcome could not be reported.
+        sqlx::query(
+            "DELETE FROM stampeded_workers w WHERE w.id = $1 AND NOT EXISTS (
+                SELECT 1 FROM stampeded_jobs j WHERE j.claimed_by = w.id
+                AND j.state IN ('claimed', 'executing')
+            )",
+        )
+        .bind(worker_id)
+        .execute(self.queue.pool())
+        .await?;
         info!(%worker_id, "worker stopped");
         Ok(())
+    }
+}
+
+fn shutdown_requested(shutdown: &watch::Receiver<bool>) -> bool {
+    *shutdown.borrow() || shutdown.has_changed().unwrap_or(true)
+}
+
+fn log_execution_exit(result: std::result::Result<(), tokio::task::JoinError>) {
+    if let Err(e) = result
+        && !e.is_cancelled()
+    {
+        error!(error = %e, "job execution task failed; its claim is left to the reaper");
     }
 }
 

@@ -2,6 +2,8 @@
 
 use super::*;
 
+mod shutdown;
+
 #[test]
 fn default_config_heartbeats_well_inside_the_reap_window() {
     let c = WorkerConfig::default();
