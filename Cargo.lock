@@ -610,6 +610,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 
 [[package]]
+name = "deadline-machines"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8139b53f0b8f52bc61f95c0018524d31449dd5471c406d6d97a0afea17eef63f"
+dependencies = [
+ "tokio",
+]
+
+[[package]]
 name = "defmt"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3105,6 +3114,7 @@ dependencies = [
  "behavior-machines-circuit",
  "breaker-machines",
  "chrono-machines",
+ "deadline-machines",
  "gethostname",
  "jiff",
  "jiff-sqlx",

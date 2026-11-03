@@ -11,6 +11,10 @@ use crate::queues::Queues;
 use crate::wakeup::{NextPoll, Wakeup};
 use breaker_machines::async_circuit::AsyncCircuitBreaker;
 use chrono_machines::{BackoffPolicy, BackoffStrategy, ExponentialBackoff};
+use deadline_machines::{
+    Clock, Scope,
+    tokio_support::{TokioClock, deadline_after, timeout as with_deadline},
+};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
@@ -35,12 +39,13 @@ pub type HandlerFuture = Pin<
 /// A task handler: receives the job, does the work.
 pub type Handler = Arc<dyn Fn(JobContext) -> HandlerFuture + Send + Sync>;
 
-/// What a handler gets: the job (through `Deref`), plus checkpoints and steps.
+/// What a handler gets: the job (through `Deref`), plus cancellation, checkpoints and steps.
 #[derive(Clone)]
 pub struct JobContext {
     pub job: Job,
     queue: Queue,
     worker_id: Uuid,
+    scope: Scope,
     /// Step record for this attempt; `job.checkpoint` is the claim-time snapshot and goes stale.
     steps: Arc<std::sync::Mutex<crate::steps::StepState>>,
 }
@@ -55,11 +60,16 @@ impl std::ops::Deref for JobContext {
 
 impl JobContext {
     pub(crate) fn new(job: Job, queue: Queue, worker_id: Uuid) -> Self {
+        Self::new_scoped(job, queue, worker_id, Scope::never())
+    }
+
+    fn new_scoped(job: Job, queue: Queue, worker_id: Uuid, scope: Scope) -> Self {
         let steps = crate::steps::StepState::from_checkpoint(job.checkpoint.as_ref());
         Self {
             job,
             queue,
             worker_id,
+            scope,
             steps: Arc::new(std::sync::Mutex::new(steps)),
         }
     }
@@ -104,6 +114,14 @@ impl JobContext {
     /// The worker that holds this job.
     pub const fn worker_id(&self) -> Uuid {
         self.worker_id
+    }
+
+    /// Whether worker shutdown or this job's deadline has requested cancellation.
+    ///
+    /// Handlers can check this at safe checkpoints to stop cooperatively before the
+    /// worker's drain deadline. It does not wake a handler blocked on I/O.
+    pub fn is_cancelled(&self) -> bool {
+        self.scope.is_cancelled()
     }
 
     /// The step record: what earlier attempts completed, plus this attempt so far.
@@ -184,9 +202,10 @@ pub struct WorkerConfig {
     pub tenant_limit: Option<TenantLimit>,
     /// Consecutive failures that trip a task's circuit. `None` disables it.
     pub breaker_failure_threshold: Option<usize>,
-    /// How long in-flight jobs may finish on shutdown; remaining handler futures are
-    /// cancelled and joined, and their claims are left to the reaper.
-    /// Handlers must yield; work they spawn themselves cannot be cancelled by the worker.
+    /// How long in-flight jobs may finish on shutdown before their handler futures are
+    /// aborted and joined; unsettled claims are left to the reaper. Handlers can check
+    /// [`JobContext::is_cancelled`] at safe points to stop cooperatively. Blocking work
+    /// and tasks handlers detach cannot be stopped by the worker.
     pub shutdown_timeout: Duration,
 
     /// Minimum gap between claim round trips, however many wakeups arrive.
@@ -336,11 +355,13 @@ impl Worker {
         self.register(T::TASK, crate::async_job::run_typed::<T>)
     }
 
-    /// Run until `shutdown` fires. Drain for `shutdown_timeout`, then cancel and join
-    /// remaining handlers before returning. Unsettled claims stay eligible for reaping.
+    /// Run until `shutdown` fires. Notify handlers, drain for `shutdown_timeout`, then
+    /// abort and join remaining handlers. Unsettled claims stay eligible for reaping.
     pub async fn run(self, mut shutdown: watch::Receiver<bool>) -> Result<()> {
         let worker_id = register_worker(&self.queue, &self.config.queues).await?;
         let queues_label = self.config.queues.label();
+        let cancellation_scope = Scope::never();
+        let _cancel_on_drop = CancelScopeOnDrop(cancellation_scope.clone());
 
         info!(%worker_id, queues = %queues_label, "worker registered");
 
@@ -508,17 +529,30 @@ impl Worker {
                     .breaker_failure_threshold
                     .map(|t| self.breaker_for(&job.task, t));
                 let metrics = self.metrics.clone();
+                let cancellation_scope = cancellation_scope.clone();
 
                 executions.spawn(async move {
                     // The slot and this queue's cap stay taken until the outcome is reported.
                     let _slot = (permit, held);
                     execute(
-                        queue, job, worker_id, handler, timeout, backoff, breaker, metrics,
+                        queue,
+                        job,
+                        worker_id,
+                        handler,
+                        timeout,
+                        backoff,
+                        breaker,
+                        cancellation_scope,
+                        metrics,
                     )
                     .await;
                 });
             }
         }
+
+        // Let handlers and any work they spawned observe shutdown before the drain
+        // deadline forces the worker to abort their execution futures.
+        cancellation_scope.cancel();
 
         // Drain the tasks themselves, not just their permits: dropping a JoinHandle
         // detaches its task and would allow stale work to outlive this worker.
@@ -527,7 +561,9 @@ impl Worker {
             info!(%worker_id, in_flight, "draining");
         }
 
-        let drained = tokio::time::timeout(self.config.shutdown_timeout, async {
+        let drain_clock = TokioClock::new();
+        let drain_deadline = deadline_after(&drain_clock, self.config.shutdown_timeout);
+        let drained = with_deadline(&drain_clock, drain_deadline, async {
             while let Some(result) = executions.join_next().await {
                 log_execution_exit(result);
             }
@@ -563,6 +599,14 @@ impl Worker {
         .await?;
         info!(%worker_id, "worker stopped");
         Ok(())
+    }
+}
+
+struct CancelScopeOnDrop(Scope);
+
+impl Drop for CancelScopeOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
     }
 }
 
@@ -605,6 +649,7 @@ async fn execute(
     timeout: Duration,
     backoff: BackoffPolicy,
     breaker: Option<Arc<AsyncCircuitBreaker>>,
+    cancellation_scope: Scope,
     metrics: Metrics,
 ) {
     let job_id = job.id;
@@ -643,15 +688,24 @@ async fn execute(
                 );
             }
 
-            let ctx = JobContext::new(job.clone(), queue.clone(), worker_id);
+            let clock = TokioClock::new();
+            let timeout_ns = u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX);
+            let job_scope = cancellation_scope.derive(clock.now(), timeout_ns);
+            let ctx =
+                JobContext::new_scoped(job.clone(), queue.clone(), worker_id, job_scope.clone());
 
             let run = || async {
-                // Cancels the future but cannot kill a blocking thread; sync handlers
-                // must use spawn_blocking.
-                tokio::select! {
-                    res = h(ctx.clone()) => res.map_err(Error::from_handler),
-                    () = tokio::time::sleep(timeout) => Err(Error::Timeout(timeout)),
-                }
+                with_deadline(&clock, job_scope.deadline(), h(ctx.clone()))
+                    .await
+                    .map_or_else(
+                        |_| {
+                            // Propagate timeout cancellation to context clones that handlers
+                            // may have moved into their own tasks.
+                            job_scope.cancel();
+                            Err(Error::Timeout(timeout))
+                        },
+                        |result| result.map_err(Error::from_handler),
+                    )
             };
 
             match breaker {

@@ -295,7 +295,15 @@ async fn finite_drain_keeps_heartbeating_and_stops_new_admissions() {
     };
     let q = &db.queue;
     let mut running = Running::start(q, Duration::from_secs(2)).await;
+    assert!(!running.ctx.is_cancelled());
     running.shutdown.send(true).unwrap();
+    bounded(async {
+        while !running.ctx.is_cancelled() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await;
+    assert!(running.ctx.is_cancelled());
     let waiting = q
         .enqueue(NewJob::new("default", "wait"))
         .await

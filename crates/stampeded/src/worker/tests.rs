@@ -4,6 +4,22 @@ use super::*;
 
 mod shutdown;
 
+#[tokio::test]
+async fn job_context_inherits_its_workers_cancellation_scope() {
+    let queue = Queue::new(sqlx::PgPool::connect_lazy("postgres://invalid/db").unwrap());
+    let cancellation = Scope::never();
+    let context = JobContext::new_scoped(
+        job_with_backoff(SCHEMA_BACKOFF_BASE_MS, SCHEMA_BACKOFF_MAX_MS, 1),
+        queue,
+        Uuid::now_v7(),
+        cancellation.clone(),
+    );
+
+    assert!(!context.is_cancelled());
+    cancellation.cancel();
+    assert!(context.is_cancelled());
+}
+
 #[test]
 fn default_config_heartbeats_well_inside_the_reap_window() {
     let c = WorkerConfig::default();

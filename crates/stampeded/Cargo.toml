@@ -50,6 +50,7 @@ state-machines.workspace = true
 chrono-machines.workspace = true
 breaker-machines.workspace = true
 throttle-machines.workspace = true
+deadline-machines.workspace = true
 behavior-machines.workspace = true
 behavior-machines-circuit.workspace = true
 

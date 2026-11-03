@@ -40,6 +40,7 @@ state-machines = "0.32"
 chrono-machines = "0.9"
 breaker-machines = { version = "0.20", features = ["async"] }
 throttle-machines = "0.3"
+deadline-machines = { version = "0.3", features = ["tokio"] }
 # The queue planner.
 behavior-machines = { version = "0.2", default-features = false }
 behavior-machines-circuit = "0.1"
