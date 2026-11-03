@@ -437,7 +437,7 @@ async fn shutdown_during_claim_does_not_admit_returned_jobs_or_orphan_them() {
     let task = tokio::spawn(worker.run(rx));
     bounded(async {
         loop {
-            let blocked: bool = sqlx::query_scalar(
+            let claim_waiting: bool = sqlx::query_scalar(
                 "SELECT EXISTS (
                     SELECT 1 FROM pg_stat_activity WHERE application_name = $1
                     AND query LIKE '%stampeded_claim(%' AND wait_event_type = 'Lock'
@@ -447,7 +447,7 @@ async fn shutdown_during_claim_does_not_admit_returned_jobs_or_orphan_them() {
             .fetch_one(q.pool())
             .await
             .unwrap();
-            if blocked {
+            if claim_waiting {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
