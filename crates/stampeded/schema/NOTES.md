@@ -1000,6 +1000,38 @@ it is the fallback for all of them.
 
 ## Recurring schedules
 
+### Schedule job limits (migration 8)
+
+`max_attempts smallint NOT NULL DEFAULT 25 CHECK (max_attempts >= 1)`,
+`max_interruptions smallint NOT NULL DEFAULT 1 CHECK (max_interruptions >= 0)`,
+and `expire_seconds integer NOT NULL DEFAULT 3600 CHECK (expire_seconds > 0)`
+are job-template settings on `stampeded_schedules`, copied by
+`stampeded_fire_schedule` onto every new occurrence's job. The integer types
+also bound the upper range to the job columns' own range.
+
+Attempts include the first claim, so 3 means at most three attempts, not three
+retries. Interruptions count worker deaths separately; 0 means the first
+interruption is terminal. Expiry is positive seconds of inactivity while
+executing, measured from the last job heartbeat (or claim); it is not a
+queued-job TTL or an absolute deadline.
+
+Migration 8 adds these columns with the old job defaults and replaces only
+the firing function. Existing schedules keep their prior behavior, explicit
+column-list inserts can still omit all three, and existing jobs and occurrence
+ledger entries are untouched. Apply it through `schema::migrate`; do not edit
+earlier migrations or alter the jobs table's defaults. The migration runs in
+one transaction and takes an ordinary ALTER TABLE lock on the schedules table,
+so a firing transaction and the upgrade cannot see half of the change.
+Roll out binaries containing migration 8 before their next migration/startup:
+older binaries intentionally refuse databases with migrations they do not know.
+This is a forward upgrade, not a down migration for rolling back the release.
+
+The two-argument firing signature, occurrence tokens, conflict handling,
+timezone fallback and claim/fire transaction remain unchanged. A duplicate
+occurrence still advances the schedule without creating or rewriting a job.
+Schedule registration helpers keep explicitly configured limits on update;
+use SQL to configure them, not a consumer's `NewJob` defaults.
+
 ### `CREATE TABLE stampeded_schedules (`
 
 Stampeded -- recurring schedules

@@ -1,6 +1,15 @@
 //! Recurring schedules: Postgres claims due rows, this module computes the next firing.
 //!
 //! The tick is one transaction, so the claimed row locks are held while `Cron` computes.
+//!
+//! Per-occurrence job limits live on `stampeded_schedules`: `max_attempts`
+//! (smallint, at least 1, default 25), `max_interruptions` (smallint, at least 0,
+//! default 1), and `expire_seconds` (integer, positive seconds, default 3600).
+//! Set them with an ordinary SQL INSERT or UPDATE; `stampeded_fire_schedule`
+//! copies them onto each new job. Changing a schedule never changes jobs already
+//! enqueued. Expiry is the executing job's inactivity timeout, not a deadline
+//! for a queued occurrence. Consumer-side [`crate::NewJob`] options do not
+//! configure jobs produced by a schedule.
 
 use crate::cron::{Cron, DstPolicy};
 use crate::error::Result;
@@ -8,7 +17,7 @@ use jiff::tz::TimeZone;
 use jiff::{Timestamp, ToSpan, Zoned};
 use tracing::warn;
 
-/// A schedule as stored. Mirrors `stampeded_schedules`.
+/// Scheduling fields of a stored schedule; job-template limits stay in SQL.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Schedule {
     pub key: String,

@@ -1,4 +1,4 @@
-//! `schema::migrate` on databases stampeded 0.2–0.4 left, and the dedup key
+//! `schema::migrate` on databases stampeded 0.2–0.6 left, and the dedup key
 //! it builds, each case in a schema of its own:
 //!
 //!   STAMPEDED_TEST_DATABASE_URL=postgres://ubuntu:ubuntu@localhost/stampeded_test \
@@ -34,7 +34,10 @@ async fn legacy(pool: &PgPool, dedup_key: &str, version: Option<i32>) {
         |v| format!("UPDATE stampeded_schema SET version = {v}"),
     );
     sqlx::raw_sql(AssertSqlSafe(format!(
-        "{dedup_key}; DROP TABLE stampeded_migrations; {recorded}"
+        "{dedup_key};
+         ALTER TABLE stampeded_schedules
+             DROP COLUMN max_attempts, DROP COLUMN max_interruptions, DROP COLUMN expire_seconds;
+         DROP TABLE stampeded_migrations; {recorded}"
     )))
     .execute(pool)
     .await
@@ -218,4 +221,106 @@ async fn a_scope_is_keyed_by_its_text_not_its_bytea_escapes() {
     )
     .await
     .expect("each distinct text is its own key");
+}
+
+#[tokio::test]
+async fn a_0_6_schedule_is_upgraded_without_rewriting_jobs_or_occurrences() {
+    let Some(pool) = empty().await else { return };
+    // Install exactly the migrations shipped in 0.6, with their real checksums.
+    let embedded = sqlx::migrate!("./schema");
+    let mut released = sqlx::migrate::Migrator::with_migrations(
+        embedded
+            .iter()
+            .filter(|m| m.version <= 7)
+            .cloned()
+            .collect(),
+    );
+    released.dangerous_set_table_name("stampeded_migrations");
+    released.run(&pool).await.expect("released 0.6 schema");
+
+    sqlx::query(
+        "INSERT INTO stampeded_schedules (key, queue, task, interval_secs, next_run_at)
+         VALUES ('existing', 'default', 'report', 60, '2026-01-01T00:00:00Z')",
+    )
+    .execute(&pool)
+    .await
+    .expect("old column-list insert");
+    let id: uuid::Uuid = sqlx::query_scalar(
+        "SELECT stampeded_fire_schedule('existing', next_run_at) FROM stampeded_schedules",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("0.6 firing");
+    let old_job: serde_json::Value =
+        sqlx::query_scalar("SELECT to_jsonb(j) FROM stampeded_jobs j WHERE id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("job snapshot");
+    let old_occurrence: serde_json::Value =
+        sqlx::query_scalar("SELECT to_jsonb(o) FROM stampeded_cron_occurrences o")
+            .fetch_one(&pool)
+            .await
+            .expect("occurrence snapshot");
+    let checksums: Vec<(i64, Vec<u8>)> =
+        sqlx::query_as("SELECT version, checksum FROM stampeded_migrations ORDER BY version")
+            .fetch_all(&pool)
+            .await
+            .expect("released checksums");
+
+    let (a, b) = tokio::join!(schema::migrate(&pool), schema::migrate(&pool));
+    a.expect("upgrade");
+    b.expect("concurrent upgrade");
+    schema::migrate(&pool).await.expect("repeat migration");
+    let preserved: Vec<(i64, Vec<u8>)> = sqlx::query_as(
+        "SELECT version, checksum FROM stampeded_migrations WHERE version <= 7 ORDER BY version",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("preserved checksums");
+    assert_eq!(preserved, checksums);
+    let version: i32 = sqlx::query_scalar("SELECT version FROM stampeded_schema")
+        .fetch_one(&pool)
+        .await
+        .expect("schema version");
+    assert_eq!(version, 8);
+    let defaults: (i16, i16, i32) = sqlx::query_as(
+        "SELECT max_attempts, max_interruptions, expire_seconds FROM stampeded_schedules",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("backfilled defaults");
+    assert_eq!(defaults, (25, 1, 3600));
+
+    let q = stampeded::Queue::new(pool);
+    // The released occurrence is still due, but its ledger prevents a second job.
+    assert_eq!(q.run_due_schedules(10).await.expect("replay"), 0);
+    let job: serde_json::Value = sqlx::query_scalar("SELECT to_jsonb(j) FROM stampeded_jobs j")
+        .fetch_one(q.pool())
+        .await
+        .expect("unchanged job");
+    let occurrence: serde_json::Value =
+        sqlx::query_scalar("SELECT to_jsonb(o) FROM stampeded_cron_occurrences o")
+            .fetch_one(q.pool())
+            .await
+            .expect("unchanged occurrence");
+    assert_eq!(job, old_job);
+    assert_eq!(occurrence, old_occurrence);
+
+    sqlx::query(
+        "UPDATE stampeded_schedules SET max_attempts = 3, max_interruptions = 0,
+             expire_seconds = 120, next_run_at = '2026-01-01T00:01:00Z'",
+    )
+    .execute(q.pool())
+    .await
+    .expect("configure upgraded schedule");
+    assert_eq!(q.run_due_schedules(10).await.expect("new occurrence"), 1);
+    let limits: (i16, i16, i32) = sqlx::query_as(
+        "SELECT max_attempts, max_interruptions, expire_seconds FROM stampeded_jobs WHERE id <> $1",
+    )
+    .bind(id)
+    .fetch_one(q.pool())
+    .await
+    .expect("upgraded firing");
+    assert_eq!(limits, (3, 0, 120));
 }

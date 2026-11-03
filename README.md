@@ -215,6 +215,24 @@ collected; `Release` gives it back at once.
 
 ## Recurring schedules
 
+Schedules carry their own job limits; consumer-side `NewJob` options do not
+apply to jobs the scheduler inserts. Omit the columns for the old defaults:
+25 total attempts, 1 tolerated worker interruption, and 3600 seconds of
+executing-job inactivity before expiry. Configure them per schedule:
+
+```sql
+UPDATE stampeded_schedules
+SET max_attempts = 3, max_interruptions = 0, expire_seconds = 120
+WHERE key = 'nightly';
+```
+
+`max_attempts` must be at least 1, `max_interruptions` at least 0 (the first
+worker death is then terminal), and `expire_seconds` positive. Expiry is not a
+queued-job TTL. Each new occurrence copies these values; already-enqueued jobs
+are unchanged. Existing registration calls still work and preserve configured
+limits on update. `schema::migrate` applies forward migration 8 to existing
+installs; no job-default changes or application triggers are needed.
+
 Cron expressions or fixed intervals, stored as rows and editable at runtime:
 
 ```sql
