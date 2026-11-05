@@ -32,7 +32,7 @@ dashboard = ["http"]
 # MCP control plane.
 mcp = ["dep:mcp-host", "dep:schemars"]
 # 3D game world visualization of the job queue state.
-game = ["http"]
+game = ["http", "dep:rama-x-threejs"]
 
 [dependencies]
 sqlx.workspace = true
@@ -56,6 +56,7 @@ behavior-machines-circuit.workspace = true
 
 rama = { workspace = true, optional = true }
 rama-http-backend = { workspace = true, optional = true }
+rama-x-threejs = { workspace = true, optional = true }
 mcp-host = { workspace = true, optional = true }
 schemars = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }

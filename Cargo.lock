@@ -2114,11 +2114,13 @@ dependencies = [
  "httpdate",
  "iri-string",
  "jiff",
+ "memchr",
  "parking_lot",
  "percent-encoding",
  "pin-project-lite",
  "rama-core",
  "rama-http-headers",
+ "rama-http-macros",
  "rama-http-types",
  "rama-json",
  "rama-net",
@@ -2211,6 +2213,18 @@ dependencies = [
  "rama-core",
  "rama-http-types",
  "rama-net",
+]
+
+[[package]]
+name = "rama-http-macros"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "40327204e266349011a728f67a39f0871908664a126e7f33d1906ed664ec9c7e"
+dependencies = [
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -2455,6 +2469,16 @@ dependencies = [
  "tokio",
  "tracing",
  "wildcard",
+]
+
+[[package]]
+name = "rama-x-threejs"
+version = "0.1.0"
+source = "git+https://github.com/seuros/rama-x-threejs?rev=6f76f503f774b4e2930ee445b4c83b84bc132a49#6f76f503f774b4e2930ee445b4c83b84bc132a49"
+dependencies = [
+ "rama",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -3121,6 +3145,7 @@ dependencies = [
  "mcp-host",
  "rama",
  "rama-http-backend",
+ "rama-x-threejs",
  "schemars",
  "serde",
  "serde_json",

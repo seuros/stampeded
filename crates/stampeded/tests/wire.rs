@@ -351,59 +351,80 @@ async fn the_dashboard_assets_resolve_including_whatever_they_advertise() {
     let _ = tx.send(true);
 }
 
+/// The page's import map, the one place that says where each module lives.
+#[cfg(feature = "game")]
+fn import_map(html: &str) -> serde_json::Map<String, serde_json::Value> {
+    let json = html
+        .split(r#"<script type="importmap">"#)
+        .nth(1)
+        .and_then(|r| r.split("</script>").next())
+        .expect("the game page has an import map");
+    let map: serde_json::Value = serde_json::from_str(json).expect("the import map is JSON");
+    map["imports"].as_object().expect("imports").clone()
+}
+
+/// The game page, and the URL each import map specifier names.
+#[cfg(feature = "game")]
+async fn game_imports(addr: &str) -> serde_json::Map<String, serde_json::Value> {
+    let (status, html) = request(addr, "GET", "/game?token=s3cret", None).await;
+    assert_eq!(status, 200, "the game page cannot load");
+    import_map(&html)
+}
+
+#[cfg(feature = "game")]
+fn specifier<'a>(imports: &'a serde_json::Map<String, serde_json::Value>, name: &str) -> &'a str {
+    imports
+        .get(name)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_else(|| panic!("the import map does not name {name:?}: {imports:?}"))
+}
+
 #[tokio::test]
 #[cfg(feature = "game")]
 async fn the_game_world_assets_fetch_nothing_from_the_network() {
     let (addr, _q, tx) = server!();
+    let imports = game_imports(&addr).await;
 
-    let (status, _html) = request(&addr, "GET", "/game?token=s3cret", None).await;
-    assert_eq!(status, 200, "the game page cannot load");
-
-    let (status, three_js) = request(&addr, "GET", "/game/three.module.min.js", None).await;
-    assert_eq!(
-        status, 200,
-        "three.module.js must be served from the binary"
-    );
-    assert!(
-        three_js.len() > 100_000,
-        "three.module.min.js looks truncated: {} bytes",
-        three_js.len()
-    );
-    assert_no_remote_fetch("three.module.min.js", &three_js);
-
-    // The shell is useless without the core it re-exports from.
-    let (status, core) = request(&addr, "GET", "/game/three.core.min.js", None).await;
-    assert_eq!(
-        status, 200,
-        "three.core.min.js must be served: the module imports it"
-    );
-    assert!(
-        core.len() > 100_000,
-        "three.core.min.js looks truncated: {} bytes",
-        core.len()
-    );
-    assert_no_remote_fetch("three.core.min.js", &core);
-
-    // Under /game/loaders/ so its '../utils/...' imports resolve to /game/utils/.
-    let (status, gltf_loader) = request(&addr, "GET", "/game/loaders/gltf-loader.js", None).await;
-    assert_eq!(status, 200, "gltf-loader.js must be served from the binary");
-    assert!(
-        gltf_loader.len() > 10_000,
-        "gltf-loader.js looks truncated: {} bytes",
-        gltf_loader.len()
-    );
-    assert_no_remote_fetch("gltf-loader.js", &gltf_loader);
-
-    // The addon utils it imports: a 404 here kills the loader.
-    for util in ["BufferGeometryUtils.js", "SkeletonUtils.js"] {
-        let (status, body) = request(&addr, "GET", &format!("/game/utils/{util}"), None).await;
-        assert_eq!(status, 200, "{util} must be served: GLTFLoader imports it");
+    // Everything the page imports, by specifier; each served whole and local.
+    let addons = specifier(&imports, "three/addons/");
+    for (what, url, min_len) in [
+        ("three", specifier(&imports, "three").to_owned(), 100_000),
+        (
+            "the hook",
+            specifier(&imports, "rama-x-threejs").to_owned(),
+            1_000,
+        ),
+        (
+            "Datastar",
+            specifier(&imports, "datastar").to_owned(),
+            10_000,
+        ),
+        (
+            "GLTFLoader",
+            format!("{addons}loaders/GLTFLoader.js"),
+            10_000,
+        ),
+        // GLTFLoader imports these two; a 404 here kills the loader.
+        (
+            "BufferGeometryUtils",
+            format!("{addons}utils/BufferGeometryUtils.js"),
+            5_000,
+        ),
+        (
+            "SkeletonUtils",
+            format!("{addons}utils/SkeletonUtils.js"),
+            5_000,
+        ),
+        ("the scene", "/game/game.js".to_owned(), 5_000),
+    ] {
+        let (status, body) = request(&addr, "GET", &url, None).await;
+        assert_eq!(status, 200, "{what} must be served from the binary ({url})");
         assert!(
-            body.len() > 5_000,
-            "{util} looks truncated: {} bytes",
+            body.len() > min_len,
+            "{what} looks truncated: {} bytes",
             body.len()
         );
-        assert_no_remote_fetch(util, &body);
+        assert_no_remote_fetch(what, &body);
     }
 
     // Models must be glTF, not HTML error pages.
@@ -429,6 +450,7 @@ async fn the_game_world_assets_fetch_nothing_from_the_network() {
 
     let _ = tx.send(true);
 }
+
 /// Assert a served script's code, not its comments (which cite URLs), fetches nothing.
 #[cfg(feature = "game")]
 fn assert_no_remote_fetch(what: &str, src: &str) {
@@ -497,49 +519,41 @@ fn strip_js_comments(src: &str) -> String {
     out
 }
 
-/// The event name the server sends must be the one the browser listens for.
+/// The scene the server sends must be the one the canvas mounts.
 #[test]
 #[cfg(feature = "game")]
 fn the_game_page_listens_for_the_event_the_server_actually_sends() {
-    let src = include_str!("../src/http/game.rs");
+    let server = include_str!("../src/http/game.rs");
+    let scene = include_str!("../assets/game.js");
 
     // What the server sends.
-    let sent = src
-        .split("try_with_event(\"")
+    let sent = server
+        .split("SceneSignals::new(\"")
         .nth(1)
         .and_then(|r| r.split('"').next())
-        .map(str::to_string);
+        .expect("the stream sends no SceneSignals");
 
-    match sent {
-        Some(name) => {
-            assert!(
-                src.contains(&format!("addEventListener(\"{name}\"")),
-                "the server sends a named SSE event {name:?} but the page never \
-                 registers addEventListener(\"{name}\"). A named event does NOT \
-                 trigger onmessage, so the browser receives every frame and \
-                 discards it."
-            );
-        }
-        None => {
-            // Unnamed events are type "message", which onmessage handles.
-            assert!(
-                src.contains("eventSource.onmessage"),
-                "the server sends unnamed SSE events but the page does not \
-                 define onmessage"
-            );
-        }
-    }
+    assert!(
+        server.contains(&format!("data-three:{sent}=\"/game/game.js\"")),
+        "the server sends the scene {sent:?} but no data-three:{sent} element \
+         mounts game.js, so every frame reaches the page and is dropped"
+    );
+    assert!(
+        scene.contains("export function update("),
+        "game.js exports no update(), so the hook has nothing to call"
+    );
 }
 
 /// The page loads models, and every model it names is embedded.
 #[test]
 #[cfg(feature = "game")]
 fn the_models_in_the_binary_are_actually_used_by_the_scene() {
+    let scene = include_str!("../assets/game.js");
     let raw = include_str!("../src/http/game.rs");
 
     // Line-based, not strip_js_comments: apostrophes in the Rust prose desync
     // its quote tracking, and a comment there mentions "loader.load()".
-    let calls_loader = raw.lines().any(|l| {
+    let calls_loader = scene.lines().any(|l| {
         let t = l.trim_start();
         !t.starts_with("//") && t.contains("loader.load(")
     });
@@ -558,7 +572,7 @@ fn the_models_in_the_binary_are_actually_used_by_the_scene() {
         .collect();
     assert!(!embedded.is_empty(), "no models embedded at all");
 
-    for referenced in raw
+    for referenced in scene
         .split("MODEL_FILES")
         .nth(1)
         .unwrap_or("")
@@ -576,93 +590,94 @@ fn the_models_in_the_binary_are_actually_used_by_the_scene() {
     }
 }
 
-/// Every relative import in every served JS asset resolves to a route.
-#[test]
+/// Every module the scene pulls in, transitively, resolves and is served.
+#[tokio::test]
 #[cfg(feature = "game")]
-fn every_import_in_the_served_assets_resolves_to_a_route() {
-    let routes = include_str!("../src/http.rs");
-    // Every embedded .js; the guard below keeps this list complete.
-    let assets: [(&str, &str); 5] = [
-        (
-            "/game/three.module.min.js",
-            include_str!("../assets/three.module.min.js"),
-        ),
-        (
-            "/game/three.core.min.js",
-            include_str!("../assets/three.core.min.js"),
-        ),
-        (
-            "/game/loaders/gltf-loader.js",
-            include_str!("../assets/gltf-loader.js"),
-        ),
-        (
-            "/game/utils/BufferGeometryUtils.js",
-            include_str!("../assets/utils/BufferGeometryUtils.js"),
-        ),
-        (
-            "/game/utils/SkeletonUtils.js",
-            include_str!("../assets/utils/SkeletonUtils.js"),
-        ),
+async fn every_import_in_the_served_assets_resolves_to_a_route() {
+    let (addr, _q, tx) = server!();
+    let imports = game_imports(&addr).await;
+
+    // The scene the canvas names, and the hook the page imports.
+    let mut queue = vec![
+        "/game/game.js".to_owned(),
+        specifier(&imports, "rama-x-threejs").to_owned(),
     ];
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(url) = queue.pop() {
+        if !seen.insert(url.clone()) {
+            continue;
+        }
+        let (status, src) = request(&addr, "GET", &url, None).await;
+        assert_eq!(status, 200, "{url} is imported but answers {status}");
 
-    // include_bytes! of .js only: a bare ".js\")" also matches routes and the importmap.
-    let embedded_js = include_str!("../src/http/game.rs")
-        .split("include_bytes!(\"../../assets/")
-        .skip(1)
-        .filter(|r| r.split('"').next().is_some_and(|f| has_extension(f, "js")))
-        .count();
-    assert_eq!(
-        assets.len(),
-        embedded_js,
-        "the binary embeds {embedded_js} .js assets but this test checks {}. \
-         Add the new one here, or its imports go unverified -- which is exactly \
-         how three.core.min.js came to be imported but never served.",
-        assets.len()
-    );
-
-    for (served_at, src) in assets {
-        let base = served_at.rsplit_once('/').unwrap().0;
-
-        // Specifiers, not lines: minified three is one line. Only relative ones
-        // resolve against the serving path; bare ones are the importmap's.
-        for (i, _) in src.match_indices("from") {
-            let rest = src[i + 4..].trim_start();
+        // Specifiers, not lines: minified three is one line. Comments cite
+        // URLs, so they go first.
+        let code = strip_js_comments(&src);
+        for (i, _) in code.match_indices("from") {
+            // An import clause only: back to its `import`/`export` keyword
+            // there are just names, braces, `*`, commas and spaces. A message
+            // such as `converting from "srgb-linear"` is not an import.
+            let before = &code[..i];
+            let keyword = before.rfind("import").max(before.rfind("export"));
+            let is_clause = keyword.is_some_and(|k| {
+                before[k + 6..]
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c.is_whitespace() || "_${},*".contains(c))
+            });
+            if !is_clause {
+                continue;
+            }
+            let rest = code[i + 4..].trim_start();
             let Some(quote) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') else {
                 continue;
             };
             let Some(spec) = rest[1..].split(quote).next() else {
                 continue;
             };
-            if !(spec.starts_with("./") || spec.starts_with("../")) || spec.len() > 200 {
-                continue;
-            }
-
-            let mut resolved = base.to_string();
-            for seg in spec.split('/') {
-                match seg {
-                    "." => {}
-                    ".." => resolved = resolved.rsplit_once('/').unwrap().0.to_string(),
-                    other => {
-                        resolved.push('/');
-                        resolved.push_str(other);
+            let resolved = if spec.starts_with("./") || spec.starts_with("../") {
+                let mut resolved = url.rsplit_once('/').unwrap().0.to_string();
+                for seg in spec.split('/') {
+                    match seg {
+                        "." => {}
+                        ".." => resolved = resolved.rsplit_once('/').unwrap().0.to_string(),
+                        other => {
+                            resolved.push('/');
+                            resolved.push_str(other);
+                        }
                     }
                 }
-            }
-
-            assert!(
-                routes.contains(&format!("\"{resolved}\"")),
-                "{served_at} imports {spec:?}, which resolves to {resolved} -- \
-                 no route serves that, so it 404s and the module never loads"
-            );
+                resolved
+            } else if let Some(exact) = imports.get(spec).and_then(serde_json::Value::as_str) {
+                exact.to_owned()
+            } else if let Some((key, base)) = imports
+                .iter()
+                .find(|(key, _)| key.ends_with('/') && spec.starts_with(key.as_str()))
+            {
+                format!("{}{}", base.as_str().unwrap(), &spec[key.len()..])
+            } else {
+                panic!(
+                    "{url} imports {spec:?}, which the import map does not name -- \
+                     the browser refuses a bare specifier it cannot map"
+                );
+            };
+            queue.push(resolved);
         }
     }
+    assert!(
+        seen.iter().any(|u| u.ends_with("/GLTFLoader.js")),
+        "the walk never reached GLTFLoader: {seen:?}"
+    );
+
+    let _ = tx.send(true);
 }
 
 /// Every external resource (a texture URI) an embedded model references is served.
-#[test]
+#[tokio::test]
 #[cfg(feature = "game")]
-fn every_external_resource_a_model_references_is_served() {
-    let routes = include_str!("../src/http.rs");
+async fn every_external_resource_a_model_references_is_served() {
+    let (addr, _q, tx) = server!();
+    // The loader resolves a model's references against the model's own URL.
+    let models_dir = "/game/models/";
     let models: [(&str, &[u8]); 3] = [
         (
             "box-small.glb",
@@ -696,21 +711,24 @@ fn every_external_resource_a_model_references_is_served() {
                 continue;
             }
 
-            let resolved = format!("/game/models/{uri}");
-            assert!(
-                routes.contains(&format!("\"{resolved}\"")),
-                "{name} references {uri:?}, which resolves to {resolved} -- no \
-                 route serves it, so the model loads but renders untextured"
+            let resolved = format!("{models_dir}{uri}");
+            let (status, _) = request(&addr, "GET", &resolved, None).await;
+            assert_eq!(
+                status, 200,
+                "{name} references {uri:?}, which resolves to {resolved} -- \
+                 nothing serves it, so the model loads but renders untextured"
             );
         }
     }
+
+    let _ = tx.send(true);
 }
 
 /// Every state summed into the denominator must also be drawable.
 #[test]
 #[cfg(feature = "game")]
 fn every_state_in_the_denominator_can_be_drawn() {
-    let src = include_str!("../src/http/game.rs");
+    let src = include_str!("../assets/game.js");
 
     let field_names = |frag: &str| -> Vec<String> {
         frag.match_indices("queue.")

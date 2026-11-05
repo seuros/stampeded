@@ -34,6 +34,8 @@ pub async fn serve(
     use rama::rt::Executor;
     use rama::tcp::server::TcpListener;
     use rama_http_backend::server::HttpServer;
+    #[cfg(feature = "game")]
+    use rama_x_threejs::ThreeRouterExt as _;
 
     let app_router = {
         // Static assets are public; the pages that load them are not.
@@ -42,16 +44,11 @@ pub async fn serve(
             .with_get("/dashboard/datastar.js", dashboard::script)
             .with_get("/dashboard/datastar.js.map", dashboard::script_map);
 
+        // three.js and Datastar, then the scene module and its models.
         #[cfg(feature = "game")]
         let r = r
-            .with_get("/game/three.module.min.js", game::three_module)
-            .with_get("/game/three.core.min.js", game::three_core)
-            .with_get("/game/loaders/gltf-loader.js", game::gltf_loader)
-            .with_get(
-                "/game/utils/BufferGeometryUtils.js",
-                game::buffer_geometry_utils,
-            )
-            .with_get("/game/utils/SkeletonUtils.js", game::skeleton_utils)
+            .with_three(game::THREE)
+            .with_get("/game/game.js", game::scene)
             .with_get("/game/models/Textures/colormap.png", game::model_texture)
             .with_get(
                 "/game/models/{name}",
