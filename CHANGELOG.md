@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.1](https://github.com/seuros/stampeded/compare/stampeded-v0.7.0...stampeded-v0.7.1) (2026-11-05)
+
+
+### Bug Fixes
+
+* **game:** render Factory Kit models with their texture and recover dropped streams ([e8c3e0d](https://github.com/seuros/stampeded/commit/e8c3e0d39d8433e6d19223fa4539e2d3fdfa31f3))
+
 ## [0.7.0](https://github.com/seuros/stampeded/compare/stampeded-v0.6.0...stampeded-v0.7.0) (2026-11-03)
 
 
