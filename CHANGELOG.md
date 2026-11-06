@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.1](https://github.com/seuros/stampeded/compare/stampeded-v0.8.0...stampeded-v0.8.1) (2026-11-06)
+
+
+### Bug Fixes
+
+* **deps:** move to chrono 0.11, breaker 0.24, deadline 0.4, mcp-host 0.23 ([a17199e](https://github.com/seuros/stampeded/commit/a17199ee550100bf083e8cfa075d517ac09f93a6))
+
 ## [0.8.0](https://github.com/seuros/stampeded/compare/stampeded-v0.7.2...stampeded-v0.8.0) (2026-11-06)
 
 
