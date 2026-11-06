@@ -181,6 +181,7 @@ pub fn server(name: &str, version: &str, allow_writes: bool) -> mcp_host::server
             half_open_timeout_secs: 15.0,
             success_threshold: 1,
             call_timeout_secs: 30.0,
+            max_concurrent_calls: 16,
         })
         .with_runtime_config(ServerRuntimeConfig {
             notification_queue_capacity: 256,
