@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.2](https://github.com/seuros/stampeded/compare/stampeded-v0.7.1...stampeded-v0.7.2) (2026-11-06)
+
+
+### Bug Fixes
+
+* serialise stampeded_create_queue so concurrent first opens cannot collide ([5aee1c5](https://github.com/seuros/stampeded/commit/5aee1c5ae4ce2e4d68c103db45d2edeadde11070))
+
 ## [0.7.1](https://github.com/seuros/stampeded/compare/stampeded-v0.7.0...stampeded-v0.7.1) (2026-11-05)
 
 
