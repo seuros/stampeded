@@ -133,6 +133,29 @@ async fn completing_releases_the_dedup_slot() {
 }
 
 #[tokio::test]
+async fn concurrent_provisioning_of_one_queue_creates_it_once() {
+    let q = q!();
+    let (a, b, c) = tokio::join!(
+        q.create_queue("burst"),
+        q.create_queue("burst"),
+        q.create_queue("burst")
+    );
+    a.expect("first provision");
+    b.expect("concurrent provision");
+    c.expect("concurrent provision");
+    let partitions: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_inherits
+          WHERE inhparent = 'stampeded_jobs'::regclass
+            AND inhrelid = 'stampeded_jobs_burst'::regclass",
+    )
+    .fetch_one(q.pool())
+    .await
+    .expect("partition count");
+    assert_eq!(partitions, 1);
+    q.enqueue(NewJob::new("burst", "t")).await.expect("enqueue on the new partition");
+}
+
+#[tokio::test]
 async fn concurrent_workers_claim_disjoint_jobs() {
     let q = q!();
     let a = q

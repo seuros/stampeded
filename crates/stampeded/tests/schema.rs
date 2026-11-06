@@ -283,7 +283,7 @@ async fn a_0_6_schedule_is_upgraded_without_rewriting_jobs_or_occurrences() {
         .fetch_one(&pool)
         .await
         .expect("schema version");
-    assert_eq!(version, 8);
+    assert_eq!(version, 9);
     let defaults: (i16, i16, i32) = sqlx::query_as(
         "SELECT max_attempts, max_interruptions, expire_seconds FROM stampeded_schedules",
     )
