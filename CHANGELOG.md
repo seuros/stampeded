@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.8.0](https://github.com/seuros/stampeded/compare/stampeded-v0.7.2...stampeded-v0.8.0) (2026-11-06)
+
+
+### Features
+
+* **claim:** round robin across queues via priority-machines ([730e1fb](https://github.com/seuros/stampeded/commit/730e1fb51cf42927b3146f04ece0f15d5faa73ef))
+
+
+### Bug Fixes
+
+* **deps:** move to breaker 0.22, throttle 0.5, chrono 0.10, mcp-host 0.20 ([da1156d](https://github.com/seuros/stampeded/commit/da1156d35dc933f0b2fc31911a0e33923e3a2aea))
+
 ## [0.7.2](https://github.com/seuros/stampeded/compare/stampeded-v0.7.1...stampeded-v0.7.2) (2026-11-06)
 
 
