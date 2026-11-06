@@ -152,7 +152,9 @@ async fn concurrent_provisioning_of_one_queue_creates_it_once() {
     .await
     .expect("partition count");
     assert_eq!(partitions, 1);
-    q.enqueue(NewJob::new("burst", "t")).await.expect("enqueue on the new partition");
+    q.enqueue(NewJob::new("burst", "t"))
+        .await
+        .expect("enqueue on the new partition");
 }
 
 #[tokio::test]
