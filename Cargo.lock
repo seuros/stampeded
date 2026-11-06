@@ -1906,6 +1906,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4a6394b9e965e73d0a289ee54f589087e2c676aedf60885baf52c76b771e4958"
 
 [[package]]
+name = "priority-machines"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7a496a162d8ef45e27b506a93d588f80600e006f5e11c5b13eab755273a6e31"
+
+[[package]]
 name = "proc-macro-crate"
 version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3155,6 +3161,7 @@ dependencies = [
  "jiff",
  "jiff-sqlx",
  "mcp-host",
+ "priority-machines",
  "rama",
  "rama-http-backend",
  "rama-x-threejs",

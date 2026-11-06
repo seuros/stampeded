@@ -6,6 +6,7 @@ use crate::job::Job;
 use crate::planner::Verdict;
 use crate::queue::Queue;
 use crate::queues::Queues;
+use priority_machines::RoundRobin;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -72,7 +73,8 @@ pub struct Claimer {
     queue: Queue,
     queues: Queues,
     refresh: Duration,
-    rotation: usize,
+    /// Next serving queue to try; lanes are `serving` positions, so a rediscovery reshuffles them.
+    turns: RoundRobin,
     serving: Vec<String>,
     serving_read: Option<Instant>,
     plan: HashMap<String, QueuePlan>,
@@ -92,7 +94,7 @@ impl Claimer {
             queue,
             queues,
             refresh,
-            rotation: 0,
+            turns: RoundRobin::new(),
             serving,
             serving_read: None,
             plan: HashMap::new(),
@@ -102,8 +104,9 @@ impl Claimer {
         }
     }
 
-    /// Up to `room` jobs across served queues, rotating the start; rushed first, held skipped.
-    /// A failure partway returns what was already claimed rather than strand it.
+    /// Up to `room` jobs across served queues, round robin from where the last round stopped;
+    /// rushed first, held skipped. A failure partway returns what was already claimed rather
+    /// than strand it.
     pub async fn round(&mut self, worker_id: Uuid, room: usize) -> Result<Vec<(Job, Held)>> {
         if matches!(self.queues, Queues::All { .. }) {
             self.discover().await?;
@@ -113,47 +116,50 @@ impl Claimer {
         }
         self.read_plan().await?;
 
-        let start = self.rotation % self.serving.len();
-        self.rotation = start + 1;
-        let mut rotated = self.serving.clone();
-        rotated.rotate_left(start);
-
         let verdict = |name: &String| self.plan.get(name).map_or(Verdict::Steady, |p| p.verdict);
-        let order: Vec<String> = rotated
+        let mut rushed: Vec<bool> = self
+            .serving
             .iter()
-            .filter(|n| verdict(n) == Verdict::Rush)
-            .chain(rotated.iter().filter(|n| verdict(n) == Verdict::Steady))
-            .cloned()
+            .map(|n| verdict(n) == Verdict::Rush)
+            .collect();
+        let mut steady: Vec<bool> = self
+            .serving
+            .iter()
+            .map(|n| verdict(n) == Verdict::Steady)
             .collect();
 
         let mut claimed = Vec::new();
-        for name in order {
-            let mut limit = room - claimed.len();
-            if let Some(max) = self.plan.get(&name).and_then(|p| p.max_running) {
-                limit = limit.min(max.saturating_sub(self.holdings.count(&name)));
-            }
-            if limit == 0 {
-                continue;
-            }
-
-            let jobs = match self
-                .queue
-                .claim(&name, worker_id, i32::try_from(limit).unwrap_or(i32::MAX))
-                .await
+        for ready in [&mut rushed, &mut steady] {
+            while claimed.len() < room
+                && let Some(lane) = self.turns.select(ready)
             {
-                Ok(jobs) => jobs,
-                Err(e) if claimed.is_empty() => return Err(e),
-                Err(e) => {
-                    warn!(queue = %name, error = %e, "claim failed; keeping this round's jobs");
-                    break;
+                ready[lane] = false;
+                let name = &self.serving[lane];
+
+                let mut limit = room - claimed.len();
+                if let Some(max) = self.plan.get(name).and_then(|p| p.max_running) {
+                    limit = limit.min(max.saturating_sub(self.holdings.count(name)));
                 }
-            };
-            claimed.extend(jobs.into_iter().map(|job| {
-                let held = self.holdings.hold(&job.queue);
-                (job, held)
-            }));
-            if claimed.len() >= room {
-                break;
+                if limit == 0 {
+                    continue;
+                }
+
+                let jobs = match self
+                    .queue
+                    .claim(name, worker_id, i32::try_from(limit).unwrap_or(i32::MAX))
+                    .await
+                {
+                    Ok(jobs) => jobs,
+                    Err(e) if claimed.is_empty() => return Err(e),
+                    Err(e) => {
+                        warn!(queue = %name, error = %e, "claim failed; keeping this round's jobs");
+                        return Ok(claimed);
+                    }
+                };
+                claimed.extend(jobs.into_iter().map(|job| {
+                    let held = self.holdings.hold(&job.queue);
+                    (job, held)
+                }));
             }
         }
         Ok(claimed)

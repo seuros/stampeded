@@ -46,6 +46,8 @@ deadline-machines = { version = "0.3", features = ["tokio"] }
 # The queue planner.
 behavior-machines = { version = "0.3", default-features = false }
 behavior-machines-circuit = "0.4"
+# Which queue to claim from next.
+priority-machines = "0.3"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

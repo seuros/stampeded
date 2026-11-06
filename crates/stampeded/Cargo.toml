@@ -53,6 +53,7 @@ throttle-machines.workspace = true
 deadline-machines.workspace = true
 behavior-machines.workspace = true
 behavior-machines-circuit.workspace = true
+priority-machines.workspace = true
 
 rama = { workspace = true, optional = true }
 rama-http-backend = { workspace = true, optional = true }
