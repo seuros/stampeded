@@ -3149,7 +3149,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "stampeded"
-version = "0.7.2"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "behavior-machines",
@@ -3180,7 +3180,7 @@ dependencies = [
 
 [[package]]
 name = "stampeded-ffi"
-version = "0.7.2"
+version = "0.8.0"
 dependencies = [
  "cbindgen",
  "jiff",
