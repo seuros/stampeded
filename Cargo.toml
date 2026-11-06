@@ -32,17 +32,17 @@ rama = { version = "0.4", default-features = false, features = ["http-backend", 
 # rama re-exports its HTTP server only under `http-full`, which also brings DNS
 # (bindgen, so libclang), compression (zstd, zlib) and WebSockets; none is used.
 rama-http-backend = { version = "0.4", default-features = false }
-mcp-host = { version = "0.20", features = ["macros", "stdio"] }
+mcp-host = { version = "0.23", features = ["macros", "stdio"] }
 # The game page's three.js, served under hashed URLs, and its Datastar glue.
 rama-x-threejs = "0.1.0"
 schemars = "1"
 
 # The machines family.
 state-machines = "0.34"
-chrono-machines = "0.10"
-breaker-machines = { version = "0.22", features = ["async"] }
+chrono-machines = "0.11"
+breaker-machines = { version = "0.24", features = ["async"] }
 throttle-machines = "0.5"
-deadline-machines = { version = "0.3", features = ["tokio"] }
+deadline-machines = { version = "0.4", features = ["tokio"] }
 # The queue planner.
 behavior-machines = { version = "0.3", default-features = false }
 behavior-machines-circuit = "0.4"
