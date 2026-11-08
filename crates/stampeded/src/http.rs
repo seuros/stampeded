@@ -14,6 +14,16 @@ mod test_support;
 
 pub use api::{ApiState, router};
 
+/// The router behind the dashboard token: what [`serve_with`] hands the
+/// embedding application to mount its own pages on.
+pub type GatedRouter = rama::http::service::web::Router<
+    ApiState,
+    (
+        rama::http::layer::validate_request::ValidateRequestHeaderLayer<api::DashboardToken>,
+        rama::http::service::web::router::DefaultEndpointLayer,
+    ),
+>;
+
 use tokio::sync::watch;
 use tracing::{info, warn};
 
@@ -21,8 +31,24 @@ use tracing::{info, warn};
 pub async fn serve(
     addr: &str,
     state: ApiState,
-    mut shutdown: watch::Receiver<bool>,
+    shutdown: watch::Receiver<bool>,
 ) -> crate::Result<()> {
+    serve_with(addr, state, shutdown, |routes| routes).await
+}
+
+/// [`serve`], with the embedding application's own pages next to the dashboard.
+///
+/// `extend` receives the token-gated router, so every route it adds answers
+/// only with the dashboard token, like the dashboard does.
+pub async fn serve_with<F>(
+    addr: &str,
+    state: ApiState,
+    mut shutdown: watch::Receiver<bool>,
+    extend: F,
+) -> crate::Result<()>
+where
+    F: FnOnce(GatedRouter) -> GatedRouter,
+{
     use api::DashboardToken;
     use rama::Layer;
     use rama::graceful::Shutdown;
@@ -66,8 +92,10 @@ pub async fn serve(
             .with_get("/game", game::index)
             .with_get("/game/stream", game::stream);
 
-        r.with_get("/dashboard", dashboard::index)
-            .with_get("/dashboard/stream", dashboard::stream)
+        extend(
+            r.with_get("/dashboard", dashboard::index)
+                .with_get("/dashboard/stream", dashboard::stream),
+        )
     };
 
     // Router is neither Clone nor infallible; ArcLayer and ErrorHandlerLayer fix both.

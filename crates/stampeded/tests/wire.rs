@@ -761,3 +761,40 @@ fn every_state_in_the_denominator_can_be_drawn() {
         );
     }
 }
+
+/// `serve_with` mounts the embedder's pages behind the same token.
+#[tokio::test]
+async fn embedded_pages_sit_behind_the_dashboard_token() {
+    let Some(queue) = common::setup().await else {
+        return;
+    };
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind probe");
+    let addr = probe.local_addr().expect("addr").to_string();
+    drop(probe);
+    let (tx, rx) = watch::channel(false);
+    let a = addr.clone();
+    tokio::spawn(async move {
+        let state = stampeded::http::ApiState::new(queue).with_dashboard_token("s3cret");
+        let _ = stampeded::http::serve_with(&a, state, rx, |routes| {
+            routes.with_get("/embedded/page", || async { "from the embedder" })
+        })
+        .await;
+    });
+    for _ in 0..100 {
+        if TcpStream::connect(&addr).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let (status, body) = request(&addr, "GET", "/embedded/page?token=s3cret", None).await;
+    assert_eq!(status, 200);
+    assert!(body.contains("from the embedder"), "{body}");
+    let (status, _) = request(&addr, "GET", "/embedded/page", None).await;
+    assert_eq!(status, 404);
+    let (status, _) = request(&addr, "GET", "/dashboard?token=s3cret", None).await;
+    assert_eq!(status, 200);
+    tx.send_replace(true);
+}
