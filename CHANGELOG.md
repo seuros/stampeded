@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/seuros/stampeded/compare/stampeded-v0.8.1...stampeded-v0.9.0) (2026-11-08)
+
+
+### Features
+
+* **http:** serve_with mounts the embedder's pages behind the dashboard token ([7b0ea01](https://github.com/seuros/stampeded/commit/7b0ea01e1ecd99582193fb24afe7211c0c48e89a))
+
 ## [0.8.1](https://github.com/seuros/stampeded/compare/stampeded-v0.8.0...stampeded-v0.8.1) (2026-11-06)
 
 
