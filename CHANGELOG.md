@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/seuros/stampeded/compare/stampeded-v0.9.0...stampeded-v0.10.0) (2026-11-09)
+
+
+### Features
+
+* **http:** serve_on takes a listener the caller already bound ([8b2a7fd](https://github.com/seuros/stampeded/commit/8b2a7fd9a94a21ae26bf93fb897819d4e0833319))
+
 ## [0.9.0](https://github.com/seuros/stampeded/compare/stampeded-v0.8.1...stampeded-v0.9.0) (2026-11-08)
 
 
