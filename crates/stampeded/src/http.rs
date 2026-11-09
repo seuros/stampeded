@@ -43,6 +43,29 @@ pub async fn serve(
 pub async fn serve_with<F>(
     addr: &str,
     state: ApiState,
+    shutdown: watch::Receiver<bool>,
+    extend: F,
+) -> crate::Result<()>
+where
+    F: FnOnce(GatedRouter) -> GatedRouter,
+{
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|source| crate::Error::Bind {
+            addr: addr.to_owned(),
+            source: Box::new(source),
+        })?;
+    serve_on(listener, state, shutdown, extend).await
+}
+
+/// [`serve_with`] on a listener the caller already bound.
+///
+/// Port 0 with the address read back, or a socket handed over by the service
+/// manager: binding first leaves no window in which another process can take
+/// the port.
+pub async fn serve_on<F>(
+    listener: tokio::net::TcpListener,
+    state: ApiState,
     mut shutdown: watch::Receiver<bool>,
     extend: F,
 ) -> crate::Result<()>
@@ -109,12 +132,10 @@ where
     let exec = Executor::graceful(graceful.guard());
     let service = HttpServer::auto(exec.clone()).service(app);
 
-    let listener = TcpListener::bind_address(addr, exec)
-        .await
-        .map_err(|source| crate::Error::Bind {
-            addr: addr.to_owned(),
-            source,
-        })?;
+    let addr = listener
+        .local_addr()
+        .map_or_else(|_| "an unknown address".to_owned(), |a| a.to_string());
+    let listener = TcpListener::from_tokio_tcp_listener(listener, exec);
 
     // Sample while the dashboard is served, so history exists before anyone looks.
     let sampler = state.dashboard_token.is_some().then(|| {
