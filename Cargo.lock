@@ -161,13 +161,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "behavior-machines-circuit"
-version = "0.4.1"
+name = "behavior-machines"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "20fdf98b4b83f4bf1e190611778f343472572554017d54e12c6b6e4471dd0eea"
+checksum = "19e739587d0770e8766cf952f42b26622354395bbc83fc15ebf1a76cd2052013"
+
+[[package]]
+name = "behavior-machines-circuit"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "26f8fc67c37cb005e921a6614cc47d27830a9afdc9575851fe783e56d6e293e9"
 dependencies = [
- "behavior-machines",
- "thiserror",
+ "behavior-machines 0.5.0",
 ]
 
 [[package]]
@@ -1621,7 +1626,7 @@ checksum = "bb3745337a0497149685911c4d243f551b519a836a454ed90857fbfc17721d62"
 dependencies = [
  "arc-swap",
  "base64 0.23.1",
- "behavior-machines",
+ "behavior-machines 0.3.1",
  "breaker-machines",
  "dashmap",
  "deadline-machines",
@@ -1639,7 +1644,7 @@ dependencies = [
  "state-machines",
  "strum",
  "thiserror",
- "throttle-machines",
+ "throttle-machines 0.5.0",
  "tokio",
  "uuid",
 ]
@@ -3165,10 +3170,10 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "stampeded"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
- "behavior-machines",
+ "behavior-machines 0.5.0",
  "behavior-machines-circuit",
  "breaker-machines",
  "chrono-machines",
@@ -3187,7 +3192,7 @@ dependencies = [
  "sqlx",
  "state-machines",
  "thiserror",
- "throttle-machines",
+ "throttle-machines 0.6.0",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -3196,7 +3201,7 @@ dependencies = [
 
 [[package]]
 name = "stampeded-ffi"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "cbindgen",
  "jiff",
@@ -3393,6 +3398,12 @@ name = "throttle-machines"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e262493966d34b2b0ff84078a8efb3a22ee0a40284ee12ca89540f119f1558f0"
+
+[[package]]
+name = "throttle-machines"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f594c2be67471326684e275c0cab480b6ccbdecdb78866ebef535c701d902ee5"
 
 [[package]]
 name = "time"

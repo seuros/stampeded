@@ -41,11 +41,11 @@ schemars = "1"
 state-machines = "0.34"
 chrono-machines = "0.11"
 breaker-machines = { version = "0.24", features = ["async"] }
-throttle-machines = "0.5"
+throttle-machines = "0.6"
 deadline-machines = { version = "0.4", features = ["tokio"] }
 # The queue planner.
-behavior-machines = { version = "0.3", default-features = false }
-behavior-machines-circuit = "0.4"
+behavior-machines = { version = "0.5", features = ["alloc"] }
+behavior-machines-circuit = "0.6"
 # Which queue to claim from next.
 priority-machines = "0.3"
 

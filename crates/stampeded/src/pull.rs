@@ -221,10 +221,9 @@ impl Puller {
     /// A throttled job goes back with its attempt refunded.
     async fn admit(&self, claimed: Claimed) -> Option<Lease> {
         if let Some(f) = &self.fairness
-            && let Admission::Throttled { retry_after_secs } =
-                f.admit(claimed.job.tenant_id.as_deref())
+            && let Admission::Throttled { retry_after } = f.admit(claimed.job.tenant_id.as_deref())
         {
-            let delay = Duration::from_secs_f64(retry_after_secs.clamp(0.05, 60.0));
+            let delay = retry_after.clamp(Duration::from_millis(50), Duration::from_mins(1));
             if let Err(e) = record_failure(
                 &self.queue,
                 &claimed.job,

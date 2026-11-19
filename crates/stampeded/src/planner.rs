@@ -4,7 +4,7 @@
 //! The circuit needs pure leaves: conditions read a snapshot, verdict leaves always succeed.
 
 use behavior_machines::{Node, Status};
-use behavior_machines_circuit::{LowerError, Lowered, Schedule, State, TickError};
+use behavior_machines_circuit::{Lowered, Refusal, Schedule, State};
 
 /// What a worker should do with a queue this round.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -120,7 +120,7 @@ pub struct Planner {
 }
 
 impl Planner {
-    pub fn new() -> Result<Self, LowerError> {
+    pub fn new() -> Result<Self, Refusal> {
         // `map` visits leaves in pre-order, the circuit's slot order.
         let mut collected = Vec::new();
         let numbered = policy().map(|leaf| collected.push(leaf));
@@ -174,7 +174,7 @@ impl Planner {
         Decision { verdict, reason }
     }
 
-    fn evaluate(&self, snapshot: &QueueSnapshot) -> Result<Schedule, TickError> {
+    fn evaluate(&self, snapshot: &QueueSnapshot) -> Result<Schedule, Refusal> {
         let statuses: Vec<Status> = self
             .leaves
             .iter()

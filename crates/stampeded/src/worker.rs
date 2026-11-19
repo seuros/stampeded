@@ -3,7 +3,7 @@
 
 use crate::claim::Claimer;
 use crate::error::{Error, Result};
-use crate::fairness::{Fairness, TenantLimit, now_secs};
+use crate::fairness::{Fairness, TenantLimit, now};
 use crate::job::{FailureKind, Job};
 use crate::metrics::{Metrics, label, names};
 use crate::queue::Queue;
@@ -22,8 +22,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
-use throttle_machines::gate::Gate;
-use throttle_machines::gcra::{Gcra, GcraParams};
+use throttle_machines::{Gate, Gcra, GcraPolicy};
 use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -394,9 +393,9 @@ impl Worker {
             self.config.poll_interval,
         );
 
-        // GCRA state for the wakeup gate, pacing only this worker's claims.
-        let cooldown = self.config.wakeup_cooldown.as_secs_f64();
-        let mut tat = 0.0f64;
+        // The wakeup gate, pacing only this worker's claims. A zero cooldown paces nothing.
+        let cooldown = self.config.wakeup_cooldown;
+        let mut pacer = GcraPolicy::new(cooldown, cooldown.saturating_mul(4)).map(Gcra::new);
         let mut next = NextPoll::Idle;
 
         'admissions: loop {
@@ -440,22 +439,14 @@ impl Worker {
             }
 
             // Pace claims so a burst of notifications does not become a burst of round trips.
-            let decision = Gcra::check(
-                tat,
-                now_secs(),
-                GcraParams {
-                    emission_interval: cooldown,
-                    delay_tolerance: cooldown * 4.0,
-                },
-            );
-            tat = decision.state;
-            if !decision.allowed {
-                tokio::select! {
-                    biased;
-                    _ = shutdown.changed() => break,
-                    () = tokio::time::sleep(Duration::from_secs_f64(
-                        decision.retry_after.clamp(0.0, 1.0),
-                    )) => {}
+            if let Some(pacer) = &mut pacer {
+                let now = now();
+                if pacer.check(now).is_err() {
+                    tokio::select! {
+                        biased;
+                        _ = shutdown.changed() => break,
+                        () = tokio::time::sleep(pacer.retry_after(now).min(Duration::from_secs(1))) => {}
+                    }
                 }
             }
 
@@ -500,10 +491,11 @@ impl Worker {
                 // Fairness after claiming, since a flood is legitimately first in line; a
                 // throttled job goes back with a short delay rather than held.
                 if let Some(f) = &self.fairness
-                    && let crate::fairness::Admission::Throttled { retry_after_secs } =
+                    && let crate::fairness::Admission::Throttled { retry_after } =
                         f.admit(job.tenant_id.as_deref())
                 {
-                    let delay = Duration::from_secs_f64(retry_after_secs.clamp(0.05, 60.0));
+                    let delay =
+                        retry_after.clamp(Duration::from_millis(50), Duration::from_mins(1));
                     if let Err(e) = record_failure(
                         &self.queue,
                         &job,
