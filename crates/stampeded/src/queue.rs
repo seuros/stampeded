@@ -898,7 +898,7 @@ impl Queue {
         let policy = policy.unwrap_or_else(|| cron.suggested_dst_policy());
 
         // The database's now, which the claim will compare the seed against.
-        let now = db_now(&self.pool).await?.to_zoned(tz.clone());
+        let now = db_now(&self.pool).await?.to_zoned_datetime(tz.clone());
         let first = cron.next_after(&now, &tz, policy).ok_or_else(|| {
             Error::InvalidSchedule(format!("{expr:?} has no occurrence within four years"))
         })?;

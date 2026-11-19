@@ -2,7 +2,7 @@
 
 use super::*;
 
-fn zoned(s: &str) -> Zoned {
+fn zoned(s: &str) -> ZonedDateTime {
     s.parse().expect("parse zoned")
 }
 

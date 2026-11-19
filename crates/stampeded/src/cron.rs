@@ -5,7 +5,7 @@
 
 use jiff::civil::{Date, DateTime, Time};
 use jiff::tz::{AmbiguousOffset, TimeZone};
-use jiff::{ToSpan, Zoned};
+use jiff::{ToSpan, ZonedDateTime};
 use std::fmt;
 
 /// How to resolve a local time made ambiguous or nonexistent by DST.
@@ -211,7 +211,12 @@ impl Cron {
     /// The next firing strictly after `after`, in `tz`, under `policy`.
     ///
     /// `None` if nothing matches within four years, e.g. `0 0 30 feb *`.
-    pub fn next_after(&self, after: &Zoned, tz: &TimeZone, policy: DstPolicy) -> Option<Zoned> {
+    pub fn next_after(
+        &self,
+        after: &ZonedDateTime,
+        tz: &TimeZone,
+        policy: DstPolicy,
+    ) -> Option<ZonedDateTime> {
         let local = after.with_time_zone(tz.clone());
 
         // The civil search below would walk past a fold's second instant.
@@ -253,7 +258,7 @@ impl Cron {
     }
 
     /// The second instant of an ambiguous slot, if `after` is the first one.
-    fn second_pass_of_fold(&self, after: &Zoned, tz: &TimeZone) -> Option<Zoned> {
+    fn second_pass_of_fold(&self, after: &ZonedDateTime, tz: &TimeZone) -> Option<ZonedDateTime> {
         let dt = after.datetime();
         if !(self.day_matches(dt.date())
             && self.hour.matches(dt.hour().cast_unsigned())
@@ -265,7 +270,7 @@ impl Cron {
         let AmbiguousOffset::Fold {
             before,
             after: later,
-        } = tz.to_ambiguous_zoned(dt).offset()
+        } = tz.to_ambiguous_zoned_datetime(dt).offset()
         else {
             return None;
         };
@@ -275,7 +280,7 @@ impl Cron {
         }
 
         let candidate = dt
-            .to_zoned(TimeZone::fixed(later))
+            .to_zoned_datetime(TimeZone::fixed(later))
             .ok()?
             .with_time_zone(tz.clone());
         (candidate.timestamp() > after.timestamp()).then_some(candidate)
@@ -302,8 +307,8 @@ impl Cron {
 }
 
 /// Civil date+time to an instant: a fold takes the earlier offset, a gap its close (Vixie).
-fn resolve(date: Date, time: Time, tz: &TimeZone) -> Option<Zoned> {
-    tz.to_ambiguous_zoned(DateTime::from_parts(date, time))
+fn resolve(date: Date, time: Time, tz: &TimeZone) -> Option<ZonedDateTime> {
+    tz.to_ambiguous_zoned_datetime(DateTime::from_parts(date, time))
         .compatible()
         .ok()
 }

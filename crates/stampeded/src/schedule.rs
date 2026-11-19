@@ -14,7 +14,7 @@
 use crate::cron::{Cron, DstPolicy};
 use crate::error::Result;
 use jiff::tz::TimeZone;
-use jiff::{Timestamp, ToSpan, Zoned};
+use jiff::{Timestamp, ToSpan, ZonedDateTime};
 use tracing::warn;
 
 /// Scheduling fields of a stored schedule; job-template limits stay in SQL.
@@ -43,8 +43,8 @@ impl Schedule {
     /// When this schedule should fire after `next_run_at`; stepping from the target avoids drift.
     pub fn next_after(&self, now: Timestamp) -> Result<Timestamp> {
         let tz = self.zone();
-        let from = self.next_run_at.to_zoned(tz.clone());
-        let now_z = now.to_zoned(tz.clone());
+        let from = self.next_run_at.to_zoned_datetime(tz.clone());
+        let now_z = now.to_zoned_datetime(tz.clone());
 
         let mut next = self.step(&from, &tz)?;
 
@@ -70,7 +70,9 @@ impl Schedule {
     /// The first firing after `now`, for a row written without a cron parser.
     pub fn first_after(&self, now: Timestamp) -> Result<Timestamp> {
         let tz = self.zone();
-        Ok(self.step(&now.to_zoned(tz.clone()), &tz)?.timestamp())
+        Ok(self
+            .step(&now.to_zoned_datetime(tz.clone()), &tz)?
+            .timestamp())
     }
 
     /// The zone cron fields are read in. Firing in the wrong zone beats never firing,
@@ -88,7 +90,7 @@ impl Schedule {
     }
 
     /// One step forward. The only place the two rule kinds differ.
-    fn step(&self, from: &Zoned, tz: &TimeZone) -> Result<Zoned> {
+    fn step(&self, from: &ZonedDateTime, tz: &TimeZone) -> Result<ZonedDateTime> {
         if let Some(expr) = &self.cron_expr {
             let cron = Cron::parse(expr).map_err(|e| {
                 crate::Error::InvalidSchedule(format!("schedule {:?}: {e}", self.key))
