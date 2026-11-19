@@ -10,7 +10,7 @@ use crate::queues::Queues;
 use crate::worker::{
     JobContext, default_backoff, record_failure, register_worker, report_success, retry_delay,
 };
-use chrono_machines::BackoffPolicy;
+use chrono_machines::Strategy;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -62,7 +62,7 @@ pub struct Puller {
     waiting: std::sync::Mutex<VecDeque<Claimed>>,
     leases: Arc<Semaphore>,
     fairness: Option<Fairness>,
-    backoff: BackoffPolicy,
+    backoff: Strategy,
     stopping: AtomicBool,
     heartbeat: JoinHandle<()>,
 }
@@ -260,7 +260,7 @@ impl Drop for Puller {
 /// it goes back to the queue as `heartbeat_lost`.
 pub struct Lease {
     ctx: JobContext,
-    backoff: BackoffPolicy,
+    backoff: Strategy,
     held: Option<Held>,
     permit: Option<OwnedSemaphorePermit>,
     settled: bool,

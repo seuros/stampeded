@@ -9,16 +9,17 @@ use crate::metrics::{Metrics, label, names};
 use crate::queue::Queue;
 use crate::queues::Queues;
 use crate::wakeup::{NextPoll, Wakeup};
-use breaker_machines::async_circuit::AsyncCircuitBreaker;
-use chrono_machines::{BackoffPolicy, BackoffStrategy, ExponentialBackoff};
+use breaker_machines::{AsyncCircuitBreaker, Policy, Recovery, Threshold};
+use chrono_machines::{Exponential, Strategy};
 use deadline_machines::{
-    Clock, Scope,
-    tokio_support::{TokioClock, deadline_after, timeout as with_deadline},
+    Deadline, Scope,
+    tokio_support::{TokioClock, timeout as with_deadline},
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::future::Future;
+use std::num::{NonZeroU8, NonZeroU32};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -229,20 +230,32 @@ impl Default for WorkerConfig {
     }
 }
 
-/// Used when a backoff policy declines to produce a delay.
-const FALLBACK_RETRY_DELAY_MS: u64 = 60 * 1_000;
-
 /// The default retry policy: exponential, capped at one hour, full jitter.
-pub fn default_backoff() -> BackoffPolicy {
-    BackoffPolicy::Exponential(
-        ExponentialBackoff::new()
-            .base_delay_ms(1_000)
-            .max_delay_ms(60 * 60 * 1_000)
-            .jitter_factor(1.0)
-            // Not the crate default of 3: the database owns the attempt limit, and a
-            // `None` delay past it would mean an immediate retry.
-            .max_attempts(u8::MAX),
+/// A bare shape with no attempt budget: the database owns the attempt limit.
+pub fn default_backoff() -> Strategy {
+    full_jitter(Duration::from_secs(1), Duration::from_hours(1))
+}
+
+/// Doubling from `base` up to `max`, full jitter; a `base` past `max` is `max` throughout.
+fn full_jitter(base: Duration, max: Duration) -> Strategy {
+    Exponential::new(base.min(max), 2.0, max, 1.0)
+        .expect("base <= max, doubling and full jitter form a valid shape")
+        .into()
+}
+
+/// `threshold` failures in a minute open a task's circuit; it probes again after up
+/// to 30s, jittered so workers do not all probe a recovering downstream at once.
+fn breaker_policy(threshold: usize) -> Policy {
+    let count = NonZeroU32::new(u32::try_from(threshold).unwrap_or(u32::MAX).max(1));
+    let threshold = Threshold::new(count, None, 20).expect("a failure count is a valid threshold");
+    let recovery = Recovery::new(
+        Duration::from_secs(30),
+        1.0,
+        NonZeroU32::new(2).expect("2"),
+        NonZeroU32::MIN,
     )
+    .expect("full jitter is a valid recovery");
+    Policy::new(threshold, Duration::from_mins(1), recovery, None).expect("a one-minute window")
 }
 
 /// Schema defaults for `backoff_base_ms` / `backoff_max_ms`: a row carrying them defers to
@@ -251,19 +264,16 @@ const SCHEMA_BACKOFF_BASE_MS: i16 = 1_000;
 const SCHEMA_BACKOFF_MAX_MS: i32 = 3_600_000;
 
 /// The policy to retry this job with: its own backoff columns if set, as the Ruby worker does.
-fn policy_for(job: &Job, configured: BackoffPolicy) -> BackoffPolicy {
+fn policy_for(job: &Job, configured: Strategy) -> Strategy {
     if job.backoff_base_ms == SCHEMA_BACKOFF_BASE_MS && job.backoff_max_ms == SCHEMA_BACKOFF_MAX_MS
     {
         return configured;
     }
 
-    // Full jitter and the u8::MAX attempt budget, as in `default_backoff`.
-    BackoffPolicy::Exponential(
-        ExponentialBackoff::new()
-            .base_delay_ms(u64::from(job.backoff_base_ms.max(1).unsigned_abs()))
-            .max_delay_ms(u64::from(job.backoff_max_ms.max(1).unsigned_abs()))
-            .jitter_factor(1.0)
-            .max_attempts(u8::MAX),
+    // Full jitter, as in `default_backoff`.
+    full_jitter(
+        Duration::from_millis(u64::from(job.backoff_base_ms.max(1).unsigned_abs())),
+        Duration::from_millis(u64::from(job.backoff_max_ms.max(1).unsigned_abs())),
     )
 }
 
@@ -274,7 +284,7 @@ pub struct Worker {
     wakeup: Option<Wakeup>,
     metrics: Metrics,
     handlers: HashMap<String, Handler>,
-    backoff: BackoffPolicy,
+    backoff: Strategy,
     fairness: Option<Arc<Fairness>>,
     /// One breaker per task name, so one failing task does not open another's circuit.
     breakers: Arc<std::sync::Mutex<HashMap<String, Arc<AsyncCircuitBreaker>>>>,
@@ -314,21 +324,17 @@ impl Worker {
         let mut map = self.breakers.lock().expect("breaker map poisoned");
         map.entry(task.to_string())
             .or_insert_with(|| {
-                Arc::new(
-                    AsyncCircuitBreaker::builder(format!("task:{task}"))
-                        .failure_threshold(threshold)
-                        // Jittered, so workers do not all probe a recovering downstream at once.
-                        .jitter_factor(1.0)
-                        .half_open_timeout_secs(30.0)
-                        .build_async(),
-                )
+                Arc::new(AsyncCircuitBreaker::new(
+                    format!("task:{task}"),
+                    breaker_policy(threshold),
+                ))
             })
             .clone()
     }
 
     /// Override the retry policy. Defaults to exponential with full jitter.
     #[must_use]
-    pub fn backoff(mut self, policy: BackoffPolicy) -> Self {
+    pub fn backoff(mut self, policy: Strategy) -> Self {
         self.backoff = policy;
         self
     }
@@ -554,7 +560,7 @@ impl Worker {
         }
 
         let drain_clock = TokioClock::new();
-        let drain_deadline = deadline_after(&drain_clock, self.config.shutdown_timeout);
+        let drain_deadline = Deadline::after(drain_clock.now(), self.config.shutdown_timeout);
         let drained = with_deadline(&drain_clock, drain_deadline, async {
             while let Some(result) = executions.join_next().await {
                 log_execution_exit(result);
@@ -639,7 +645,7 @@ async fn execute(
     worker_id: Uuid,
     handler: Option<Handler>,
     timeout: Duration,
-    backoff: BackoffPolicy,
+    backoff: Strategy,
     breaker: Option<Arc<AsyncCircuitBreaker>>,
     cancellation_scope: Scope,
     metrics: Metrics,
@@ -681,8 +687,7 @@ async fn execute(
             }
 
             let clock = TokioClock::new();
-            let timeout_ns = u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX);
-            let job_scope = cancellation_scope.derive(clock.now(), timeout_ns);
+            let job_scope = cancellation_scope.derive(clock.now(), timeout);
             let ctx =
                 JobContext::new_scoped(job.clone(), queue.clone(), worker_id, job_scope.clone());
 
@@ -778,7 +783,7 @@ async fn report_failure(
     job: &Job,
     worker_id: Uuid,
     err: Error,
-    backoff: BackoffPolicy,
+    backoff: Strategy,
 ) -> Result<()> {
     let kind = failure_kind_of(&err);
 
@@ -795,17 +800,16 @@ async fn report_failure(
 }
 
 /// When this job should be tried again, from its own backoff columns or the worker's policy.
-pub(crate) fn retry_delay(job: &Job, backoff: BackoffPolicy) -> Duration {
-    // `attempt` was incremented at claim, so it is 1-indexed, as chrono-machines expects.
-    let mut rng = chrono_machines::rand::rng();
-    let ms = policy_for(job, backoff)
-        .delay(
-            u8::try_from(job.attempt.max(0)).unwrap_or(u8::MAX),
-            &mut rng,
-        )
-        // A policy that declines a delay must never mean an immediate retry.
-        .unwrap_or(FALLBACK_RETRY_DELAY_MS);
-    Duration::from_millis(ms)
+pub(crate) fn retry_delay(job: &Job, backoff: Strategy) -> Duration {
+    policy_for(job, backoff).delay(attempt_of(job), rand::random())
+}
+
+/// `attempt` was incremented at claim, so it is 1-indexed, as chrono-machines expects.
+pub(crate) fn attempt_of(job: &Job) -> NonZeroU8 {
+    u8::try_from(job.attempt.max(1))
+        .ok()
+        .and_then(NonZeroU8::new)
+        .unwrap_or(NonZeroU8::MAX)
 }
 
 /// Log a failure SQL recorded; a deferral back in the queue is backpressure, so only debug.

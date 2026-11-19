@@ -23,6 +23,8 @@ jiff = { version = "0.2", features = ["serde"] }
 jiff-sqlx = { version = "0.2", features = ["postgres"] }
 thiserror = "2"
 gethostname = "1.1"
+# Jitter draws: chrono-machines takes the caller's, it owns no generator.
+rand = "0.10"
 anyhow = "1.0.104"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -38,16 +40,16 @@ rama-x-threejs = "0.1.0"
 schemars = "1"
 
 # The machines family.
-state-machines = "0.34"
-chrono-machines = "0.11"
-breaker-machines = { version = "0.24", features = ["async"] }
+state-machines = "0.35"
+chrono-machines = "0.13"
+breaker-machines = { version = "0.27", features = ["async"] }
 throttle-machines = "0.6"
-deadline-machines = { version = "0.4", features = ["tokio"] }
+deadline-machines = { version = "0.6", features = ["tokio"] }
 # The queue planner.
 behavior-machines = { version = "0.5", features = ["alloc"] }
-behavior-machines-circuit = "0.6"
+behavior-machines-circuit = "0.6.3"
 # Which queue to claim from next.
-priority-machines = "0.3"
+priority-machines = "0.7"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

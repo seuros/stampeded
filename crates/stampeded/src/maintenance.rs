@@ -370,7 +370,7 @@ fn jittered(min: Duration, max: Duration) -> Duration {
     if max <= min {
         return min;
     }
-    chrono_machines::rand::random_range(min..max)
+    rand::random_range(min..max)
 }
 
 /// Fire due recurring schedules; SKIP LOCKED on the schedule row makes it safe on every node.

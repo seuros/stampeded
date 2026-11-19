@@ -33,13 +33,16 @@ fn default_config_heartbeats_well_inside_the_reap_window() {
 
 #[test]
 fn the_default_backoff_is_full_jitter_and_leaves_the_limit_to_the_database() {
-    let BackoffPolicy::Exponential(b) = default_backoff() else {
+    let Strategy::Exponential(b) = default_backoff() else {
         panic!("the default backoff is exponential");
     };
     // Full jitter spreads a retrying herd; a narrow band keeps it together.
-    assert!((b.jitter_factor - 1.0).abs() < f64::EPSILON, "{b:?}");
-    // A `None` delay past the crate's own limit would mean an immediate retry.
-    assert_eq!(b.max_attempts, u8::MAX);
+    assert!((b.jitter() - 1.0).abs() < f64::EPSILON, "{b:?}");
+    // A shape has no attempt budget: past any limit it still answers a delay.
+    assert_eq!(
+        default_backoff().delay(NonZeroU8::MAX, 0),
+        Duration::from_hours(1)
+    );
 }
 
 #[test]
@@ -184,14 +187,10 @@ fn job_with_backoff(base_ms: i16, max_ms: i32, attempt: i16) -> Job {
 }
 
 /// Sample a policy repeatedly; full jitter means one draw proves nothing.
-fn sample_delays(policy: BackoffPolicy, attempt: i16, n: usize) -> Vec<u64> {
-    let mut rng = chrono_machines::rand::rng();
+fn sample_delays(policy: Strategy, attempt: i16, n: usize) -> Vec<u128> {
+    let attempt = NonZeroU8::new(u8::try_from(attempt).unwrap()).unwrap();
     (0..n)
-        .map(|_| {
-            policy
-                .delay(u8::try_from(attempt.max(0)).unwrap_or(u8::MAX), &mut rng)
-                .unwrap_or(FALLBACK_RETRY_DELAY_MS)
-        })
+        .map(|_| policy.delay(attempt, rand::random()).as_millis())
         .collect()
 }
 
@@ -216,13 +215,7 @@ fn a_row_carrying_the_schema_defaults_leaves_the_configured_policy_alone() {
     // A job that asked for nothing must not override a worker's `.backoff(...)`.
     let plain = job_with_backoff(SCHEMA_BACKOFF_BASE_MS, SCHEMA_BACKOFF_MAX_MS, 1);
 
-    let configured = BackoffPolicy::Exponential(
-        ExponentialBackoff::new()
-            .base_delay_ms(30_000)
-            .max_delay_ms(60_000)
-            .jitter_factor(1.0)
-            .max_attempts(u8::MAX),
-    );
+    let configured = full_jitter(Duration::from_secs(30), Duration::from_mins(1));
 
     let worst = sample_delays(policy_for(&plain, configured), plain.attempt, 200)
         .into_iter()

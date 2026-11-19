@@ -44,6 +44,7 @@ jiff.workspace = true
 jiff-sqlx.workspace = true
 thiserror.workspace = true
 gethostname.workspace = true
+rand.workspace = true
 tracing.workspace = true
 
 state-machines.workspace = true
