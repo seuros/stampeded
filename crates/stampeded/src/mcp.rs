@@ -3,12 +3,14 @@
 //! Read tools are unconditional; write tools are invisible to non-operator sessions.
 
 use crate::Queue;
+use breaker_machines::{Policy, Recovery, Threshold};
 use mcp_host::prelude::*;
 use mcp_host::registry::router::{
     McpPromptRouter, McpResourceRouter, McpResourceTemplateRouter, McpRouter,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -161,6 +163,22 @@ pub fn router() -> McpRouter<StampededServer> {
     )
 }
 
+/// Five tool failures in a minute open its circuit; one probe after 15s, less up to
+/// 10% jitter as mcp-host always drew, closes it.
+const TOOL_POLICY: Policy = Policy::new(
+    Threshold::new(NonZeroU32::new(5), None, 0).expect("five failures is a valid threshold"),
+    Duration::from_mins(1),
+    Recovery::new(
+        Duration::from_secs(15),
+        0.1,
+        NonZeroU32::MIN,
+        NonZeroU32::MIN,
+    )
+    .expect("a 15s cooldown with 10% jitter is a valid recovery"),
+    None,
+)
+.expect("a minute is a valid window");
+
 /// A configured MCP server; `allow_writes` lets operator sessions see the write tools.
 pub fn server(name: &str, version: &str, allow_writes: bool) -> mcp_host::server::ServerBuilder {
     Server::builder(name, version)
@@ -176,10 +194,7 @@ pub fn server(name: &str, version: &str, allow_writes: bool) -> mcp_host::server
         .with_tools(true)
         .with_environment(StampededEnvironment::new(allow_writes))
         .with_circuit_breaker(ToolBreakerConfig {
-            failure_threshold: 5,
-            failure_window_secs: 60.0,
-            half_open_timeout_secs: 15.0,
-            success_threshold: 1,
+            policy: TOOL_POLICY,
             call_timeout_secs: 30.0,
             max_concurrent_calls: 16,
             max_queued_calls: 32,
