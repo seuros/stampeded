@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.11.0](https://github.com/seuros/stampeded/compare/stampeded-v0.10.0...stampeded-v0.11.0) (2026-11-20)
+
+
+### ⚠ BREAKING CHANGES
+
+* **deps:** the jiff types in stampeded's API (Job timestamps, schedule times) are jiff 1.0's.
+* **deps:** Worker::backoff takes and default_backoff returns a
+* **deps:** Admission::Throttled carries `retry_after: Duration` instead of `retry_after_secs: f64`, and Fairness::admit_at and
+
+### Bug Fixes
+
+* **deps:** behavior-machines 0.5, circuit 0.6, throttle-machines 0.6 ([02cb02e](https://github.com/seuros/stampeded/commit/02cb02e0a1a48f31e7476dd1bd9f8cd76df096e4))
+* **deps:** chrono-machines 0.13, breaker 0.27, deadline 0.6, state-machines 0.35, priority 0.7 ([66b6906](https://github.com/seuros/stampeded/commit/66b6906fae8517b4b23030de63ca67a64de0cd16))
+* **deps:** jiff 1.0, jiff-sqlx 1.0 ([cb562dc](https://github.com/seuros/stampeded/commit/cb562dcae701ed6a92762aa36ae139c48fed76de))
+* **deps:** mcp-host 0.28.1 ([bf8817c](https://github.com/seuros/stampeded/commit/bf8817c6c41861cfc91fd9ab57e8591849932797))
+
 ## [0.10.0](https://github.com/seuros/stampeded/compare/stampeded-v0.9.0...stampeded-v0.10.0) (2026-11-09)
 
 
