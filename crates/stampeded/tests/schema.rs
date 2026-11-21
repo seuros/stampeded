@@ -36,7 +36,9 @@ async fn legacy(pool: &PgPool, dedup_key: &str, version: Option<i32>) {
     sqlx::raw_sql(AssertSqlSafe(format!(
         "{dedup_key};
          ALTER TABLE stampeded_schedules
-             DROP COLUMN max_attempts, DROP COLUMN max_interruptions, DROP COLUMN expire_seconds;
+             DROP COLUMN max_attempts, DROP COLUMN max_interruptions, DROP COLUMN expire_seconds,
+             DROP COLUMN owner;
+         DROP FUNCTION stampeded_sync_schedules(text, jsonb);
          DROP TABLE stampeded_migrations; {recorded}"
     )))
     .execute(pool)
@@ -283,7 +285,7 @@ async fn a_0_6_schedule_is_upgraded_without_rewriting_jobs_or_occurrences() {
         .fetch_one(&pool)
         .await
         .expect("schema version");
-    assert_eq!(version, 9);
+    assert_eq!(version, 10);
     let defaults: (i16, i16, i32) = sqlx::query_as(
         "SELECT max_attempts, max_interruptions, expire_seconds FROM stampeded_schedules",
     )
@@ -323,4 +325,58 @@ async fn a_0_6_schedule_is_upgraded_without_rewriting_jobs_or_occurrences() {
     .await
     .expect("upgraded firing");
     assert_eq!(limits, (3, 0, 120));
+}
+
+/// Rows written before owners stay unowned through the upgrade, and the first
+/// owner to declare one adopts it.
+#[tokio::test]
+async fn a_0_11_schedule_is_upgraded_unowned_and_adopted_by_its_first_sync() {
+    let Some(pool) = empty().await else { return };
+    let embedded = sqlx::migrate!("./schema");
+    let mut released = sqlx::migrate::Migrator::with_migrations(
+        embedded
+            .iter()
+            .filter(|m| m.version <= 9)
+            .cloned()
+            .collect(),
+    );
+    released.dangerous_set_table_name("stampeded_migrations");
+    released.run(&pool).await.expect("released 0.11 schema");
+    sqlx::query(
+        "INSERT INTO stampeded_schedules (key, queue, task, interval_secs, max_attempts)
+         VALUES ('legacy', 'default', 'report', 60, 4)",
+    )
+    .execute(&pool)
+    .await
+    .expect("0.11 schedule");
+
+    schema::migrate(&pool).await.expect("upgrade");
+    let owner: Option<String> =
+        sqlx::query_scalar("SELECT owner FROM stampeded_schedules WHERE key = 'legacy'")
+            .fetch_one(&pool)
+            .await
+            .expect("upgraded row");
+    assert_eq!(owner, None);
+
+    let q = stampeded::Queue::new(pool);
+    let changes = q
+        .sync_schedules(
+            "billing",
+            &[stampeded::ScheduleSpec::every(
+                "legacy",
+                "default",
+                "report",
+                std::time::Duration::from_secs(60),
+            )],
+        )
+        .await
+        .expect("sync");
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].change, stampeded::SyncChange::Adopted);
+    let (owner, attempts): (Option<String>, i16) =
+        sqlx::query_as("SELECT owner, max_attempts FROM stampeded_schedules WHERE key = 'legacy'")
+            .fetch_one(q.pool())
+            .await
+            .expect("adopted row");
+    assert_eq!((owner.as_deref(), attempts), (Some("billing"), 4));
 }

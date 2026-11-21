@@ -1032,6 +1032,48 @@ occurrence still advances the schedule without creating or rewriting a job.
 Schedule registration helpers keep explicitly configured limits on update;
 use SQL to configure them, not a consumer's `NewJob` defaults.
 
+### Schedule owners (migration 10)
+
+`owner text CHECK (btrim(owner) <> '')`, nullable. Several programs share
+one jobs database, and each declares its own schedules: a deploy that pruned
+"every row I did not list" deleted the others' too. The owner scopes that
+prune. NULL is a row written before migration 10, by hand, or by a
+registration call that names no owner; nothing changes for it.
+
+`stampeded_sync_schedules(owner, schedules jsonb)` is the declarative path,
+in SQL so every binding (and psql) gets the same rules. One call, one
+statement, so one transaction:
+
+- every listed key is inserted or updated with `owner = $owner`;
+- rows of that owner whose key is not listed are deleted (their occurrence
+  ledger cascades);
+- an unowned row with a listed key is adopted: that is the upgrade path for
+  schedules registered before owners existed;
+- a listed key held by another owner raises SQLSTATE `SD409` and the whole
+  call rolls back. Taking a schedule from another program silently is the
+  bug this column exists to prevent; moving one is an explicit delete.
+
+Each element is an object with the schedule columns: `key`, `queue`, `task`
+and exactly one of `cron_expr`/`interval_secs` are required; `args`, `meta`
+(`{}`), `priority` (0), `timezone` (`UTC`), `dst_policy` (`instant`) and
+`tenant_id` default when omitted, as a declaration's absent field does.
+`max_attempts`, `max_interruptions` and `expire_seconds` keep the row's
+value when omitted (the column default on insert), as the older registration
+helpers do. `paused` and `missed_policy` are operator state and never touched.
+
+`next_run_at` is optional and only used on insert or when the rule
+(`cron_expr`, `interval_secs`, `timezone`, `dst_policy`) changed: PL/pgSQL
+has no cron parser, so the binding computes it. Without one, an insert gets
+`now()`, which equals `created_at`, so the scheduler seeds a cron row to its
+first real occurrence instead of firing it; a changed rule keeps the old
+next run and steps under the new rule from there. An unchanged row is not
+written at all, and is not reported.
+
+Returns `(schedule_key, change)` for `created`, `updated`, `adopted` and
+`removed` rows. A transaction advisory lock per owner serialises two deploys
+of one program; rows are visited in key order, so two owners racing over
+the same keys cannot deadlock on each other's inserts.
+
 ### `CREATE TABLE stampeded_schedules (`
 
 Stampeded -- recurring schedules

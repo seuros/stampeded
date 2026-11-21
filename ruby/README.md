@@ -139,6 +139,23 @@ or a step runs on real elapsed time. The queue is `queue:`, or the job's
 `queue_as` evaluated with `args`. `Stampeded::Schedule.pause`, `.remove` and
 `.all` manage them.
 
+To declare an app's schedules on every deploy, sync them under an owner. Its
+schedules that are no longer listed are removed; schedules other programs
+registered in the same database are not touched, and a key one of them owns
+raises `Stampeded::Error` instead of being taken over:
+
+```ruby
+Stampeded::Schedule.sync([
+  { key: "nightly-report", job: ReportJob, cron: "0 3 * * *", max_attempts: 3 },
+  { key: "cleanup", job: CleanupJob, cron: "*/15 * * * *" }
+], owner: "rails")
+```
+
+Each entry takes `recurring`'s keywords plus `max_attempts:`,
+`max_interruptions:` and `expire_seconds:`; a limit left out keeps the stored
+value. A schedule registered before owners is adopted by the first sync that
+lists it. `recurring` also takes `owner:`.
+
 ## Workers
 
 The pool is threads, which suits IO-bound jobs; for CPU-bound jobs run more

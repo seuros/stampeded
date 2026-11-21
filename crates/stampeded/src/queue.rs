@@ -6,7 +6,7 @@ use crate::error::{Error, Result};
 use crate::job::{FailureKind, Job, NewJob};
 use crate::lifecycle::{self, Transitions};
 use crate::planner::{Decision, QueueSnapshot};
-use crate::schedule::Schedule;
+use crate::schedule::{self, Schedule, ScheduleChange, ScheduleSpec};
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use jiff_sqlx::ToSqlx;
@@ -156,7 +156,7 @@ fn parse_state(s: &str) -> Option<crate::JobState> {
 }
 
 /// The database's clock, the one `next_run_at` is compared against (a transaction's start).
-async fn db_now<'e, E>(executor: E) -> Result<Timestamp>
+pub(crate) async fn db_now<'e, E>(executor: E) -> Result<Timestamp>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
@@ -929,6 +929,23 @@ impl Queue {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Make `owner`'s schedules exactly `schedules`, in one transaction: each is
+    /// created or updated as the owner's, and the owner's rows not listed are
+    /// removed. Other owners' rows are never touched; an unowned row with a
+    /// listed key is adopted. Returns what changed; unchanged rows are left alone.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidSchedule`] for a malformed declaration, or a listed key
+    /// that belongs to another owner. Nothing is written then.
+    pub async fn sync_schedules(
+        &self,
+        owner: &str,
+        schedules: &[ScheduleSpec],
+    ) -> Result<Vec<ScheduleChange>> {
+        schedule::sync(&self.pool, owner, schedules).await
     }
 
     /// One job by id; the queue lets Postgres prune to a single partition.

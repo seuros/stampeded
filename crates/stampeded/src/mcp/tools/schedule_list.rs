@@ -15,21 +15,24 @@ type ScheduleRow = (
     bool,           // paused
     String,         // next_run_at
     Option<String>, // last_run_at
+    Option<String>, // owner
 );
 
 impl StampededServer {
     /// Every schedule and when it next fires.
     #[mcp_tool(
         name = "schedule_list",
-        description = "Every recurring schedule: its rule, timezone, DST policy, and when it next fires",
+        description = "Every recurring schedule: its rule, timezone, DST policy, owner, and when it next fires",
         read_only = true,
         idempotent = true
     )]
     async fn schedule_list(&self, _ctx: Ctx<'_>, _params: Parameters<EmptyArgs>) -> ToolResult {
+        // The owner through to_jsonb: this binary never migrates, and a schema
+        // older than migration 10 has no such column.
         let rows: Vec<ScheduleRow> = sqlx::query_as(
             "SELECT key, queue, task, cron_expr, interval_secs, timezone, dst_policy, \
-                    paused, next_run_at::text, last_run_at::text \
-               FROM stampeded_schedules ORDER BY next_run_at",
+                    paused, next_run_at::text, last_run_at::text, to_jsonb(s) ->> 'owner' \
+               FROM stampeded_schedules s ORDER BY next_run_at",
         )
         .fetch_all(self.queue().pool())
         .await
@@ -40,7 +43,7 @@ impl StampededServer {
         }
 
         let mut out = String::new();
-        for (key, queue, task, cron, every, tz, dst, paused, next, last) in rows {
+        for (key, queue, task, cron, every, tz, dst, paused, next, last, owner) in rows {
             let rule = match (cron, every) {
                 (Some(c), _) => format!("{c:?} {tz} ({dst})"),
                 (_, Some(n)) => format!("every {n}s"),
@@ -48,9 +51,10 @@ impl StampededServer {
             };
             let _ = write!(
                 out,
-                "{key}\n  {rule}\n  -> {queue}/{task}{}\n  next {next}  last {}\n",
+                "{key}\n  {rule}\n  -> {queue}/{task}{}\n  next {next}  last {}  owner {}\n",
                 if paused { "  [PAUSED]" } else { "" },
-                last.as_deref().unwrap_or("never")
+                last.as_deref().unwrap_or("never"),
+                owner.as_deref().unwrap_or("none")
             );
         }
         Ok(ToolOutput::text(out))

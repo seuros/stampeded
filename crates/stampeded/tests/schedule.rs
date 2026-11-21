@@ -4,7 +4,9 @@ mod common;
 
 use serde_json::json;
 use sqlx::AssertSqlSafe;
-use stampeded::{FailureKind, Job, JobState, Queue};
+use stampeded::{
+    Error, FailureKind, Job, JobState, Queue, ScheduleChange, ScheduleSpec, SyncChange,
+};
 use std::time::Duration;
 
 async fn bounded(q: &Queue, key: &str) {
@@ -327,4 +329,316 @@ async fn invalid_schedule_limits_fail_at_insert_and_update_not_during_a_tick() {
             .expect("valid schedule still fires"),
         1
     );
+}
+
+fn every(key: &str) -> ScheduleSpec {
+    ScheduleSpec::every(key, "default", "report", Duration::from_secs(60))
+}
+
+fn changes(list: &[(&str, SyncChange)]) -> Vec<ScheduleChange> {
+    list.iter()
+        .map(|(key, change)| ScheduleChange {
+            key: (*key).to_owned(),
+            change: *change,
+        })
+        .collect()
+}
+
+/// Every schedule as `(key, owner)`, by key.
+async fn owners(q: &Queue) -> Vec<(String, Option<String>)> {
+    sqlx::query_as("SELECT key, owner FROM stampeded_schedules ORDER BY key COLLATE \"C\"")
+        .fetch_all(q.pool())
+        .await
+        .expect("owners")
+}
+
+fn owned(rows: &[(&str, Option<&str>)]) -> Vec<(String, Option<String>)> {
+    rows.iter()
+        .map(|(k, o)| ((*k).to_owned(), o.map(str::to_owned)))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_sync_upserts_and_prunes_only_its_own_rows() {
+    let q = q!();
+    q.sync_schedules("worker", &[every("w.ping")])
+        .await
+        .expect("other owner");
+    q.upsert_schedule("bare", "default", "report", Duration::from_secs(60))
+        .await
+        .expect("unowned row");
+
+    let first = q
+        .sync_schedules("web", &[every("a"), every("b")])
+        .await
+        .expect("first sync");
+    assert_eq!(
+        first,
+        changes(&[("a", SyncChange::Created), ("b", SyncChange::Created)])
+    );
+
+    let again = q
+        .sync_schedules("web", &[every("a"), every("b")])
+        .await
+        .expect("idempotent");
+    assert!(
+        again.is_empty(),
+        "an unchanged sync writes nothing: {again:?}"
+    );
+
+    let pruned = q
+        .sync_schedules(
+            "web",
+            &[ScheduleSpec::every(
+                "a",
+                "default",
+                "report",
+                Duration::from_secs(120),
+            )],
+        )
+        .await
+        .expect("prune");
+    assert_eq!(
+        pruned,
+        changes(&[("a", SyncChange::Updated), ("b", SyncChange::Removed)])
+    );
+    assert_eq!(
+        owners(&q).await,
+        owned(&[
+            ("a", Some("web")),
+            ("bare", None),
+            ("w.ping", Some("worker"))
+        ])
+    );
+
+    let emptied = q.sync_schedules("web", &[]).await.expect("empty list");
+    assert_eq!(emptied, changes(&[("a", SyncChange::Removed)]));
+    assert_eq!(
+        owners(&q).await,
+        owned(&[("bare", None), ("w.ping", Some("worker"))])
+    );
+}
+
+#[tokio::test]
+async fn an_unowned_row_with_a_listed_key_is_adopted_keeping_its_state() {
+    let q = q!();
+    q.upsert_schedule("legacy", "default", "report", Duration::from_secs(60))
+        .await
+        .expect("legacy row");
+    sqlx::query(
+        "UPDATE stampeded_schedules SET paused = true, max_attempts = 7,
+             next_run_at = now() + interval '1 hour' WHERE key = 'legacy'",
+    )
+    .execute(q.pool())
+    .await
+    .expect("operator state");
+    let before: jiff_sqlx::Timestamp =
+        sqlx::query_scalar("SELECT next_run_at FROM stampeded_schedules")
+            .fetch_one(q.pool())
+            .await
+            .expect("next run");
+
+    let adopted = q
+        .sync_schedules("web", &[every("legacy")])
+        .await
+        .expect("adopt");
+    assert_eq!(adopted, changes(&[("legacy", SyncChange::Adopted)]));
+    let (owner, paused, attempts, next): (Option<String>, bool, i16, jiff_sqlx::Timestamp) =
+        sqlx::query_as("SELECT owner, paused, max_attempts, next_run_at FROM stampeded_schedules")
+            .fetch_one(q.pool())
+            .await
+            .expect("adopted row");
+    assert_eq!(owner.as_deref(), Some("web"));
+    assert!(paused, "a sync never unpauses");
+    assert_eq!(attempts, 7, "an omitted limit keeps the row's");
+    assert_eq!(next, before, "the same rule keeps its next run");
+
+    // The older helpers still work on an owned row, and do not disown it.
+    q.upsert_schedule("legacy", "default", "report", Duration::from_secs(30))
+        .await
+        .expect("old helper");
+    assert_eq!(owners(&q).await, owned(&[("legacy", Some("web"))]));
+}
+
+#[tokio::test]
+async fn a_key_owned_by_another_program_is_refused_and_nothing_is_written() {
+    let q = q!();
+    q.sync_schedules("worker", &[every("shared"), every("w.only")])
+        .await
+        .expect("worker's schedules");
+    q.sync_schedules("web", &[every("web.old")])
+        .await
+        .expect("web's schedules");
+
+    let err = q
+        .sync_schedules("web", &[every("aaa.new"), every("shared")])
+        .await
+        .expect_err("another owner's key");
+    let Error::InvalidSchedule(message) = &err else {
+        panic!("expected InvalidSchedule, got {err:?}");
+    };
+    assert!(
+        message.contains("'shared'") && message.contains("'worker'"),
+        "{message}"
+    );
+    // The whole sync rolled back: no new row, and the unlisted row survives.
+    assert_eq!(
+        owners(&q).await,
+        owned(&[
+            ("shared", Some("worker")),
+            ("w.only", Some("worker")),
+            ("web.old", Some("web"))
+        ])
+    );
+}
+
+#[tokio::test]
+async fn sync_limits_are_set_when_given_and_preserved_when_omitted() {
+    let q = q!();
+    q.sync_schedules(
+        "web",
+        &[
+            every("tuned")
+                .max_attempts(3)
+                .max_interruptions(0)
+                .expires_in(Duration::from_secs(120)),
+            every("plain"),
+        ],
+    )
+    .await
+    .expect("create with limits");
+    let limits = || async {
+        sqlx::query_as::<_, (String, i16, i16, i32)>(
+            "SELECT key, max_attempts, max_interruptions, expire_seconds
+               FROM stampeded_schedules ORDER BY key",
+        )
+        .fetch_all(q.pool())
+        .await
+        .expect("limits")
+    };
+    assert_eq!(
+        limits().await,
+        vec![
+            ("plain".to_owned(), 25, 1, 3600),
+            ("tuned".to_owned(), 3, 0, 120)
+        ]
+    );
+
+    sqlx::query("UPDATE stampeded_schedules SET max_attempts = 9 WHERE key = 'plain'")
+        .execute(q.pool())
+        .await
+        .expect("tuned in SQL");
+    let resync = q
+        .sync_schedules("web", &[every("tuned"), every("plain")])
+        .await
+        .expect("resync without limits");
+    assert!(
+        resync.is_empty(),
+        "omitted limits are not a change: {resync:?}"
+    );
+    assert_eq!(
+        limits().await,
+        vec![
+            ("plain".to_owned(), 9, 1, 3600),
+            ("tuned".to_owned(), 3, 0, 120)
+        ]
+    );
+
+    let changed = q
+        .sync_schedules("web", &[every("tuned").max_attempts(5), every("plain")])
+        .await
+        .expect("new limit");
+    assert_eq!(changed, changes(&[("tuned", SyncChange::Updated)]));
+    sqlx::query("UPDATE stampeded_schedules SET next_run_at = now() - interval '1 minute'")
+        .execute(q.pool())
+        .await
+        .expect("make due");
+    assert_eq!(q.run_due_schedules(10).await.expect("fire"), 2);
+    let fired: Vec<(i16, i16, i32)> = sqlx::query_as(
+        "SELECT max_attempts, max_interruptions, expire_seconds FROM stampeded_jobs
+          ORDER BY max_attempts",
+    )
+    .fetch_all(q.pool())
+    .await
+    .expect("jobs");
+    assert_eq!(fired, vec![(5, 0, 120), (9, 1, 3600)]);
+}
+
+#[tokio::test]
+async fn a_synced_cron_is_seeded_and_moves_only_when_its_rule_does() {
+    let q = q!();
+    let nightly = |expr: &str| {
+        ScheduleSpec::cron("nightly", "default", "report", expr)
+            .timezone("Africa/Casablanca")
+            .args(json!({"account": 42}))
+            .priority(3)
+    };
+    q.sync_schedules("web", &[nightly("0 3 * * *")])
+        .await
+        .expect("create");
+    let row = || async {
+        sqlx::query_as::<_, (jiff_sqlx::Timestamp, String, String, serde_json::Value, i16)>(
+            "SELECT next_run_at, dst_policy, timezone, args, priority FROM stampeded_schedules",
+        )
+        .fetch_one(q.pool())
+        .await
+        .expect("cron row")
+    };
+    let (seeded, policy, zone, args, priority) = row().await;
+    assert!(seeded.to_jiff() > common::db_now(&q).await, "seeded ahead");
+    assert_eq!(policy, "wall_clock", "a named hour suggests wall_clock");
+    assert_eq!(zone, "Africa/Casablanca");
+    assert_eq!(args, json!({"account": 42}));
+    assert_eq!(priority, 3);
+    assert_eq!(q.run_due_schedules(10).await.expect("tick"), 0);
+
+    q.sync_schedules("web", &[nightly("0 3 * * *")])
+        .await
+        .expect("same rule");
+    assert_eq!(row().await.0, seeded);
+
+    q.sync_schedules("web", &[nightly("*/5 * * * *")])
+        .await
+        .expect("new rule");
+    let (moved, policy, ..) = row().await;
+    assert_ne!(moved, seeded);
+    assert_eq!(policy, "instant");
+}
+
+#[tokio::test]
+async fn malformed_syncs_are_refused_before_anything_is_written() {
+    let q = q!();
+    for (owner, specs) in [
+        ("  ", vec![every("a")]),
+        ("web", vec![every("a"), every("a")]),
+        ("web", vec![every(" ")]),
+        (
+            "web",
+            vec![ScheduleSpec::every(
+                "z",
+                "default",
+                "report",
+                Duration::ZERO,
+            )],
+        ),
+        (
+            "web",
+            vec![ScheduleSpec::cron("c", "default", "report", "nonsense")],
+        ),
+        (
+            "web",
+            vec![ScheduleSpec::cron("c", "default", "report", "* * * * *").timezone("Mars/Base")],
+        ),
+        ("web", vec![every("a").args(json!([1, 2]))]),
+    ] {
+        let err = q
+            .sync_schedules(owner, &specs)
+            .await
+            .expect_err("malformed sync");
+        assert!(
+            matches!(err, Error::InvalidSchedule(_)),
+            "{owner:?} {specs:?}: {err:?}"
+        );
+    }
+    assert_eq!(owners(&q).await, owned(&[]));
 }

@@ -255,6 +255,58 @@ Omit `dst_policy` and the expression decides: one that names its hours
 (`0 3 * * *`) gets `wall_clock`, one with `*` or a step in the hour gets
 `instant`.
 
+### Owners and declarative sync
+
+Several programs can share one jobs database, each declaring its own
+schedules. A schedule's `owner` says which program declared it, and a sync
+makes one owner's schedules exactly the list it is given, in one
+transaction:
+
+- each listed schedule is created or updated, owned by the syncing owner;
+- that owner's schedules missing from the list are removed;
+- other owners' schedules are never read, changed or removed;
+- an unowned schedule with a listed key (one registered before owners, by
+  plain SQL, or by a call that names no owner) is adopted;
+- a listed key owned by another program is refused with an error, and
+  nothing is written: moving a schedule between programs is an explicit
+  delete, never a silent takeover.
+
+Job limits left out of a declaration keep what the row holds, so a limit tuned
+in SQL survives the next deploy. Pausing is operator state and a sync leaves it
+alone. An unchanged schedule is not written, and keeps its next run; a changed
+rule is reseeded.
+
+```rust
+use stampeded::ScheduleSpec;
+
+let changes = queue
+    .sync_schedules("billing", &[
+        ScheduleSpec::cron("billing.invoices", "billing", "invoices.issue", "0 3 * * *")
+            .timezone("Africa/Casablanca")
+            .max_attempts(3),
+        ScheduleSpec::every("billing.ping", "billing", "ping", Duration::from_secs(60)),
+    ])
+    .await?;
+// [ScheduleChange { key: "billing.invoices", change: SyncChange::Created }, ...]
+```
+
+```ruby
+Stampeded::Schedule.sync([
+  { key: "nightly-report", job: ReportJob, cron: "0 3 * * *", timezone: "America/New_York" },
+  { key: "cleanup", job: CleanupJob, cron: "*/15 * * * *", max_attempts: 3 }
+], owner: "rails")
+# => { "nightly-report" => :created, "cleanup" => :created, "retired" => :removed }
+```
+
+Both call `stampeded_sync_schedules(owner, schedules jsonb)`, which any other
+language can call too; a key owned by someone else raises SQLSTATE `SD409`.
+`Schedule.recurring(..., owner: "rails")` registers one schedule the same way
+without pruning; without `owner:` it, `Queue::upsert_schedule` and
+`Queue::upsert_cron_schedule` behave as before and leave an existing owner in
+place. `schema::migrate` (or `bin/rails stampeded:daemon`, which runs it)
+applies forward migration 10, which adds the nullable `owner` column: existing
+schedules stay unowned until a sync adopts them.
+
 ## Unique jobs
 
 ```sql

@@ -46,7 +46,7 @@ pub use pool::connect;
 pub use pull::{Lease, PullConfig, Puller};
 pub use queue::{Queue, Transition};
 pub use queues::Queues;
-pub use schedule::Schedule;
+pub use schedule::{Schedule, ScheduleChange, ScheduleSpec, SyncChange};
 pub use steps::StepState;
 pub use wakeup::{NextPoll, Wakeup};
 pub use worker::{JobContext, Worker, WorkerConfig};

@@ -186,3 +186,84 @@ class ScheduleValidationTest < Minitest::Test
     end
   end
 end
+
+class ScheduleOwnershipTest < Minitest::Test
+  include StampededTest::Isolation
+
+  def owners
+    conn { |c| c.exec(%(SELECT key, owner FROM stampeded_schedules ORDER BY key COLLATE "C")).map(&:values) }
+  end
+
+  def nightly(key, **opts) = { key: key, job: NightlyJob, cron: "0 3 * * *", **opts }
+
+  def test_a_sync_upserts_and_prunes_only_its_own_rows
+    Stampeded::Schedule.sync([nightly("w.report")], owner: "worker")
+    Stampeded::Schedule.recurring(key: "bare", job: NightlyJob, cron: "0 4 * * *")
+
+    assert_equal({ "a" => :created, "b" => :created },
+                 Stampeded::Schedule.sync([nightly("a"), nightly("b")], owner: "web"))
+    assert_empty Stampeded::Schedule.sync([nightly("a"), nightly("b")], owner: "web")
+    assert_equal({ "a" => :updated, "b" => :removed },
+                 Stampeded::Schedule.sync([nightly("a", cron: "0 5 * * *")], owner: "web"))
+
+    assert_equal [%w[a web], ["bare", nil], %w[w.report worker]], owners
+    assert_equal({ "a" => "web", "bare" => nil, "w.report" => "worker" },
+                 Stampeded::Schedule.all.to_h { |s| [s["key"], s["owner"]] })
+  end
+
+  def test_an_unowned_row_with_a_listed_key_is_adopted
+    Stampeded::Schedule.recurring(key: "legacy", job: NightlyJob, cron: "0 3 * * *")
+
+    assert_equal({ "legacy" => :adopted }, Stampeded::Schedule.sync([nightly("legacy")], owner: "web"))
+    assert_equal [%w[legacy web]], owners
+  end
+
+  def test_a_key_owned_by_another_program_is_refused_and_nothing_is_written
+    Stampeded::Schedule.sync([nightly("shared")], owner: "worker")
+    Stampeded::Schedule.sync([nightly("web.old")], owner: "web")
+
+    error = assert_raises(Stampeded::Error) do
+      Stampeded::Schedule.sync([nightly("aaa"), nightly("shared")], owner: "web")
+    end
+    assert_match(/'shared' belongs to owner 'worker'/, error.message)
+    assert_equal [%w[shared worker], %w[web.old web]], owners
+
+    error = assert_raises(Stampeded::Error) do
+      Stampeded::Schedule.recurring(key: "shared", job: NightlyJob, cron: "* * * * *", owner: "web")
+    end
+    assert_match(/belongs to owner "worker"/, error.message)
+    assert_equal "0 3 * * *", conn { |c| c.exec("SELECT cron_expr FROM stampeded_schedules WHERE key = 'shared'")[0]["cron_expr"] }
+  end
+
+  def test_recurring_with_an_owner_claims_unowned_rows_and_without_one_leaves_owners_alone
+    Stampeded::Schedule.recurring(key: "n", job: NightlyJob, cron: "0 3 * * *")
+    Stampeded::Schedule.recurring(key: "n", job: NightlyJob, cron: "0 3 * * *", owner: "web")
+    assert_equal [%w[n web]], owners
+
+    Stampeded::Schedule.recurring(key: "n", job: NightlyJob, cron: "0 4 * * *")
+    assert_equal [%w[n web]], owners
+  end
+
+  def test_limits_are_set_when_given_and_preserved_when_omitted
+    Stampeded::Schedule.sync([nightly("tuned", max_attempts: 3, max_interruptions: 0, expire_seconds: 120),
+                              nightly("plain")], owner: "web")
+    conn { |c| c.exec("UPDATE stampeded_schedules SET max_attempts = 9 WHERE key = 'plain'") }
+
+    assert_empty Stampeded::Schedule.sync([nightly("tuned"), nightly("plain")], owner: "web")
+    limits = conn do |c|
+      c.exec("SELECT key, max_attempts, max_interruptions, expire_seconds FROM stampeded_schedules ORDER BY key")
+       .map { |r| r.values_at("key", "max_attempts", "max_interruptions", "expire_seconds") }
+    end
+    assert_equal [%w[plain 9 1 3600], %w[tuned 3 0 120]], limits
+  end
+
+  def test_malformed_syncs_are_refused
+    assert_raises(Stampeded::Error) { Stampeded::Schedule.sync([nightly("a")], owner: " ") }
+    assert_raises(Stampeded::Error) { Stampeded::Schedule.sync([nightly("a"), nightly("a")], owner: "web") }
+    assert_raises(Stampeded::Error) { Stampeded::Schedule.sync([nightly("a", cron: "garbage")], owner: "web") }
+    assert_raises(Stampeded::Error) do
+      Stampeded::Schedule.recurring(key: "n", job: NightlyJob, cron: "0 3 * * *", owner: "")
+    end
+    assert_empty owners
+  end
+end

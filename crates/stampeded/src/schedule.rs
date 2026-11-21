@@ -10,12 +10,21 @@
 //! enqueued. Expiry is the executing job's inactivity timeout, not a deadline
 //! for a queued occurrence. Consumer-side [`crate::NewJob`] options do not
 //! configure jobs produced by a schedule.
+//!
+//! A schedule may have an `owner`, the program that declares it.
+//! [`crate::Queue::sync_schedules`] makes one owner's rows match its list of
+//! [`ScheduleSpec`]s and never touches another owner's.
 
 use crate::cron::{Cron, DstPolicy};
 use crate::error::Result;
 use jiff::tz::TimeZone;
 use jiff::{Timestamp, ToSpan, ZonedDateTime};
 use tracing::warn;
+
+mod spec;
+
+pub(crate) use spec::sync;
+pub use spec::{ScheduleChange, ScheduleSpec, SyncChange};
 
 /// Scheduling fields of a stored schedule; job-template limits stay in SQL.
 #[derive(Debug, Clone, sqlx::FromRow)]
