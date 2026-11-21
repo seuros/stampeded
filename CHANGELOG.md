@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.13.0](https://github.com/seuros/stampeded/compare/stampeded-v0.12.0...stampeded-v0.13.0) (2026-11-21)
+
+
+### ⚠ BREAKING CHANGES
+
+* **worker:** stampeded_puller_options gains a trailing `const char *vitals_json` field; C callers compiled against the old header must rebuild against the new one (bindings such as Stampeded.NET need the field added).
+
+### Features
+
+* **worker:** host-vitals admission: stop claiming while disk or thermals are short ([e958aae](https://github.com/seuros/stampeded/commit/e958aae5867e79a1ef407396879b277e3de62dba))
+
+
+### Bug Fixes
+
+* **worker:** a vitals pause waits for in-flight claims before it is reported ([7cd8306](https://github.com/seuros/stampeded/commit/7cd8306a4bb03b767525bbf5f9c9c3d4487bfdc9))
+
 ## [0.12.0](https://github.com/seuros/stampeded/compare/stampeded-v0.11.0...stampeded-v0.12.0) (2026-11-21)
 
 
