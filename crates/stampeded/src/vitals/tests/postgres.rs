@@ -167,8 +167,13 @@ async fn a_worker_keeps_its_running_job_and_claims_nothing_new_until_headroom_ho
 
     let cleared = Instant::now();
     script.set(50);
-    eventually("the row says stabilizing", async || {
-        row_vitals(&queue).await["phase"] == "stabilizing"
+    // Stabilizing lasts about HEADROOM and the row is written only on a change, so a
+    // slow poll can miss it and see recovered: either means the disk reading cleared.
+    eventually("the row leaves warning", async || {
+        matches!(
+            row_vitals(&queue).await["phase"].as_str(),
+            Some("stabilizing" | "recovered")
+        )
     })
     .await;
     eventually("the waiting job runs", async || {
