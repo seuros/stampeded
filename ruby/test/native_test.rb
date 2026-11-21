@@ -64,6 +64,54 @@ class NativeWorkerTest < Minitest::Test
     conn { |c| c.exec("DROP OWNED BY #{role}; DROP ROLE IF EXISTS #{role}") } if role
   end
 
+  def test_a_worker_short_of_disk_claims_nothing_and_says_why_on_its_row
+    # 100% free never holds on a real disk: the first probe pauses claiming.
+    Stampeded.config.vitals = { disks: [{ path: Dir.tmpdir, min_free: "100%" }], probe_interval: 0.05 }
+    worker = Stampeded::Worker.new(queue: "default", poll_interval: 0.05)
+    worker.register("held") { nil }
+    id = Stampeded.enqueue(queue: "default", task: "held")
+    thread = Thread.new { worker.run }
+
+    vitals = -> { conn { |c| c.exec("SELECT metadata->'vitals' AS v FROM stampeded_workers").first&.fetch("v") } }
+    deadline = Time.now + 5
+    sleep 0.05 until vitals.() || Time.now > deadline
+    row = JSON.parse(vitals.() || "null")
+    sleep 0.3
+
+    refute_nil row, "the worker row never recorded its vitals"
+    assert_equal false, row["admitting"]
+    assert_equal "warning", row["phase"]
+    assert_equal "disk:#{Dir.tmpdir}", row["vital"]
+    assert_equal "available", job_row(id)["state"], "claimed while short of disk"
+  ensure
+    worker&.stop
+    thread&.join(5)
+    Stampeded.config.vitals = nil
+  end
+
+  def test_room_on_disk_claims_as_usual
+    puller = Stampeded::Native::Puller.new(url: Stampeded::Connection.url, queues: "default", except: nil,
+                                           max_leases: 1, batch_size: 1, poll_interval: 0.05, heartbeat_interval: 30,
+                                           vitals: { disks: [{ path: Dir.tmpdir, min_free: 1 }] })
+    id = Stampeded.enqueue(queue: "default", task: "t")
+    lease = puller.next(2)
+    assert_equal id, lease&.row&.fetch("id")
+    lease.complete!
+    puller.stop(0)
+  ensure
+    puller&.close
+  end
+
+  def test_an_unusable_vitals_config_is_refused_with_the_reason
+    error = assert_raises(Stampeded::Error) do
+      Stampeded::Native::Puller.new(url: Stampeded::Connection.url, queues: "default", except: nil,
+                                    max_leases: 1, batch_size: 1, poll_interval: 0.05, heartbeat_interval: 30,
+                                    vitals: { disks: [{ path: "relative", min_free: 1 }] })
+    end
+    assert_includes error.message, "vitals disk path relative must be absolute"
+    assert_equal 0, conn { |c| c.exec("SELECT count(*) FROM stampeded_workers")[0]["count"].to_i }
+  end
+
   def test_a_worker_that_dies_stops_claiming_and_deregisters
     worker = Stampeded::Worker.new(queue: "default", poll_interval: 0.05)
     worker.register("late") { nil }

@@ -50,6 +50,8 @@ behavior-machines = { version = "0.5", features = ["alloc"] }
 behavior-machines-circuit = "0.6.3"
 # Which queue to claim from next.
 priority-machines = "0.7"
+# Host-vitals admission (disk, thermal), behind stampeded's `vitals` feature.
+vitals-machines = { version = "0.4", features = ["probe"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

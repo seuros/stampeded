@@ -33,6 +33,9 @@ dashboard = ["http"]
 mcp = ["dep:mcp-host", "dep:schemars"]
 # 3D game world visualization of the job queue state.
 game = ["http", "dep:rama-x-threejs"]
+# Host-vitals admission: stop claiming while disk or thermals are short, resume once
+# headroom has held. Probes the host, so off unless asked for.
+vitals = ["dep:vitals-machines"]
 
 [dependencies]
 sqlx.workspace = true
@@ -61,6 +64,7 @@ rama-http-backend = { workspace = true, optional = true }
 rama-x-threejs = { workspace = true, optional = true }
 mcp-host = { workspace = true, optional = true }
 schemars = { workspace = true, optional = true }
+vitals-machines = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }
 

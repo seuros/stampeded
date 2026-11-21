@@ -35,6 +35,10 @@ pub enum Error {
     #[error("schema: {0}")]
     Schema(String),
 
+    /// A configuration that cannot work, rejected before anything starts.
+    #[error("invalid configuration: {0}")]
+    InvalidConfig(String),
+
     /// The HTTP edge could not listen on its address.
     #[error("could not bind {addr}: {source}")]
     Bind {

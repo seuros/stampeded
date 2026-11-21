@@ -61,6 +61,12 @@ int main(int argc, char **argv) {
         "the error names the JSON");
   CHECK(stampeded_connect(nullptr) == nullptr, "a NULL url is refused");
 
+  stampeded_puller_options unusable = {
+      .queues = "ffi", .vitals_json = "{\"disks\": [{\"path\": \"relative\", \"min_free\": 1}]}"};
+  CHECK(stampeded_puller_start(client, &unusable) == nullptr, "an unusable vitals config is refused");
+  CHECK(stampeded_last_error() != nullptr && strstr(stampeded_last_error(), "vitals") != nullptr,
+        "the error names the vitals");
+
   stampeded_puller_options options = {
       .queues = "ffi", .max_leases = 4, .poll_interval_ms = 50, .heartbeat_interval_ms = 1000};
   stampeded_puller *puller = stampeded_puller_start(client, &options);

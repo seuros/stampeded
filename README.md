@@ -370,6 +370,63 @@ On by default in the Rust worker:
   retry. Jobs refused by an open circuit or by tenant throttling are recorded
   as `breaker_open` / `throttled` and get their attempt back.
 
+## Host vitals admission
+
+A worker can stop claiming while its host is short of disk or under thermal
+pressure, and claim again only once there has been headroom for a set time. It
+is behind the `vitals` feature (`cargo add stampeded --features vitals`) and
+watches nothing unless configured. The Ruby gem's library has it built in.
+
+```rust
+use stampeded::{DiskVital, FreeSpace, VitalsConfig, WorkerConfig};
+use std::time::Duration;
+
+let config = WorkerConfig {
+    vitals: Some(
+        VitalsConfig::default()
+            // Stop under 5 GB free; resume only above 10 GB.
+            .disk(DiskVital::new("/var/lib/app", FreeSpace::Bytes(5_000_000_000))
+                .resume_above(FreeSpace::Bytes(10_000_000_000)))
+            .disk(DiskVital::new("/tmp", FreeSpace::Percent(10.0)))
+            .thermal_pressure()                        // macOS and FreeBSD report it
+            .headroom_for(Duration::from_secs(120))    // the default
+            .probe_interval(Duration::from_secs(15)),  // the default
+    ),
+    ..WorkerConfig::default()
+};
+```
+
+`PullConfig` takes the same `vitals`. Every vital has its own recovery episode
+([vitals-machines](https://crates.io/crates/vitals-machines)):
+
+| phase | claims | when |
+|---|---|---|
+| `healthy` | yes | no warning seen yet |
+| `warning` | no | under `min_free`, or under the `resume_above` margin; thermal pressure |
+| `stabilizing` | no | headroom again, not yet held for `headroom_for` |
+| `recovered` | yes | headroom held for `headroom_for`, without a gap |
+| `unavailable` | no | the vital could not be read during an episode |
+| `blocked` | no | the margin is more than the filesystem holds |
+
+- Jobs already claimed keep running and heartbeating in every phase; a pause
+  only stops the next claim. A `Puller` still hands out jobs it claimed before
+  the pause.
+- A reading that cannot be taken is never headroom. During an episode it holds
+  claiming back and restarts the wait. With no episode open it does not stop
+  claiming, so a probe the OS cannot answer (thermal state on Linux is always
+  unknown) does not idle the worker; it is logged and reported as unreadable.
+- A silence longer than three probe intervals (a suspended host, a hung probe)
+  restarts the wait. The clock counts time the host spent asleep.
+- The first probe runs before the worker claims anything, so a worker started on
+  a full disk claims nothing.
+- Visible as the gauges `stampeded.vitals.admitting`, `stampeded.vitals.phase`
+  and `stampeded.vitals.readable` (`{vital}` = `disk:/var/lib/app`, `thermal`),
+  in the worker row's `metadata->'vitals'` (phase, vital, reason, since), and in
+  the dashboard and `worker_status` MCP tool as "claiming paused: ...".
+- Over the C ABI, `stampeded_puller_options.vitals_json` takes the same
+  settings as JSON, durations in seconds:
+  `{"disks":[{"path":"/var/lib/app","min_free":"10%","resume_free":20000000000}],"thermal_pressure":true,"headroom":120,"probe_interval":15}`.
+
 ## Resumable jobs
 
 Save a cursor as the job progresses; a retry picks up from it:
@@ -518,6 +575,7 @@ crates/stampeded/  queue, worker, scheduler, maintenance, planner
   schema/          migrations (sqlx), NOTES.md (design notes)
   src/http/        HTTP API and dashboard    [feature: http]
   src/mcp/         MCP control plane         [feature: mcp]
+  src/vitals/      host-vitals admission     [feature: vitals]
   src/bin/         stampeded, stampeded-mcp
 crates/stampeded-ffi/  C ABI: libstampeded_ffi and stampeded.h
 ruby/              the stampeded gem

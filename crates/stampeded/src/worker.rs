@@ -1,6 +1,7 @@
 //! The worker: claim, execute, report, heartbeat.
 //! No connection is held while a job runs, and a job no longer owned is never written to.
 
+use crate::admission::HostAdmission;
 use crate::claim::Claimer;
 use crate::error::{Error, Result};
 use crate::fairness::{Fairness, TenantLimit, now};
@@ -211,6 +212,11 @@ pub struct WorkerConfig {
     /// Minimum gap between claim round trips, however many wakeups arrive.
     /// The 1 ms default sits above one claim's cost, so it only coalesces bursts.
     pub wakeup_cooldown: Duration,
+
+    /// Host vitals that hold claiming back while short; running jobs are never touched.
+    /// `None` watches nothing. See [`crate::vitals`].
+    #[cfg(feature = "vitals")]
+    pub vitals: Option<crate::vitals::VitalsConfig>,
 }
 
 impl Default for WorkerConfig {
@@ -226,6 +232,8 @@ impl Default for WorkerConfig {
             breaker_failure_threshold: Some(10),
             wakeup_cooldown: Duration::from_millis(1),
             shutdown_timeout: Duration::from_secs(25),
+            #[cfg(feature = "vitals")]
+            vitals: None,
         }
     }
 }
@@ -363,6 +371,8 @@ impl Worker {
     /// Run until `shutdown` fires. Notify handlers, drain for `shutdown_timeout`, then
     /// abort and join remaining handlers. Unsettled claims stay eligible for reaping.
     pub async fn run(self, mut shutdown: watch::Receiver<bool>) -> Result<()> {
+        #[cfg(feature = "vitals")]
+        HostAdmission::check(self.config.vitals.as_ref())?;
         let worker_id = register_worker(&self.queue, &self.config.queues).await?;
         let queues_label = self.config.queues.label();
         let cancellation_scope = Scope::never();
@@ -386,6 +396,18 @@ impl Worker {
                 }
             }
         });
+
+        // After the heartbeat: the first probe may take a moment, and the row must stay alive.
+        #[cfg(feature = "vitals")]
+        let admission = HostAdmission::start(
+            self.config.vitals.as_ref(),
+            &self.queue,
+            worker_id,
+            &self.metrics,
+        )
+        .await?;
+        #[cfg(not(feature = "vitals"))]
+        let admission = HostAdmission::default();
 
         let mut executions = tokio::task::JoinSet::new();
         let sem = Arc::new(tokio::sync::Semaphore::new(self.config.max_concurrency));
@@ -441,6 +463,13 @@ impl Worker {
             let available = sem.available_permits();
             if available == 0 {
                 next = NextPoll::Saturated;
+                continue;
+            }
+
+            // Host vitals short: claim nothing new, back on the poll interval. What is
+            // already running keeps running and heartbeating.
+            if !admission.admitting() {
+                next = NextPoll::Idle;
                 continue;
             }
 
@@ -583,6 +612,7 @@ impl Worker {
             }
         }
 
+        admission.stop();
         heartbeat.shutdown().await;
         // The reaper joins existing worker rows. Never orphan an unsettled claim,
         // even when a handler panicked or its outcome could not be reported.

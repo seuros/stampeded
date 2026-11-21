@@ -19,9 +19,11 @@ workspace = true
 
 [features]
 # The library is a final artifact (Ruby, Go, C load it): it picks the TLS backend.
-default = ["tls-aws-lc"]
+default = ["tls-aws-lc", "vitals"]
 tls-aws-lc = ["stampeded/tls-aws-lc"]
 tls-ring = ["stampeded/tls-ring"]
+# Host-vitals admission through `stampeded_puller_options.vitals_json`.
+vitals = ["stampeded/vitals"]
 
 [dependencies]
 stampeded.workspace = true

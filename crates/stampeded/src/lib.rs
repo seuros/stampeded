@@ -2,6 +2,7 @@
 //!
 //! The rules live in SQL (`schema/*.sql`); this crate is a typed wrapper over them.
 
+mod admission;
 pub mod async_job;
 mod claim;
 pub mod cron;
@@ -23,6 +24,9 @@ mod test_support;
 mod timestamp;
 pub mod wakeup;
 pub mod worker;
+
+#[cfg(feature = "vitals")]
+pub mod vitals;
 
 /// HTTP edge: the enqueue API, per-job status and SSE, and the dashboard.
 #[cfg(feature = "http")]
@@ -48,6 +52,8 @@ pub use queue::{Queue, Transition};
 pub use queues::Queues;
 pub use schedule::{Schedule, ScheduleChange, ScheduleSpec, SyncChange};
 pub use steps::StepState;
+#[cfg(feature = "vitals")]
+pub use vitals::{DiskVital, FreeSpace, VitalsConfig, VitalsStatus};
 pub use wakeup::{NextPoll, Wakeup};
 pub use worker::{JobContext, Worker, WorkerConfig};
 

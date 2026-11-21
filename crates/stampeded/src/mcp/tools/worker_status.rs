@@ -3,6 +3,9 @@ use mcp_host::prelude::*;
 // `let _ = write!`/`writeln!` into a String below: fmt::Write on String never errors.
 use std::fmt::Write as _;
 
+/// hostname, pid, queues, seconds since its heartbeat, `metadata->'vitals'`.
+type WorkerRow = (String, i32, Vec<String>, f64, Option<serde_json::Value>);
+
 impl StampededServer {
     /// Worker liveness.
     #[mcp_tool(
@@ -12,8 +15,9 @@ impl StampededServer {
         idempotent = true
     )]
     async fn worker_status(&self, _ctx: Ctx<'_>, _params: Parameters<EmptyArgs>) -> ToolResult {
-        let rows: Vec<(String, i32, Vec<String>, f64)> = sqlx::query_as(
-            "SELECT hostname, pid, queues, extract(epoch from now() - last_heartbeat)::float8 \
+        let rows: Vec<WorkerRow> = sqlx::query_as(
+            "SELECT hostname, pid, queues, extract(epoch from now() - last_heartbeat)::float8, \
+                    metadata->'vitals' \
                FROM stampeded_workers ORDER BY last_heartbeat",
         )
         .fetch_all(self.queue().pool())
@@ -27,7 +31,7 @@ impl StampededServer {
         }
 
         let mut out = format!("{} worker(s)\n", rows.len());
-        for (host, pid, queues, age) in rows {
+        for (host, pid, queues, age, vitals) in rows {
             let flag = if age > 300.0 {
                 "  STALE -- jobs will be reclaimed"
             } else {
@@ -38,6 +42,9 @@ impl StampededServer {
                 "  {host}:{pid:<8} queues={:<20} heartbeat {age:.0}s ago{flag}",
                 queues.join(",")
             );
+            if let Some(note) = crate::admission::paused_note(vitals.as_ref()) {
+                let _ = writeln!(out, "    {note}");
+            }
         }
         Ok(ToolOutput::text(out))
     }

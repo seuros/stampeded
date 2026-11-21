@@ -42,6 +42,14 @@ pub mod names {
     pub const BREAKER_STATE: &str = "stampeded.breaker.state";
     /// How much of its rate a tenant has left. `{queue, tenant}`
     pub const THROTTLE_HEADROOM: &str = "stampeded.throttle.headroom";
+
+    /// Whether host vitals let this worker claim: 1 claiming, 0 held back. `vitals` feature.
+    pub const VITALS_ADMITTING: &str = "stampeded.vitals.admitting";
+    /// One vital's phase: 0 healthy, 1 recovered, 2 stabilizing, 3 unavailable, 4 blocked,
+    /// 5 warning; 2 and up hold claiming back. `{vital}`, e.g. `disk:/var/lib/app`, `thermal`
+    pub const VITALS_PHASE: &str = "stampeded.vitals.phase";
+    /// Whether the last probe could read a vital. `{vital}`
+    pub const VITALS_READABLE: &str = "stampeded.vitals.readable";
 }
 
 /// A label attached to a measurement.

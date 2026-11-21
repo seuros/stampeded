@@ -24,6 +24,11 @@ module Stampeded
 
     attr_accessor :job_timeout
 
+    # Host vitals that stop the worker claiming while short, or nil:
+    #   { disks: [{ path: "/var/lib/app", min_free: "10%", resume_free: 20_000_000_000 }],
+    #     thermal_pressure: true, headroom: 120, probe_interval: 15 }
+    attr_accessor :vitals
+
     def initialize
       @database_url       = ENV.fetch("STAMPEDED_DATABASE_URL", nil) || ENV.fetch("DATABASE_URL", nil)
       @default_queue      = "default"
@@ -36,6 +41,7 @@ module Stampeded
       @shutdown_timeout   = 25.0
       @connection_class   = nil
       @job_timeout        = 900.0
+      @vitals             = nil
     end
   end
 end

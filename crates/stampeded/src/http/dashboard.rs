@@ -721,10 +721,11 @@ async fn render_health(state: &ApiState) -> Option<String> {
         .filter(|r| r.needs_vacuum)
         .collect();
 
-    let workers: Vec<(String, i32, f64)> = logged(
+    let workers: Vec<(String, i32, f64, Option<serde_json::Value>)> = logged(
         "health",
         sqlx::query_as(
-            "SELECT hostname, pid, extract(epoch from now() - last_heartbeat)::float8 \
+            "SELECT hostname, pid, extract(epoch from now() - last_heartbeat)::float8, \
+                    metadata->'vitals' \
                FROM stampeded_workers ORDER BY last_heartbeat",
         )
         .fetch_all(state.queue.pool())
@@ -769,12 +770,16 @@ async fn render_health(state: &ApiState) -> Option<String> {
     if workers.is_empty() {
         html.push_str(r#"<tr><td colspan="2" class="dim">none registered</td></tr>"#);
     }
-    for (host, pid, age) in workers {
+    for (host, pid, age, vitals) in workers {
         // Past the reaper's default dead_after: its jobs are about to be reclaimed.
         let class = if age > 300.0 { "bad" } else { "dim" };
+        // Host vitals short: alive and heartbeating, but claiming nothing new.
+        let note = crate::admission::paused_note(vitals.as_ref())
+            .map(|n| format!(r#" <span class="warn">{}</span>"#, esc(&n)))
+            .unwrap_or_default();
         let _ = write!(
             html,
-            r#"<tr><td>{h}:{pid}</td><td class="n {class}">{age}</td></tr>"#,
+            r#"<tr><td>{h}:{pid}{note}</td><td class="n {class}">{age}</td></tr>"#,
             h = esc(&host),
             age = format_age(age),
         );

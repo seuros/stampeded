@@ -41,7 +41,8 @@ module Stampeded
              :max_leases, :uint32,
              :batch_size, :uint32,
              :poll_interval_ms, :uint32,
-             :heartbeat_interval_ms, :uint32
+             :heartbeat_interval_ms, :uint32,
+             :vitals_json, :pointer
     end
 
     attach_function :stampeded_version, [], :string
@@ -147,7 +148,7 @@ module Stampeded
     class Puller
       attr_reader :worker_id
 
-      def initialize(url:, queues:, except:, max_leases:, batch_size:, poll_interval:, heartbeat_interval:)
+      def initialize(url:, queues:, except:, max_leases:, batch_size:, poll_interval:, heartbeat_interval:, vitals: nil)
         @client = Native.stampeded_connect(url)
         raise Error, Native.last_error if @client.null?
 
@@ -160,6 +161,8 @@ module Stampeded
         options[:batch_size]            = batch_size
         options[:poll_interval_ms]      = Native.ms(poll_interval)
         options[:heartbeat_interval_ms] = Native.ms(heartbeat_interval)
+        vitals_spec = vitals && FFI::MemoryPointer.from_string(Native.text(JSON.generate(vitals)))
+        options[:vitals_json]           = vitals_spec || FFI::Pointer::NULL
 
         @puller = Native.stampeded_puller_start(@client, options)
         if @puller.null?

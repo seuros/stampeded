@@ -1,5 +1,6 @@
 //! Jobs handed to the caller instead of run in-process; the shape the C ABI binds to.
 
+use crate::admission::HostAdmission;
 use crate::claim::{Claimer, Held};
 use crate::error::Result;
 use crate::fairness::{Admission, Fairness, TenantLimit};
@@ -32,6 +33,10 @@ pub struct PullConfig {
     pub heartbeat_interval: Duration,
     /// Per-tenant admission rate. `None` disables fairness.
     pub tenant_limit: Option<TenantLimit>,
+    /// Host vitals that hold claiming back while short; leases already out are never
+    /// touched. `None` watches nothing. See [`crate::vitals`].
+    #[cfg(feature = "vitals")]
+    pub vitals: Option<crate::vitals::VitalsConfig>,
 }
 
 impl Default for PullConfig {
@@ -43,6 +48,8 @@ impl Default for PullConfig {
             poll_interval: Duration::from_secs(1),
             heartbeat_interval: Duration::from_secs(30),
             tenant_limit: Some(TenantLimit::default()),
+            #[cfg(feature = "vitals")]
+            vitals: None,
         }
     }
 }
@@ -65,11 +72,14 @@ pub struct Puller {
     backoff: Strategy,
     stopping: AtomicBool,
     heartbeat: JoinHandle<()>,
+    admission: HostAdmission,
 }
 
 impl Puller {
     /// Register a worker and start its heartbeat.
     pub async fn start(queue: Queue, config: PullConfig) -> Result<Self> {
+        #[cfg(feature = "vitals")]
+        HostAdmission::check(config.vitals.as_ref())?;
         let worker_id = register_worker(&queue, &config.queues).await?;
         info!(%worker_id, queues = %config.queues.label(), "puller registered");
 
@@ -86,7 +96,27 @@ impl Puller {
             }
         });
 
+        #[cfg(feature = "vitals")]
+        let admission = match HostAdmission::start(
+            config.vitals.as_ref(),
+            &queue,
+            worker_id,
+            &crate::metrics::Metrics::noop(),
+        )
+        .await
+        {
+            Ok(admission) => admission,
+            Err(e) => {
+                heartbeat.abort();
+                queue.deregister_worker(worker_id).await?;
+                return Err(e);
+            }
+        };
+        #[cfg(not(feature = "vitals"))]
+        let admission = HostAdmission::default();
+
         Ok(Self {
+            admission,
             claimer: tokio::sync::Mutex::new(Claimer::new(
                 queue.clone(),
                 config.queues.clone(),
@@ -108,6 +138,12 @@ impl Puller {
         self.worker_id
     }
 
+    /// Where the host vitals stand; `None` when none are watched.
+    #[cfg(feature = "vitals")]
+    pub fn vitals(&self) -> Option<crate::vitals::VitalsStatus> {
+        self.admission.status()
+    }
+
     /// The next job within `timeout`; `None` if none came, every lease is out, or stopping.
     pub async fn next(&self, timeout: Duration) -> Result<Option<Lease>> {
         let deadline = Instant::now() + timeout;
@@ -122,8 +158,9 @@ impl Puller {
                 continue;
             }
 
+            // Jobs already claimed are still handed out above; vitals only stop new claims.
             let room = self.leases.available_permits().min(self.config.batch_size);
-            if room > 0 {
+            if room > 0 && self.admission.admitting() {
                 self.claim(room).await?;
                 if !self.is_empty() {
                     continue;
@@ -165,6 +202,7 @@ impl Puller {
             warn!(worker_id = %self.worker_id, "leases still out after the drain; the reaper will reclaim them");
         }
 
+        self.admission.stop();
         self.heartbeat.abort();
         self.queue.deregister_worker(self.worker_id).await?;
         info!(worker_id = %self.worker_id, "puller stopped");

@@ -181,6 +181,23 @@ config.except_queues = %w[payments_dlq]    # with :all
   everything as ActiveJob and discards a job whose class it cannot find.
 - `SIGTERM` lets in-flight jobs finish before exiting. Jobs still running after
   `shutdown_timeout` are reclaimed by the daemon.
+- To stop claiming while the host is short of disk or under thermal pressure,
+  set `config.vitals` (off by default):
+
+  ```ruby
+  config.vitals = {
+    disks: [{ path: "/var/lib/app", min_free: "10%", resume_free: "20%" }, # or bytes
+            { path: "/tmp", min_free: 2_000_000_000 }],
+    thermal_pressure: true,  # macOS and FreeBSD; always unknown on Linux
+    headroom: 120,           # seconds of headroom before claiming again
+    probe_interval: 15       # seconds between probes
+  }
+  ```
+
+  Jobs already running finish and keep heartbeating; only new claims stop. The
+  worker row's `metadata->'vitals'` says why it is paused, and the daemon's
+  dashboard shows it. The rules are in the main
+  [README](https://github.com/seuros/stampeded#host-vitals-admission).
 - The worker runs on `libstampeded_ffi`, the same core every runtime's worker
   uses; see [The binaries](#the-binaries). Failures to claim or report go to
   stderr always; `STAMPEDED_LOG=1` also logs each job, and

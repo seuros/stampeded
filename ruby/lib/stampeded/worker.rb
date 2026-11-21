@@ -86,7 +86,8 @@ module Stampeded
         max_leases: @concurrency,
         batch_size: @batch_size,
         poll_interval: @poll_interval,
-        heartbeat_interval: Stampeded.config.heartbeat_interval
+        heartbeat_interval: Stampeded.config.heartbeat_interval,
+        vitals: Stampeded.config.vitals
       )
     rescue Error => e
       raise SchemaMissing, e if e.message.include?("stampeded_") && e.message.include?("does not exist")

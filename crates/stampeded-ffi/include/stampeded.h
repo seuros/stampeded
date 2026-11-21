@@ -62,6 +62,11 @@ typedef struct stampeded_puller_options {
   uint32_t poll_interval_ms;
   // How often the worker reports alive; keep well under the reaper's `dead_after`. 0 for 30000.
   uint32_t heartbeat_interval_ms;
+  // Host vitals that stop claiming while short, as JSON:
+  // `{"disks":[{"path":"/var/lib/app","min_free":"10%","resume_free":20000000000}],
+  // "thermal_pressure":true,"headroom":120,"probe_interval":15}`, durations in seconds.
+  // Leases already out are never touched. NULL watches nothing.
+  const char *vitals_json;
 } stampeded_puller_options;
 
 #ifdef __cplusplus

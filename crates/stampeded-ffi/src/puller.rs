@@ -42,6 +42,11 @@ pub struct PullerOptions {
     pub poll_interval_ms: u32,
     /// How often the worker reports alive; keep well under the reaper's `dead_after`. 0 for 30000.
     pub heartbeat_interval_ms: u32,
+    /// Host vitals that stop claiming while short, as JSON:
+    /// `{"disks":[{"path":"/var/lib/app","min_free":"10%","resume_free":20000000000}],
+    /// "thermal_pressure":true,"headroom":120,"probe_interval":15}`, durations in seconds.
+    /// Leases already out are never touched. NULL watches nothing.
+    pub vitals_json: *const c_char,
 }
 
 /// Register a worker and start its heartbeat; `options` may be NULL. NULL on failure.
@@ -79,6 +84,9 @@ pub unsafe extern "C" fn stampeded_puller_start(
             if options.heartbeat_interval_ms > 0 {
                 config.heartbeat_interval =
                     Duration::from_millis(options.heartbeat_interval_ms.into());
+            }
+            if let Some(vitals) = unsafe { opt_arg(options.vitals_json, "vitals_json") }? {
+                apply_vitals(&mut config, vitals)?;
             }
         }
 
@@ -161,6 +169,18 @@ pub unsafe extern "C" fn stampeded_puller_stop(puller: *const PullerHandle, drai
             .map_err(|e| e.to_string())?;
         Ok(STAMPEDED_OK)
     })
+}
+
+#[cfg(feature = "vitals")]
+fn apply_vitals(config: &mut PullConfig, json: &str) -> Result<(), String> {
+    let vitals = stampeded::VitalsConfig::from_json(json).map_err(|e| e.to_string())?;
+    config.vitals = vitals.is_enabled().then_some(vitals);
+    Ok(())
+}
+
+#[cfg(not(feature = "vitals"))]
+fn apply_vitals(_: &mut PullConfig, _: &str) -> Result<(), String> {
+    Err("vitals_json: this library was built without the `vitals` feature".into())
 }
 
 /// This puller's `stampeded_workers` id, for SQL `stampeded_checkpoint`/`stampeded_touch` calls.
