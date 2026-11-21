@@ -493,12 +493,19 @@ impl Worker {
             if shutdown_requested(&shutdown) {
                 break;
             }
+            // Held until the claim query returns, so a vitals pause cannot slip in between
+            // the check and the claim.
+            let Some(claiming) = admission.claim_permit().await else {
+                next = NextPoll::Idle;
+                continue;
+            };
             // Do not cancel a claim query: it may commit at the server after its
             // future is dropped. Finish the round, then stop admitting handlers.
-            let jobs = match claimer
+            let round = claimer
                 .round(worker_id, usize::try_from(want).unwrap_or(0))
-                .await
-            {
+                .await;
+            drop(claiming);
+            let jobs = match round {
                 Ok(j) => j,
                 Err(e) => {
                     error!(error = %e, "claim failed");

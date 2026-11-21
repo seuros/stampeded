@@ -411,6 +411,9 @@ let config = WorkerConfig {
 - Jobs already claimed keep running and heartbeating in every phase; a pause
   only stops the next claim. A `Puller` still hands out jobs it claimed before
   the pause.
+- A pause is reported (row, log, metrics) only once no claim round is in
+  flight: a round past the check when the pause lands finishes first, and none
+  starts after.
 - A reading that cannot be taken is never headroom. During an episode it holds
   claiming back and restarts the wait. With no episode open it does not stop
   claiming, so a probe the OS cannot answer (thermal state on Linux is always

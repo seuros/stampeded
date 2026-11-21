@@ -4,6 +4,12 @@
 #[cfg(feature = "vitals")]
 use crate::{metrics::Metrics, queue::Queue, vitals::VitalsConfig, vitals::VitalsWatch};
 
+/// Leave to run one claim round; drop it once the claim query returns.
+pub struct ClaimPermit {
+    /// Always `None` without `vitals`.
+    _held: Option<tokio::sync::OwnedRwLockReadGuard<()>>,
+}
+
 #[derive(Default)]
 pub struct HostAdmission {
     #[cfg(feature = "vitals")]
@@ -50,6 +56,33 @@ impl HostAdmission {
         #[cfg(not(feature = "vitals"))]
         {
             true
+        }
+    }
+
+    /// Leave for one claim round, or `None` while paused. Held across the claim query, it
+    /// makes a pause wait for the round, so no claim lands after the pause is reported.
+    #[cfg_attr(
+        not(feature = "vitals"),
+        allow(
+            clippy::unused_async,
+            clippy::unused_async_trait_impl,
+            reason = "awaits only with `vitals`; clippy names the lint either way"
+        )
+    )]
+    pub async fn claim_permit(&self) -> Option<ClaimPermit> {
+        #[cfg(feature = "vitals")]
+        {
+            match &self.watch {
+                None => Some(ClaimPermit { _held: None }),
+                Some(watch) => watch
+                    .claim_permit()
+                    .await
+                    .map(|held| ClaimPermit { _held: Some(held) }),
+            }
+        }
+        #[cfg(not(feature = "vitals"))]
+        {
+            Some(ClaimPermit { _held: None })
         }
     }
 

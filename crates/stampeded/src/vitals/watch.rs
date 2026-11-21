@@ -7,7 +7,7 @@ use crate::metrics::{Metrics, label, names};
 use crate::queue::Queue;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
-use tokio::sync::watch;
+use tokio::sync::{OwnedRwLockReadGuard, RwLock, watch};
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
@@ -63,6 +63,9 @@ impl HostClock {
 /// The running gate. Dropping it stops the probing.
 pub struct VitalsWatch {
     status: watch::Receiver<VitalsStatus>,
+    /// Read-held by a claim from its admission check until its claim query returns;
+    /// write-taken by a pause, so a pause waits out a claim already past the check.
+    claims: Arc<RwLock<()>>,
     task: JoinHandle<()>,
 }
 
@@ -76,8 +79,13 @@ impl VitalsWatch {
     ) -> Result<Self> {
         config.validate()?;
         let interval = config.probe_interval;
+        let gate = VitalsGate::new(&config);
+        let (tx, status) = watch::channel(gate.status());
+        let claims = Arc::new(RwLock::new(()));
         let mut driver = Driver {
-            gate: VitalsGate::new(&config),
+            tx,
+            claims: Arc::clone(&claims),
+            gate,
             config: Arc::new(config),
             clock: HostClock::new(),
             queue,
@@ -87,24 +95,32 @@ impl VitalsWatch {
             last: None,
             written: None,
         };
-        let (tx, status) = watch::channel(driver.tick().await);
+        driver.tick().await;
         let task = tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval);
             ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
             // The first tick is immediate, and the first probe already ran.
             ticker.tick().await;
-            loop {
+            while !driver.tx.is_closed() {
                 ticker.tick().await;
-                if tx.send(driver.tick().await).is_err() {
-                    break;
-                }
+                driver.tick().await;
             }
         });
-        Ok(Self { status, task })
+        Ok(Self {
+            status,
+            claims,
+            task,
+        })
     }
 
     pub fn admitting(&self) -> bool {
         self.status.borrow().admitting
+    }
+
+    /// Leave to start one claim, held until its claim query returns; `None` while paused.
+    pub async fn claim_permit(&self) -> Option<OwnedRwLockReadGuard<()>> {
+        let permit = Arc::clone(&self.claims).read_owned().await;
+        self.admitting().then_some(permit)
     }
 
     pub fn status(&self) -> VitalsStatus {
@@ -123,6 +139,8 @@ impl Drop for VitalsWatch {
 }
 
 struct Driver {
+    tx: watch::Sender<VitalsStatus>,
+    claims: Arc<RwLock<()>>,
     gate: VitalsGate,
     config: Arc<VitalsConfig>,
     clock: HostClock,
@@ -137,14 +155,21 @@ struct Driver {
 }
 
 impl Driver {
-    async fn tick(&mut self) -> VitalsStatus {
+    /// A pause reaches the claim loops before anything else, and is reported only once no
+    /// claim is in flight: whoever sees it paused sees a worker that claims nothing more.
+    async fn tick(&mut self) {
         let readings = self.read().await;
         let status = self.gate.observe(self.clock.now(), &readings);
+        let pausing = !status.admitting && self.last.as_ref().is_none_or(|l| l.admitting);
+        self.tx.send_replace(status.clone());
+        if pausing {
+            // Claims past their check before the send finish; later ones read it paused.
+            drop(self.claims.write().await);
+        }
         self.measure(&status);
         self.log_change(&status);
         self.write_row(&status).await;
-        self.last = Some(status.clone());
-        status
+        self.last = Some(status);
     }
 
     /// A probe hung on a dead mount reads as unreadable, never as the last good reading.

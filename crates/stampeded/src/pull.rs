@@ -160,8 +160,13 @@ impl Puller {
 
             // Jobs already claimed are still handed out above; vitals only stop new claims.
             let room = self.leases.available_permits().min(self.config.batch_size);
-            if room > 0 && self.admission.admitting() {
-                self.claim(room).await?;
+            // Held until the claim query returns, so a vitals pause cannot slip in between.
+            if room > 0
+                && let Some(claiming) = self.admission.claim_permit().await
+            {
+                let claimed = self.claim(room).await;
+                drop(claiming);
+                claimed?;
                 if !self.is_empty() {
                     continue;
                 }

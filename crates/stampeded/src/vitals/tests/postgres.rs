@@ -137,23 +137,24 @@ async fn a_worker_keeps_its_running_job_and_claims_nothing_new_until_headroom_ho
         .await
         .unwrap()
         .unwrap();
-    let beat_before = last_heartbeat(&queue).await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    assert_eq!(
-        state(&queue, waiting).await,
-        JobState::Available,
-        "claimed while paused"
-    );
+    // The row is written only once no claim is in flight, so from here nothing is claimed.
+    // Let the paused worker go round its 5 ms poll loop through three 20 ms heartbeats.
+    for beat in 0..3 {
+        let before = last_heartbeat(&queue).await;
+        eventually(&format!("heartbeat {beat} while paused"), async || {
+            last_heartbeat(&queue).await > before
+        })
+        .await;
+        assert_eq!(
+            state(&queue, waiting).await,
+            JobState::Available,
+            "claimed while paused"
+        );
+    }
     assert_eq!(
         state(&queue, held).await,
         JobState::Executing,
         "the held job was dropped"
-    );
-    let beat_after = last_heartbeat(&queue).await;
-    assert!(
-        beat_after > beat_before,
-        "the worker stopped heartbeating while paused"
     );
 
     // The held job finishes and reports while claiming is still paused.
@@ -179,7 +180,11 @@ async fn a_worker_keeps_its_running_job_and_claims_nothing_new_until_headroom_ho
         "claimed {:?} after the disk cleared, before headroom held {HEADROOM:?}",
         cleared.elapsed()
     );
-    assert_eq!(row_vitals(&queue).await["phase"], "recovered");
+    // On resume the gate opens before the row is written, so the row may trail the claim.
+    eventually("the row says recovered", async || {
+        row_vitals(&queue).await["phase"] == "recovered"
+    })
+    .await;
 
     shutdown.send(true).unwrap();
     running.await.unwrap().unwrap();
@@ -269,5 +274,57 @@ async fn an_unusable_vitals_config_fails_before_the_worker_registers() {
         .await
         .unwrap();
     assert_eq!(workers, 0);
+    db.close().await;
+}
+
+#[tokio::test]
+async fn a_pause_waits_for_a_claim_already_past_the_gate_before_it_is_reported() {
+    let Some(db) = Database::setup().await else {
+        return;
+    };
+    let queue = db.queue.clone();
+    let worker = queue
+        .register_worker("test", 1, &["default".into()])
+        .await
+        .unwrap();
+    let script = Script::new(50);
+    let gate = super::VitalsWatch::start(
+        script.config(),
+        queue.clone(),
+        worker,
+        crate::metrics::Metrics::noop(),
+    )
+    .await
+    .unwrap();
+
+    let gate = Arc::new(gate);
+
+    // A claim round in flight: past the check, its claim query not yet returned.
+    let in_flight = gate.claim_permit().await.expect("claiming");
+    script.set(5);
+    eventually("the gate turns paused", async || !gate.admitting()).await;
+
+    // A claim asking now is refused, at once or once it has queued behind the pause.
+    let next = tokio::spawn({
+        let gate = Arc::clone(&gate);
+        async move { gate.claim_permit().await.is_some() }
+    });
+    // Three probe intervals: the pause is not reported while the round is out.
+    for _ in 0..3 {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert_eq!(
+            row_vitals(&queue).await["admitting"],
+            true,
+            "the pause was reported with a claim in flight"
+        );
+    }
+
+    drop(in_flight);
+    assert!(!next.await.unwrap(), "a claim started after the pause");
+    eventually("the pause is reported", async || {
+        row_vitals(&queue).await["admitting"] == false
+    })
+    .await;
+    drop(gate);
     db.close().await;
 }
