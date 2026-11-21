@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.0](https://github.com/seuros/stampeded/compare/stampeded-v0.11.0...stampeded-v0.12.0) (2026-11-21)
+
+
+### Features
+
+* schedule owners and per-owner declarative sync ([386d0cf](https://github.com/seuros/stampeded/commit/386d0cf2b204ba37f2d784808f1c1fb3457e4362))
+
 ## [0.11.0](https://github.com/seuros/stampeded/compare/stampeded-v0.10.0...stampeded-v0.11.0) (2026-11-20)
 
 
