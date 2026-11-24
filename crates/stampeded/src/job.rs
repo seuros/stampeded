@@ -4,6 +4,7 @@
 
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use uuid::Uuid;
 
 /// Job lifecycle. `Retryable` is claimable once its backoff has elapsed, not terminal.
@@ -310,30 +311,22 @@ impl NewJob {
 
     /// Wall-clock budget enforced by the database; saturates at `i32::MAX` seconds.
     #[must_use]
-    pub fn expires_in(mut self, d: std::time::Duration) -> Self {
-        self.expire_seconds = Some(i32::try_from(d.as_secs().max(1)).unwrap_or(i32::MAX));
+    pub fn expires_in(mut self, d: Duration) -> Self {
+        self.expire_seconds = Some(expiry_seconds(d));
         self
     }
 
     /// The job's named arguments; must be a JSON object. `null` is stored as `{}`.
     #[must_use]
     pub fn args(mut self, args: serde_json::Value) -> Self {
-        self.args = if args.is_null() {
-            serde_json::Value::Object(serde_json::Map::new())
-        } else {
-            args
-        };
+        self.args = object_if_null(args);
         self
     }
 
     /// Runtime context, namespaced by runtime. `null` is stored as `{}`.
     #[must_use]
     pub fn meta(mut self, meta: serde_json::Value) -> Self {
-        self.meta = if meta.is_null() {
-            serde_json::Value::Object(serde_json::Map::new())
-        } else {
-            meta
-        };
+        self.meta = object_if_null(meta);
         self
     }
 
@@ -375,6 +368,18 @@ impl NewJob {
     pub fn unique(mut self, scope: impl Into<String>) -> Self {
         self.dedup_scope = Some(scope.into());
         self
+    }
+}
+
+pub(crate) fn expiry_seconds(duration: Duration) -> i32 {
+    i32::try_from(duration.as_secs().max(1)).unwrap_or(i32::MAX)
+}
+
+fn object_if_null(value: serde_json::Value) -> serde_json::Value {
+    if value.is_null() {
+        serde_json::Value::Object(serde_json::Map::new())
+    } else {
+        value
     }
 }
 

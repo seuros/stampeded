@@ -3,13 +3,14 @@
 use crate::admission::HostAdmission;
 use crate::claim::{Claimer, Held};
 use crate::error::Result;
-use crate::fairness::{Admission, Fairness, TenantLimit};
+use crate::fairness::{Fairness, TenantLimit};
 use crate::job::{FailureKind, Job};
 use crate::lifecycle::Transitions;
 use crate::queue::Queue;
 use crate::queues::Queues;
 use crate::worker::{
-    JobContext, default_backoff, record_failure, register_worker, report_success, retry_delay,
+    JobContext, admit_tenant, default_backoff, heartbeat_loop, record_failure, register_worker,
+    report_success, retry_delay,
 };
 use chrono_machines::Strategy;
 use std::collections::VecDeque;
@@ -83,18 +84,11 @@ impl Puller {
         let worker_id = register_worker(&queue, &config.queues).await?;
         info!(%worker_id, queues = %config.queues.label(), "puller registered");
 
-        let hb_queue = queue.clone();
-        let hb_interval = config.heartbeat_interval;
-        let heartbeat = tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(hb_interval);
-            loop {
-                ticker.tick().await;
-                if let Err(e) = hb_queue.heartbeat(worker_id).await {
-                    // Keep beating through a blip; the reaper is the backstop.
-                    warn!(error = %e, "heartbeat failed");
-                }
-            }
-        });
+        let heartbeat = tokio::spawn(heartbeat_loop(
+            queue.clone(),
+            worker_id,
+            config.heartbeat_interval,
+        ));
 
         #[cfg(feature = "vitals")]
         let admission = match HostAdmission::start(
@@ -260,25 +254,15 @@ impl Puller {
         Ok(())
     }
 
-    /// Tenant fairness, applied after claiming since a flood is legitimately first in line.
-    /// A throttled job goes back with its attempt refunded.
     async fn admit(&self, claimed: Claimed) -> Option<Lease> {
-        if let Some(f) = &self.fairness
-            && let Admission::Throttled { retry_after } = f.admit(claimed.job.tenant_id.as_deref())
+        if !admit_tenant(
+            self.fairness.as_ref(),
+            &self.queue,
+            &claimed.job,
+            self.worker_id,
+        )
+        .await
         {
-            let delay = retry_after.clamp(Duration::from_millis(50), Duration::from_mins(1));
-            if let Err(e) = record_failure(
-                &self.queue,
-                &claimed.job,
-                self.worker_id,
-                FailureKind::Throttled,
-                "throttled: tenant rate limit",
-                Some(delay),
-            )
-            .await
-            {
-                warn!(job_id = %claimed.job.id, error = %e, "could not release a throttled job");
-            }
             return None;
         }
 
@@ -326,18 +310,10 @@ impl Lease {
     }
 
     /// The job failed; retried after `retry_in`, or on its backoff, until `max_attempts`.
-    pub async fn fail(mut self, message: &str, retry_in: Option<Duration>) -> Result<()> {
-        self.settled = true;
+    pub async fn fail(self, message: &str, retry_in: Option<Duration>) -> Result<()> {
         let delay = retry_in.unwrap_or_else(|| retry_delay(&self.ctx.job, self.backoff));
-        record_failure(
-            self.ctx.queue(),
-            &self.ctx.job,
-            self.ctx.worker_id(),
-            FailureKind::Raised,
-            message,
-            Some(delay),
-        )
-        .await
+        self.settle_failure(FailureKind::Raised, message, Some(delay))
+            .await
     }
 
     /// Not a failure: back in the queue with the attempt refunded and its last real outcome kept.
@@ -347,30 +323,32 @@ impl Lease {
     }
 
     /// The job ran past the caller's time limit; retried on backoff, recorded as `timed_out`.
-    pub async fn time_out(mut self, message: &str) -> Result<()> {
-        self.settled = true;
+    pub async fn time_out(self, message: &str) -> Result<()> {
         let delay = retry_delay(&self.ctx.job, self.backoff);
-        record_failure(
-            self.ctx.queue(),
-            &self.ctx.job,
-            self.ctx.worker_id(),
-            FailureKind::TimedOut,
-            message,
-            Some(delay),
-        )
-        .await
+        self.settle_failure(FailureKind::TimedOut, message, Some(delay))
+            .await
     }
 
     /// The job can never succeed: discard it now, whatever attempts remain.
-    pub async fn discard(mut self, message: &str) -> Result<()> {
+    pub async fn discard(self, message: &str) -> Result<()> {
+        self.settle_failure(FailureKind::Unrecoverable, message, None)
+            .await
+    }
+
+    async fn settle_failure(
+        mut self,
+        kind: FailureKind,
+        message: &str,
+        delay: Option<Duration>,
+    ) -> Result<()> {
         self.settled = true;
         record_failure(
             self.ctx.queue(),
             &self.ctx.job,
             self.ctx.worker_id(),
-            FailureKind::Unrecoverable,
+            kind,
             message,
-            None,
+            delay,
         )
         .await
     }

@@ -154,19 +154,14 @@ impl ScheduleSpec {
 
     /// Executing-job inactivity before expiry; saturates at `i32::MAX` seconds.
     pub fn expires_in(mut self, d: Duration) -> Self {
-        self.expire_seconds = Some(i32::try_from(d.as_secs().max(1)).unwrap_or(i32::MAX));
+        self.expire_seconds = Some(crate::job::expiry_seconds(d));
         self
     }
 
     /// The function's row for this schedule, its first run seeded against `now`.
     fn wire(&self, now: Timestamp) -> Result<Wire<'_>> {
         let key = &self.key;
-        if key.trim().is_empty() {
-            return Err(Error::InvalidSchedule(
-                "a schedule needs a key: it is the primary key and how you pause or remove it"
-                    .into(),
-            ));
-        }
+        super::validate_key(key)?;
         for (field, value) in [("args", &self.args), ("meta", &self.meta)] {
             if !value.is_object() {
                 return Err(Error::InvalidSchedule(format!(
@@ -193,14 +188,7 @@ impl ScheduleSpec {
         };
         match &self.rule {
             Rule::Every(every) => {
-                if every.as_secs() == 0 {
-                    return Err(Error::InvalidSchedule(format!(
-                        "schedule {key:?}: the interval must be at least one second"
-                    )));
-                }
-                wire.interval_secs = Some(i64::try_from(every.as_secs()).map_err(|_| {
-                    Error::InvalidSchedule(format!("schedule {key:?}: the interval is too large"))
-                })?);
+                wire.interval_secs = Some(super::interval_seconds(key, *every)?);
             }
             Rule::Cron { expr, policy } => {
                 let cron = Cron::parse(expr)

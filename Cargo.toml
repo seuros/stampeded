@@ -43,7 +43,7 @@ schemars = "1"
 state-machines = "0.35"
 chrono-machines = "0.13"
 breaker-machines = { version = "0.27", features = ["async"] }
-throttle-machines = "0.6"
+throttle-machines = { version = "0.6.1", features = ["std"] }
 deadline-machines = { version = "0.6", features = ["tokio"] }
 # The queue planner.
 behavior-machines = { version = "0.5", features = ["alloc"] }

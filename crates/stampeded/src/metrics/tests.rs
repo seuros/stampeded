@@ -9,24 +9,24 @@ type Seen = Vec<(String, String, Vec<Label>)>;
 #[derive(Default)]
 struct Capture(Arc<Mutex<Seen>>);
 
+impl Capture {
+    fn push(&self, name: &str, value: String, labels: &[Label]) {
+        self.0
+            .lock()
+            .unwrap()
+            .push((name.into(), value, labels.to_vec()));
+    }
+}
+
 impl Recorder for Capture {
     fn count(&self, name: &'static str, v: u64, l: &[Label]) {
-        self.0
-            .lock()
-            .unwrap()
-            .push((name.into(), format!("count:{v}"), l.to_vec()));
+        self.push(name, format!("count:{v}"), l);
     }
     fn gauge(&self, name: &'static str, v: f64, l: &[Label]) {
-        self.0
-            .lock()
-            .unwrap()
-            .push((name.into(), format!("gauge:{v}"), l.to_vec()));
+        self.push(name, format!("gauge:{v}"), l);
     }
     fn duration(&self, name: &'static str, v: Duration, l: &[Label]) {
-        self.0
-            .lock()
-            .unwrap()
-            .push((name.into(), format!("dur:{}", v.as_millis()), l.to_vec()));
+        self.push(name, format!("dur:{}", v.as_millis()), l);
     }
 }
 

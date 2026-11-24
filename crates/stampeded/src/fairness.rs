@@ -1,9 +1,8 @@
 //! Per-tenant admission control (GCRA), so one noisy tenant cannot starve the rest.
 
-use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
-use throttle_machines::{Gate, Gcra, GcraPolicy};
+use throttle_machines::{GcraPolicy, KeyedGcra};
 
 /// How many jobs per second a single tenant may start, plus tolerated burst.
 #[derive(Debug, Clone, Copy)]
@@ -48,19 +47,18 @@ impl TenantLimit {
     }
 }
 
-/// Admission control across tenants; holds each tenant's GCRA state.
+/// Admission control across tenants, with bounded state per limiter.
+///
+/// A tenant not yet tracked is throttled if its shard has no room.
 #[derive(Debug)]
 pub struct Fairness {
-    policy: GcraPolicy,
-    /// tenant -> theoretical arrival time
-    state: Mutex<HashMap<String, Duration>>,
+    limiter: KeyedGcra<String>,
 }
 
 impl Fairness {
     pub fn new(limit: TenantLimit) -> Self {
         Self {
-            policy: limit.policy(),
-            state: Mutex::new(HashMap::new()),
+            limiter: KeyedGcra::new(limit.policy()),
         }
     }
 
@@ -75,41 +73,27 @@ impl Fairness {
     /// Injectable clock, for tests: `now` is monotonic time since an epoch of the
     /// caller's choosing.
     pub fn admit_at(&self, tenant: &str, now: Duration) -> Admission {
-        let mut state = self.state.lock().expect("fairness state poisoned");
-        let mut gcra = state.get(tenant).map_or_else(
-            || Gcra::new(self.policy),
-            |&tat| Gcra::restored(self.policy, tat),
-        );
-        // A refusal changes nothing, so only an admission is worth recording.
-        let admitted = gcra.check(now).is_ok();
-        if admitted {
-            state.insert(tenant.to_owned(), gcra.tat());
-        }
-        drop(state);
-        if admitted {
-            Admission::Allowed
-        } else {
-            Admission::Throttled {
-                retry_after: gcra.retry_after(now),
-            }
+        match self.limiter.check_with_retry_after(tenant, now) {
+            Ok(_) => Admission::Allowed,
+            Err((_, retry_after)) => Admission::Throttled { retry_after },
         }
     }
 
     /// Drop state for tenants that have gone quiet.
     pub fn evict_idle(&self, now: Duration) {
-        let mut state = self.state.lock().expect("fairness state poisoned");
-        state.retain(|_, tat| *tat > now);
+        self.limiter.evict(now);
     }
 
+    /// Keys currently tracked; automatic eviction can remove recovered tenants.
     pub fn tracked_tenants(&self) -> usize {
-        self.state.lock().expect("fairness state poisoned").len()
+        self.limiter.len()
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Admission {
     Allowed,
-    /// How long until this tenant's next job is admitted; `Duration::MAX` when never.
+    /// Retry hint, not a guarantee of admission; `Duration::MAX` when never.
     Throttled {
         retry_after: Duration,
     },

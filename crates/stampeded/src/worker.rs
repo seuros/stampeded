@@ -4,7 +4,7 @@
 use crate::admission::HostAdmission;
 use crate::claim::Claimer;
 use crate::error::{Error, Result};
-use crate::fairness::{Fairness, TenantLimit, now};
+use crate::fairness::{Admission, Fairness, TenantLimit, now};
 use crate::job::{FailureKind, Job};
 use crate::metrics::{Metrics, label, names};
 use crate::queue::Queue;
@@ -381,21 +381,14 @@ impl Worker {
         info!(%worker_id, queues = %queues_label, "worker registered");
 
         // If the heartbeat stops, the reaper reclaims our jobs, as intended.
-        let hb_queue = self.queue.clone();
-        let hb_interval = self.config.heartbeat_interval;
         // Keep ownership alive during the drain, even if it exceeds dead_after.
         // JoinSet also aborts the heartbeat if the run future itself is dropped.
         let mut heartbeat = tokio::task::JoinSet::new();
-        heartbeat.spawn(async move {
-            let mut ticker = tokio::time::interval(hb_interval);
-            loop {
-                ticker.tick().await;
-                if let Err(e) = hb_queue.heartbeat(worker_id).await {
-                    // Keep beating through a blip; the reaper is the backstop.
-                    warn!(error = %e, "heartbeat failed");
-                }
-            }
-        });
+        heartbeat.spawn(heartbeat_loop(
+            self.queue.clone(),
+            worker_id,
+            self.config.heartbeat_interval,
+        ));
 
         // After the heartbeat: the first probe may take a moment, and the row must stay alive.
         #[cfg(feature = "vitals")]
@@ -530,26 +523,7 @@ impl Worker {
                 if shutdown_requested(&shutdown) {
                     break 'admissions;
                 }
-                // Fairness after claiming, since a flood is legitimately first in line; a
-                // throttled job goes back with a short delay rather than held.
-                if let Some(f) = &self.fairness
-                    && let crate::fairness::Admission::Throttled { retry_after } =
-                        f.admit(job.tenant_id.as_deref())
-                {
-                    let delay =
-                        retry_after.clamp(Duration::from_millis(50), Duration::from_mins(1));
-                    if let Err(e) = record_failure(
-                        &self.queue,
-                        &job,
-                        worker_id,
-                        FailureKind::Throttled,
-                        "throttled: tenant rate limit",
-                        Some(delay),
-                    )
-                    .await
-                    {
-                        warn!(job_id = %job.id, error = %e, "could not release a throttled job");
-                    }
+                if !admit_tenant(self.fairness.as_deref(), &self.queue, &job, worker_id).await {
                     continue;
                 }
 
@@ -868,6 +842,46 @@ fn log_failure(
             ?kind, error = %message, "job failed"
         );
     }
+}
+
+pub(crate) async fn heartbeat_loop(queue: Queue, worker_id: Uuid, interval: Duration) {
+    let mut ticker = tokio::time::interval(interval);
+    loop {
+        ticker.tick().await;
+        if let Err(e) = queue.heartbeat(worker_id).await {
+            // Keep beating through a blip; the reaper is the backstop.
+            warn!(error = %e, "heartbeat failed");
+        }
+    }
+}
+
+/// Apply tenant admission after claiming. A refusal never starts the job,
+/// even if recording the deferral fails and the reaper must reclaim it.
+pub(crate) async fn admit_tenant(
+    fairness: Option<&Fairness>,
+    queue: &Queue,
+    job: &Job,
+    worker_id: Uuid,
+) -> bool {
+    let Some(Admission::Throttled { retry_after }) =
+        fairness.map(|gate| gate.admit(job.tenant_id.as_deref()))
+    else {
+        return true;
+    };
+    let delay = retry_after.clamp(Duration::from_millis(50), Duration::from_mins(1));
+    if let Err(e) = record_failure(
+        queue,
+        job,
+        worker_id,
+        FailureKind::Throttled,
+        "throttled: tenant rate limit",
+        Some(delay),
+    )
+    .await
+    {
+        warn!(job_id = %job.id, error = %e, "could not release a throttled job");
+    }
+    false
 }
 
 /// Record a failure of `kind` and check the transition SQL made.

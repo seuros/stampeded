@@ -48,6 +48,17 @@ fn recorder() -> (Arc<Mutex<Vec<String>>>, impl Fn() -> usize + Clone) {
     (seen, count)
 }
 
+fn recording_worker(q: &Queue, config: WorkerConfig, seen: &Arc<Mutex<Vec<String>>>) -> Worker {
+    let seen = Arc::clone(seen);
+    Worker::new(q.clone(), config).register("note", move |job| {
+        let seen = Arc::clone(&seen);
+        async move {
+            seen.lock().expect("seen").push(job.queue.clone());
+            Ok(())
+        }
+    })
+}
+
 async fn state(q: &Queue, queue: &str, id: uuid::Uuid) -> JobState {
     q.fetch(queue, id).await.expect("fetch").expect("row").state
 }
@@ -72,16 +83,7 @@ async fn one_worker_serves_several_queues() {
     let b = q.enqueue(NewJob::new("b", "note")).await.unwrap().unwrap();
 
     let (seen, count) = recorder();
-    let w = Worker::new(q.clone(), worker(Queues::parse("a,b").unwrap())).register(
-        "note",
-        move |job| {
-            let seen = seen.clone();
-            async move {
-                seen.lock().expect("seen").push(job.queue.clone());
-                Ok(())
-            }
-        },
-    );
+    let w = recording_worker(&q, worker(Queues::parse("a,b").unwrap()), &seen);
     run_until(w, move || count() == 2).await;
 
     assert_eq!(state(&q, "a", a).await, JobState::Completed);
@@ -104,13 +106,7 @@ async fn every_queue_means_every_queue_with_work_except_the_excluded() {
 
     let (seen, count) = recorder();
     let queues = Queues::parse("*").unwrap().except("dlq").unwrap();
-    let w = Worker::new(q.clone(), worker(queues)).register("note", move |job| {
-        let seen = seen.clone();
-        async move {
-            seen.lock().expect("seen").push(job.queue.clone());
-            Ok(())
-        }
-    });
+    let w = recording_worker(&q, worker(queues), &seen);
     run_until(w, move || count() == 1).await;
 
     assert_eq!(state(&q, "anything", served).await, JobState::Completed);
@@ -132,16 +128,7 @@ async fn a_paused_queue_waits_with_no_daemon_and_starves_nothing() {
     }
 
     let (seen, count) = recorder();
-    let make = || {
-        let seen = seen.clone();
-        Worker::new(q.clone(), worker(Queues::parse("*").unwrap())).register("note", move |job| {
-            let seen = seen.clone();
-            async move {
-                seen.lock().expect("seen").push(job.queue.clone());
-                Ok(())
-            }
-        })
-    };
+    let make = || recording_worker(&q, worker(Queues::parse("*").unwrap()), &seen);
     let after_live = count.clone();
     run_until(make(), move || after_live() == 2).await;
     assert_eq!(state(&q, "frozen", frozen).await, JobState::Available);
@@ -167,23 +154,16 @@ async fn a_held_queue_waits_and_a_rushed_one_goes_first() {
     q.enqueue(NewJob::new("late", "note")).await.unwrap();
 
     let (seen, count) = recorder();
-    let order = seen.clone();
     let config = WorkerConfig {
         max_concurrency: 1,
         batch_size: 1,
         ..worker(Queues::parse("bulk,late,held").unwrap())
     };
-    let w = Worker::new(q.clone(), config).register("note", move |job| {
-        let seen = seen.clone();
-        async move {
-            seen.lock().expect("seen").push(job.queue.clone());
-            Ok(())
-        }
-    });
+    let w = recording_worker(&q, config, &seen);
     run_until(w, move || count() == 4).await;
 
     assert_eq!(
-        order.lock().expect("order").first().map(String::as_str),
+        seen.lock().expect("order").first().map(String::as_str),
         Some("late")
     );
     assert_eq!(state(&q, "held", held).await, JobState::Available);
@@ -241,6 +221,12 @@ fn puller(queues: Queues) -> PullConfig {
     }
 }
 
+async fn default_queue_puller(q: &Queue) -> Puller {
+    Puller::start(q.clone(), puller(Queues::one("default")))
+        .await
+        .expect("start puller on the default queue")
+}
+
 #[tokio::test]
 async fn a_pulled_job_is_completed_failed_or_discarded_by_the_caller() {
     let q = q!();
@@ -259,9 +245,7 @@ async fn a_pulled_job_is_completed_failed_or_discarded_by_the_caller() {
         .await
         .unwrap()
         .unwrap();
-    let p = Puller::start(q.clone(), puller(Queues::one("default")))
-        .await
-        .unwrap();
+    let p = default_queue_puller(&q).await;
 
     let mut leases = Vec::new();
     for _ in 0..3 {
@@ -318,9 +302,7 @@ async fn a_lease_dropped_without_an_outcome_goes_back_as_an_interruption() {
         .await
         .unwrap()
         .unwrap();
-    let p = Puller::start(q.clone(), puller(Queues::one("default")))
-        .await
-        .unwrap();
+    let p = default_queue_puller(&q).await;
 
     drop(
         p.next(Duration::from_secs(2))
@@ -400,9 +382,7 @@ async fn stopping_gives_unstarted_jobs_back_and_deregisters() {
         q.enqueue(NewJob::new("default", "t")).await.unwrap();
     }
     // One round claims all three; one is handed out, two wait.
-    let p = Puller::start(q.clone(), puller(Queues::one("default")))
-        .await
-        .unwrap();
+    let p = default_queue_puller(&q).await;
     let lease = p
         .next(Duration::from_secs(2))
         .await
@@ -521,9 +501,7 @@ async fn a_pulled_job_checkpoints_like_an_in_process_one() {
         .await
         .unwrap()
         .unwrap();
-    let p = Puller::start(q.clone(), puller(Queues::one("default")))
-        .await
-        .unwrap();
+    let p = default_queue_puller(&q).await;
 
     let lease = p
         .next(Duration::from_secs(2))
@@ -598,9 +576,7 @@ async fn a_job_given_back_on_stop_is_requeued_not_failed() {
                 .unwrap(),
         );
     }
-    let p = Puller::start(q.clone(), puller(Queues::one("default")))
-        .await
-        .unwrap();
+    let p = default_queue_puller(&q).await;
     for _ in &failed {
         p.next(Duration::from_secs(2))
             .await
@@ -678,9 +654,7 @@ async fn a_requeued_lease_runs_again_from_its_checkpoint_with_its_attempt_refund
         .await
         .unwrap()
         .unwrap();
-    let p = Puller::start(q.clone(), puller(Queues::one("default")))
-        .await
-        .unwrap();
+    let p = default_queue_puller(&q).await;
 
     let lease = p
         .next(Duration::from_secs(2))

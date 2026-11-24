@@ -70,33 +70,30 @@ mod machine {
 
 pub use machine::*;
 
-impl From<JobState> for JobLifecycleState {
-    fn from(s: JobState) -> Self {
-        match s {
-            JobState::Available => Self::Available,
-            JobState::Claimed => Self::Claimed,
-            JobState::Executing => Self::Executing,
-            JobState::Retryable => Self::Retryable,
-            JobState::Completed => Self::Completed,
-            JobState::Discarded => Self::Discarded,
-            JobState::Cancelled => Self::Cancelled,
+// Both matches stay exhaustive, but the correspondence is declared only once.
+macro_rules! state_conversions {
+    ($($state:ident),+ $(,)?) => {
+        impl From<JobState> for JobLifecycleState {
+            fn from(state: JobState) -> Self {
+                match state {
+                    $(JobState::$state => Self::$state),+
+                }
+            }
         }
-    }
+
+        impl From<JobLifecycleState> for JobState {
+            fn from(state: JobLifecycleState) -> Self {
+                match state {
+                    $(JobLifecycleState::$state => Self::$state),+
+                }
+            }
+        }
+    };
 }
 
-impl From<JobLifecycleState> for JobState {
-    fn from(s: JobLifecycleState) -> Self {
-        match s {
-            JobLifecycleState::Available => Self::Available,
-            JobLifecycleState::Claimed => Self::Claimed,
-            JobLifecycleState::Executing => Self::Executing,
-            JobLifecycleState::Retryable => Self::Retryable,
-            JobLifecycleState::Completed => Self::Completed,
-            JobLifecycleState::Discarded => Self::Discarded,
-            JobLifecycleState::Cancelled => Self::Cancelled,
-        }
-    }
-}
+state_conversions!(
+    Available, Claimed, Executing, Retryable, Completed, Discarded, Cancelled,
+);
 
 /// Where a transition can be attempted from a state read out of the database.
 pub type Transitions = JobLifecycleEvent;

@@ -62,13 +62,16 @@ pub unsafe extern "C" fn stampeded_puller_start(
     options: *const PullerOptions,
 ) -> *mut PullerHandle {
     guarded(std::ptr::null_mut(), || {
-        // SAFETY: the caller's contract, for every pointer below.
+        // SAFETY: the caller supplies a live client or NULL.
         let client = unsafe { client.as_ref() }.ok_or("client is NULL")?;
         let mut config = PullConfig::default();
 
+        // SAFETY: options is NULL or points to a valid options struct.
         if let Some(options) = unsafe { options.as_ref() } {
+            // SAFETY: queues is NULL or a readable NUL-terminated string.
             let spec = unsafe { opt_arg(options.queues, "queues") }?.unwrap_or("default");
             config.queues = Queues::parse(spec)?;
+            // SAFETY: except_queues is NULL or a readable NUL-terminated string.
             if let Some(except) = unsafe { opt_arg(options.except_queues, "except_queues") }? {
                 config.queues = config.queues.except(except)?;
             }
@@ -85,6 +88,7 @@ pub unsafe extern "C" fn stampeded_puller_start(
                 config.heartbeat_interval =
                     Duration::from_millis(options.heartbeat_interval_ms.into());
             }
+            // SAFETY: vitals_json is NULL or a readable NUL-terminated string.
             if let Some(vitals) = unsafe { opt_arg(options.vitals_json, "vitals_json") }? {
                 apply_vitals(&mut config, vitals)?;
             }
@@ -210,6 +214,17 @@ pub unsafe extern "C" fn stampeded_puller_free(puller: *mut PullerHandle) {
     }
 }
 
+/// # Safety
+///
+/// `lease` must be NULL or a live lease handle that is not being settled or freed.
+unsafe fn lease_string(
+    lease: *const LeaseHandle,
+    field: impl FnOnce(&LeaseHandle) -> &CString,
+) -> *const c_char {
+    // SAFETY: the caller supplies a live lease or NULL.
+    unsafe { lease.as_ref() }.map_or(std::ptr::null(), |lease| field(lease).as_ptr())
+}
+
 /// The job's id. Every lease string is valid until the lease is settled or freed.
 ///
 /// # Safety
@@ -219,7 +234,7 @@ pub unsafe extern "C" fn stampeded_puller_free(puller: *mut PullerHandle) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn stampeded_lease_id(lease: *const LeaseHandle) -> *const c_char {
     // SAFETY: the caller's contract.
-    unsafe { lease.as_ref() }.map_or(std::ptr::null(), |l| l.id.as_ptr())
+    unsafe { lease_string(lease, |l| &l.id) }
 }
 
 /// The job's queue.
@@ -231,7 +246,7 @@ pub unsafe extern "C" fn stampeded_lease_id(lease: *const LeaseHandle) -> *const
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn stampeded_lease_queue(lease: *const LeaseHandle) -> *const c_char {
     // SAFETY: the caller's contract.
-    unsafe { lease.as_ref() }.map_or(std::ptr::null(), |l| l.queue.as_ptr())
+    unsafe { lease_string(lease, |l| &l.queue) }
 }
 
 /// The job's task.
@@ -243,7 +258,7 @@ pub unsafe extern "C" fn stampeded_lease_queue(lease: *const LeaseHandle) -> *co
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn stampeded_lease_task(lease: *const LeaseHandle) -> *const c_char {
     // SAFETY: the caller's contract.
-    unsafe { lease.as_ref() }.map_or(std::ptr::null(), |l| l.task.as_ptr())
+    unsafe { lease_string(lease, |l| &l.task) }
 }
 
 /// The job's arguments, a JSON object.
@@ -255,7 +270,7 @@ pub unsafe extern "C" fn stampeded_lease_task(lease: *const LeaseHandle) -> *con
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn stampeded_lease_args(lease: *const LeaseHandle) -> *const c_char {
     // SAFETY: the caller's contract.
-    unsafe { lease.as_ref() }.map_or(std::ptr::null(), |l| l.args.as_ptr())
+    unsafe { lease_string(lease, |l| &l.args) }
 }
 
 /// The job's metadata, a JSON object.
@@ -267,7 +282,7 @@ pub unsafe extern "C" fn stampeded_lease_args(lease: *const LeaseHandle) -> *con
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn stampeded_lease_meta(lease: *const LeaseHandle) -> *const c_char {
     // SAFETY: the caller's contract.
-    unsafe { lease.as_ref() }.map_or(std::ptr::null(), |l| l.meta.as_ptr())
+    unsafe { lease_string(lease, |l| &l.meta) }
 }
 
 /// The whole job row as a JSON object: every column, timestamps in RFC 3339.
@@ -279,7 +294,7 @@ pub unsafe extern "C" fn stampeded_lease_meta(lease: *const LeaseHandle) -> *con
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn stampeded_lease_job(lease: *const LeaseHandle) -> *const c_char {
     // SAFETY: the caller's contract.
-    unsafe { lease.as_ref() }.map_or(std::ptr::null(), |l| l.job.as_ptr())
+    unsafe { lease_string(lease, |l| &l.job) }
 }
 
 /// This attempt's number, from 1. 0 for a NULL lease.
@@ -311,6 +326,7 @@ pub unsafe extern "C" fn stampeded_lease_checkpoint(
     guarded(STAMPEDED_ERROR, || {
         // SAFETY: the caller's contract.
         let handle = unsafe { lease.as_ref() }.ok_or("lease is NULL")?;
+        // SAFETY: the caller supplies a readable NUL-terminated state_json.
         let state = json(unsafe { arg(state_json, "state_json") }?, "state_json")?;
         let lease = handle.lease.as_ref().ok_or("lease is already settled")?;
 

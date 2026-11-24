@@ -88,14 +88,8 @@ pub unsafe extern "C" fn stampeded_steps_value(
     steps: *mut Steps,
     name: *const c_char,
 ) -> *const c_char {
-    guarded(std::ptr::null(), || {
-        // SAFETY: the caller's contract.
-        let steps = unsafe { steps.as_mut() }.ok_or("steps is NULL")?;
-        // SAFETY: the caller's contract.
-        let name = unsafe { arg(name, "name") }?;
-        let value = steps.state.values.get(name).map(ToString::to_string);
-        steps.hand_out(value)
-    })
+    // SAFETY: the caller's contract.
+    unsafe { step_json(steps, name, |steps, name| steps.state.values.get(name)) }
 }
 
 /// The position saved within unfinished step `name` (JSON), or NULL.
@@ -109,13 +103,26 @@ pub unsafe extern "C" fn stampeded_steps_cursor(
     steps: *mut Steps,
     name: *const c_char,
 ) -> *const c_char {
+    // SAFETY: the caller's contract.
+    unsafe { step_json(steps, name, |steps, name| steps.state.cursors.get(name)) }
+}
+
+/// # Safety
+///
+/// `steps` must be NULL or a live, exclusively accessed handle. `name` must
+/// be NULL or point to a readable NUL-terminated string.
+unsafe fn step_json(
+    steps: *mut Steps,
+    name: *const c_char,
+    lookup: impl for<'a> FnOnce(&'a Steps, &str) -> Option<&'a serde_json::Value>,
+) -> *const c_char {
     guarded(std::ptr::null(), || {
         // SAFETY: the caller's contract.
         let steps = unsafe { steps.as_mut() }.ok_or("steps is NULL")?;
         // SAFETY: the caller's contract.
         let name = unsafe { arg(name, "name") }?;
-        let cursor = steps.state.cursors.get(name).map(ToString::to_string);
-        steps.hand_out(cursor)
+        let value = lookup(steps, name).map(ToString::to_string);
+        steps.hand_out(value)
     })
 }
 

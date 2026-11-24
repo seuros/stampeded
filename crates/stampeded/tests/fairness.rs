@@ -1,11 +1,14 @@
-//! The Rust worker's per-tenant fairness, against a real Postgres 18.
+//! Worker and Puller per-tenant admission, against a real Postgres 18.
 //!
 //!   STAMPEDED_TEST_DATABASE_URL=postgres://ubuntu:ubuntu@localhost/stampeded_test \
 //!     cargo test --test fairness
 
 mod common;
 
-use stampeded::{FailureKind, Job, JobState, NewJob, Queue, TenantLimit, Worker, WorkerConfig};
+use stampeded::{
+    FailureKind, Job, JobState, NewJob, PullConfig, Puller, Queue, TenantLimit, Worker,
+    WorkerConfig,
+};
 use std::time::Duration;
 use tokio::sync::watch;
 use uuid::Uuid;
@@ -13,6 +16,12 @@ use uuid::Uuid;
 async fn fetch(q: &Queue, id: Uuid) -> Job {
     q.fetch("default", id).await.expect("fetch").expect("row")
 }
+
+const LIMIT: TenantLimit = TenantLimit {
+    // One job per thousand seconds: the first offered runs, the other is throttled.
+    jobs_per_second: 0.001,
+    burst: 0.0,
+};
 
 #[tokio::test]
 async fn a_throttled_job_is_released_with_its_attempt_refunded() {
@@ -28,13 +37,9 @@ async fn a_throttled_job_is_released_with_its_attempt_refunded() {
             .unwrap(),
     ];
 
-    // One job per thousand seconds: the first offered runs, the other is throttled.
     let config = WorkerConfig {
         poll_interval: Duration::from_millis(50),
-        tenant_limit: Some(TenantLimit {
-            jobs_per_second: 0.001,
-            burst: 0.0,
-        }),
+        tenant_limit: Some(LIMIT),
         ..Default::default()
     };
     let w = Worker::new(q.clone(), config).register("note", |_job| async { Ok(()) });
@@ -57,6 +62,37 @@ async fn a_throttled_job_is_released_with_its_attempt_refunded() {
     run.await.expect("worker task").expect("worker run");
 
     assert_eq!(ran.failure_kind, None);
+    assert_throttled(&q, &released).await;
+}
+
+#[tokio::test]
+#[allow(
+    clippy::significant_drop_tightening,
+    reason = "completing the lease consumes it; the puller stays live until stopped"
+)]
+async fn a_throttled_job_is_requeued_without_issuing_a_lease() {
+    let q = q!();
+    let config = PullConfig {
+        tenant_limit: Some(LIMIT),
+        ..Default::default()
+    };
+    let puller = Puller::start(q.clone(), config).await.unwrap();
+    let enqueue = || q.enqueue(NewJob::new("default", "note").tenant("acme"));
+
+    let first = enqueue().await.unwrap().unwrap();
+    let lease = puller.next(Duration::from_secs(2)).await.unwrap().unwrap();
+    assert_eq!(lease.job().id, first);
+    lease.complete().await.unwrap();
+
+    let second = enqueue().await.unwrap().unwrap();
+    assert!(puller.next(Duration::from_secs(1)).await.unwrap().is_none());
+    let released = fetch(&q, second).await;
+    assert_eq!(released.state, JobState::Retryable);
+    assert_throttled(&q, &released).await;
+    puller.stop(Duration::from_secs(2)).await.unwrap();
+}
+
+async fn assert_throttled(q: &Queue, released: &Job) {
     assert_eq!(released.failure_kind, Some(FailureKind::Throttled));
     assert_eq!(
         released.attempt, 0,

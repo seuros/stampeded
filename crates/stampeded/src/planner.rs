@@ -94,19 +94,13 @@ impl Leaf {
 ///
 /// Every composite is reactive, so a verdict depends on the snapshot alone.
 fn policy() -> Node<Leaf> {
+    let when = |condition, verdict| {
+        Node::reactive_sequence([Node::leaf(condition), Node::leaf(Leaf::Verdict(verdict))])
+    };
     Node::reactive_fallback([
-        Node::reactive_sequence([
-            Node::leaf(Leaf::Paused),
-            Node::leaf(Leaf::Verdict(Verdict::Hold)),
-        ]),
-        Node::reactive_sequence([
-            Node::leaf(Leaf::AtCapacity),
-            Node::leaf(Leaf::Verdict(Verdict::Hold)),
-        ]),
-        Node::reactive_sequence([
-            Node::leaf(Leaf::Overdue),
-            Node::leaf(Leaf::Verdict(Verdict::Rush)),
-        ]),
+        when(Leaf::Paused, Verdict::Hold),
+        when(Leaf::AtCapacity, Verdict::Hold),
+        when(Leaf::Overdue, Verdict::Rush),
         Node::leaf(Leaf::Verdict(Verdict::Steady)),
     ])
 }

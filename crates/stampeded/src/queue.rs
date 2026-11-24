@@ -247,29 +247,37 @@ impl Queue {
 
     /// Mark a job completed.
     pub async fn complete(&self, job: &Job, worker_id: Uuid) -> Result<Transition> {
-        let row: Option<(Option<String>, Option<String>, Option<bool>)> =
-            sqlx::query_as("SELECT was, now_state, owned FROM stampeded_complete($1, $2, $3, $4)")
-                .bind(&job.queue)
-                .bind(job.id)
-                .bind(worker_id)
-                .bind(job.attempt)
-                .fetch_optional(&self.pool)
-                .await?;
-
-        Ok(Transition::from_row(row))
+        self.owned_transition(
+            "SELECT was, now_state, owned FROM stampeded_complete($1, $2, $3, $4)",
+            job,
+            worker_id,
+        )
+        .await
     }
 
     /// Give back a claimed job this worker never started; the claim is undone and no failure recorded.
     pub async fn release(&self, job: &Job, worker_id: Uuid) -> Result<Transition> {
-        let row: Option<(Option<String>, Option<String>, Option<bool>)> =
-            sqlx::query_as("SELECT was, now_state, owned FROM stampeded_release($1, $2, $3, $4)")
-                .bind(&job.queue)
-                .bind(job.id)
-                .bind(worker_id)
-                .bind(job.attempt)
-                .fetch_optional(&self.pool)
-                .await?;
+        self.owned_transition(
+            "SELECT was, now_state, owned FROM stampeded_release($1, $2, $3, $4)",
+            job,
+            worker_id,
+        )
+        .await
+    }
 
+    async fn owned_transition(
+        &self,
+        sql: &'static str,
+        job: &Job,
+        worker_id: Uuid,
+    ) -> Result<Transition> {
+        let row = sqlx::query_as(sql)
+            .bind(&job.queue)
+            .bind(job.id)
+            .bind(worker_id)
+            .bind(job.attempt)
+            .fetch_optional(&self.pool)
+            .await?;
         Ok(Transition::from_row(row))
     }
 
@@ -841,21 +849,8 @@ impl Queue {
         task: &str,
         every: std::time::Duration,
     ) -> Result<()> {
-        if key.trim().is_empty() {
-            return Err(Error::InvalidSchedule(
-                "a schedule needs a key: it is the primary key and how you pause or remove it"
-                    .into(),
-            ));
-        }
-        if every.as_secs() == 0 {
-            return Err(Error::InvalidSchedule(format!(
-                "schedule {key:?}: the interval must be at least one second"
-            )));
-        }
-        // Not `as i64`: a huge interval would wrap negative into an opaque CHECK violation.
-        let secs = i64::try_from(every.as_secs()).map_err(|_| {
-            Error::InvalidSchedule(format!("schedule {key:?}: the interval is too large"))
-        })?;
+        schedule::validate_key(key)?;
+        let secs = schedule::interval_seconds(key, every)?;
 
         sqlx::query(
             "INSERT INTO stampeded_schedules (key, queue, task, interval_secs, cron_expr) \
@@ -885,12 +880,7 @@ impl Queue {
         timezone: &str,
         policy: Option<DstPolicy>,
     ) -> Result<()> {
-        if key.trim().is_empty() {
-            return Err(Error::InvalidSchedule(
-                "a schedule needs a key: it is the primary key and how you pause or remove it"
-                    .into(),
-            ));
-        }
+        schedule::validate_key(key)?;
         let cron = Cron::parse(expr).map_err(|e| Error::InvalidSchedule(e.to_string()))?;
         let tz = TimeZone::get(timezone)
             .map_err(|e| Error::InvalidSchedule(format!("unknown timezone {timezone:?}: {e}")))?;
@@ -963,37 +953,48 @@ impl Queue {
     /// executing or finished: an executing job is its worker's, and flipping the row
     /// would not stop the work.
     pub async fn cancel(&self, queue: &str, id: Uuid) -> Result<bool> {
-        let n = sqlx::query(
+        self.operator_transition(
             "UPDATE stampeded_jobs \
                 SET state = 'cancelled', failure_kind = 'cancelled', \
                     finished_at = now(), dedup_scope = NULL \
               WHERE queue = $1 AND id = $2 AND state = ANY($3)",
+            queue,
+            id,
+            Transitions::Cancel,
         )
-        .bind(queue)
-        .bind(id)
-        .bind(lifecycle::sources(&Transitions::Cancel))
-        .execute(&self.pool)
-        .await?
-        .rows_affected();
-        Ok(n == 1)
+        .await
     }
 
     /// Run a discarded or cancelled job again with every budget it was given up on
     /// reset: attempts, interruptions and deferrals. `false` in any other state.
     pub async fn resurrect(&self, queue: &str, id: Uuid) -> Result<bool> {
-        let n = sqlx::query(
+        self.operator_transition(
             "UPDATE stampeded_jobs \
                 SET state = 'available', attempt = 0, interruptions = 0, deferrals = 0, \
                     failure_kind = NULL, last_error = NULL, finished_at = NULL, \
                     scheduled_at = now() \
               WHERE queue = $1 AND id = $2 AND state = ANY($3)",
+            queue,
+            id,
+            Transitions::Resurrect,
         )
-        .bind(queue)
-        .bind(id)
-        .bind(lifecycle::sources(&Transitions::Resurrect))
-        .execute(&self.pool)
-        .await?
-        .rows_affected();
+        .await
+    }
+
+    async fn operator_transition(
+        &self,
+        sql: &'static str,
+        queue: &str,
+        id: Uuid,
+        event: Transitions,
+    ) -> Result<bool> {
+        let n = sqlx::query(sql)
+            .bind(queue)
+            .bind(id)
+            .bind(lifecycle::sources(&event))
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
         Ok(n == 1)
     }
 

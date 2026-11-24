@@ -103,3 +103,33 @@ fn idle_tenants_are_evicted_so_state_does_not_leak() {
     f.evict_idle(Duration::from_secs(1000));
     assert_eq!(f.tracked_tenants(), 0);
 }
+
+#[test]
+fn a_full_shard_defers_a_new_tenant_until_a_slot_recovers() {
+    use std::hash::RandomState;
+    use std::num::NonZeroUsize;
+
+    let policy = TenantLimit {
+        jobs_per_second: 1.0,
+        burst: 0.0,
+    }
+    .policy();
+    let f = Fairness {
+        limiter: KeyedGcra::with_hasher(
+            policy,
+            NonZeroUsize::MIN,
+            NonZeroUsize::MIN,
+            RandomState::new(),
+        ),
+    };
+
+    let now = Duration::from_secs(1);
+    assert!(f.admit_at("first", now).is_allowed());
+    assert_eq!(
+        f.admit_at("new", now),
+        Admission::Throttled {
+            retry_after: Duration::from_secs(1),
+        }
+    );
+    assert!(f.admit_at("new", now + Duration::from_secs(1)).is_allowed());
+}

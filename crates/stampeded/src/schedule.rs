@@ -16,15 +16,36 @@
 //! [`ScheduleSpec`]s and never touches another owner's.
 
 use crate::cron::{Cron, DstPolicy};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use jiff::tz::TimeZone;
 use jiff::{Timestamp, ToSpan, ZonedDateTime};
+use std::time::Duration;
 use tracing::warn;
 
 mod spec;
 
 pub(crate) use spec::sync;
 pub use spec::{ScheduleChange, ScheduleSpec, SyncChange};
+
+pub(crate) fn validate_key(key: &str) -> Result<()> {
+    if key.trim().is_empty() {
+        return Err(Error::InvalidSchedule(
+            "a schedule needs a key: it is the primary key and how you pause or remove it".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn interval_seconds(key: &str, every: Duration) -> Result<i64> {
+    let seconds = every.as_secs();
+    if seconds == 0 {
+        return Err(Error::InvalidSchedule(format!(
+            "schedule {key:?}: the interval must be at least one second"
+        )));
+    }
+    i64::try_from(seconds)
+        .map_err(|_| Error::InvalidSchedule(format!("schedule {key:?}: the interval is too large")))
+}
 
 /// Scheduling fields of a stored schedule; job-template limits stay in SQL.
 #[derive(Debug, Clone, sqlx::FromRow)]

@@ -364,8 +364,11 @@ The policy is a behavior tree from
 
 On by default in the Rust worker:
 
-- **Per-tenant admission** (`tenant_id`): one tenant enqueueing 100k jobs does
-  not starve the others.
+- **Per-tenant admission** (`tenant_id`): a busy tenant spends its own rate
+  budget. The Worker and Puller each track tenants locally, not fleet-wide,
+  in 16 shards of up to 4,096 keys each. A full shard can temporarily defer a
+  new tenant while it waits for idle entries to be reclaimed; jobs without
+  a tenant bypass the limiter.
 - **A circuit breaker per task**: a failing downstream is not hammered by every
   retry. Jobs refused by an open circuit or by tenant throttling are recorded
   as `breaker_open` / `throttled` and get their attempt back.
