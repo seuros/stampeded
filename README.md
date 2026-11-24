@@ -65,8 +65,10 @@ The URL takes libpq's `sslmode` and `sslrootcert`. TLS is rustls with Mozilla's
 roots built in; a private CA goes in `sslrootcert`, so on RDS:
 `?sslmode=verify-full&sslrootcert=/path/to/global-bundle.pem`.
 
-- **Dashboard** -- `http://127.0.0.1:7878/dashboard`, live over SSE. Only
-  served with a token: set `STAMPEDED_DASHBOARD_TOKEN`, or pass
+- **Dashboard** -- `http://127.0.0.1:7878/dashboard?token=…`, a read-only
+  AM-style dashboard with live updates over SSE. Select a queue or state to
+  filter the job list, and select a job to inspect its details. Set
+  `STAMPEDED_DASHBOARD_TOKEN` to enable the dashboard, or pass
   `--dashboard-token`, which `ps` shows to everyone on the host.
 - **MCP** -- `stampeded-mcp` over stdio.
 - **HTTP API** -- for callers that cannot reach Postgres:
@@ -608,12 +610,6 @@ Consume the HTTP API with whatever you want.
 Build one on the C ABI ([`stampeded.h`](https://github.com/seuros/stampeded/blob/master/crates/stampeded-ffi/include/stampeded.h))
 and open an issue linking to it; you can be listed as its maintainer. I can't
 maintain bindings for languages I don't use, even with AI in the loop.
-
-## Credits
-
-The dashboard palette is from
-[cybercore-css](https://github.com/sebyx07/cybercore-css) v0.3.0 (MIT,
-© sebyx07) -- the design tokens only.
 
 ## Licence
 

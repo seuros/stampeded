@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Stampeded · Queue monitor</title>
+  <link rel="icon" href="data:image/svg+xml,
+<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'>
+<rect width='16' height='16' rx='3' fill='%23080b10'/>
+<path d='M8 2l6 6-6 6-6-6z' fill='%23e8a95b'/></svg>">
+  <script type="module" src="/dashboard/datastar.js"></script>
+  <style>__STYLE__</style>
+</head>
+<body data-init="@get('__STREAM__')">
+  <header class="masthead">
+    <div class="brand">
+      <h1>Stampeded</h1>
+      <span class="dim">Queue monitor</span>
+    </div>
+    <div class="status">
+      <span id="wakeups" class="badge dim" role="status">Connecting…</span>
+      <span class="badge dim">Read-only</span>
+    </div>
+  </header>
+  <nav class="actions" aria-label="Dashboard sections">
+    <a href="#queues">Queues</a>
+    <a href="#job-browser">Jobs</a>
+    <a href="#overview">Overview</a>
+  </nav>
+  <noscript><p>Enable JavaScript to receive live dashboard data.</p></noscript>
+  <main class="dashboard">
+    <div class="workbench">
+      <section id="queues" class="widget" tabindex="-1">
+        <h2>Queues</h2><p class="dim">Loading queues…</p>
+      </section>
+      <section id="job-browser" class="stack"
+               aria-label="Job browser" tabindex="-1">
+        <div id="job"></div>
+        <div id="jobs" class="widget">
+          <h2>Jobs</h2><p class="dim">Loading jobs…</p>
+        </div>
+      </section>
+    </div>
+    <section id="overview" class="stack"
+             aria-label="System overview" tabindex="-1">
+      <div class="telemetry">
+        <div id="trends"></div>
+        <div class="stack">
+          <div id="health"></div>
+          <div id="tenants"></div>
+        </div>
+      </div>
+      <div id="destinations"></div>
+      <div id="failures"></div>
+      <div id="schedules"></div>
+    </section>
+  </main>
+  <footer>Updated over server-sent events</footer>
+</body>
+</html>

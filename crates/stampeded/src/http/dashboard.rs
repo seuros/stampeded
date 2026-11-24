@@ -3,6 +3,7 @@
 //! It refreshes every second: no query here may aggregate the job table unbounded.
 
 use super::{ApiState, trends};
+use crate::JobState;
 use crate::http::api::WakeupStatus;
 use rama::futures::stream;
 use rama::http::header;
@@ -11,6 +12,7 @@ use rama::http::service::web::response::{Html, IntoResponse, Sse};
 use rama::http::sse::Event;
 use rama::http::sse::datastar::{ElementPatchMode, PatchElements};
 use rama::http::sse::server::KeepAlive;
+use rama::net::uri::util::percent_encoding as pct;
 use serde::Deserialize;
 use std::convert::Infallible;
 // `let _ = write!` into a String below: String's fmt::Write never errors.
@@ -35,120 +37,13 @@ const TENANT_TTL: Duration = Duration::from_secs(5);
 /// Rows in the job list; see `Queue::recent_jobs` for its cost.
 const JOB_LIMIT: i64 = 40;
 
-const INDEX: &str = r#"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>Stampeded</title>
-<!-- Inline, so the console of an ops tool is not the first thing that
-     shows a 404. A browser requests /favicon.ico unprompted; a data URI
-     answers it with no route and no extra request. -->
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3' fill='%230d0e14'/><path d='M3 5h7M2 8h9M4 11h7' stroke='%2300f0ff' stroke-width='1.6' stroke-linecap='round'/></svg>">
-<script type="module" src="/dashboard/datastar.js"></script>
-<style>
-  /* Palette from cybercore-css v0.3.0 (MIT, sebyx07/cybercore-css) -- the
-     tokens only, not the framework. The framework is 74 KB minified against
-     this file's ~2 KB and styles `body` and `code` out of the box; everything
-     else needs its component classes on the markup. The colours are the part
-     that carries the identity, so those are what we took. */
-  :root {
-    color-scheme: dark;
-    --void-500: #0d0e14; --void-400: #12141d; --void-300: #181a25;
-    --void-100: #2a2d3a;
-    --chrome-100: #f0f1f5; --chrome-300: #b2b7c7; --chrome-500: #747d99;
-    --cyan-500: #00f0ff; --magenta-500: #ff2a6d;
-    --yellow-500: #fcee0a; --green-500: #05ffa1;
-    --dim: var(--chrome-500);
-  }
-  body { font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 1.5rem 2rem;
-         max-width: 100rem; background: var(--void-500); color: var(--chrome-100) }
-  header { display: flex; align-items: baseline; gap: 1.5rem; margin-bottom: 1rem }
-  h1 { font-size: 1rem; letter-spacing: .18em; text-transform: uppercase; margin: 0;
-       color: var(--cyan-500) }
-  h2 { font-size: .72rem; letter-spacing: .12em; text-transform: uppercase;
-       color: var(--chrome-300); margin: 1.6rem 0 .35rem; font-weight: 600 }
-  /* Size to content, not to the viewport.
-     `width: 100%` on a four-column table across a wide window puts `queue` at
-     the far left and its count 700px away, which is unreadable: the eye has to
-     travel to pair a label with its number. Tables here are narrow by nature --
-     a queue name and a count -- so they should be narrow. */
-  table { border-collapse: collapse; width: auto; max-width: 100% }
-  th { text-align: left; font-weight: 600; color: var(--chrome-500);
-       border-bottom: 1px solid var(--void-100);
-       padding: .2rem 1.75rem .2rem 0; font-size: .7rem; letter-spacing: .06em; text-transform: uppercase }
-  td { padding: .22rem 1.75rem .22rem 0; border-bottom: 1px solid var(--void-300);
-       white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
-  tbody tr:hover td { background: var(--void-400) }
-  th:last-child, td:last-child { padding-right: 0 }
-  /* Masonry, via multi-column: as many columns as fit at 24rem, panels kept
-     whole. CSS grid has no masonry in any shipping browser, and a fixed
-     column count would leave a 760px window with two 12rem columns or a 2000px
-     one with acres of empty right-hand side.
-
-     33rem is not arbitrary: it is the widest panel that lives here
-     (destinations, ~520px). Narrower columns clip its last two headings, which
-     is how the first attempt lost WAITING and STATE. */
-  .cols { columns: 26rem; column-gap: 2.5rem; margin-top: 1.6rem }
-  .cols > div { break-inside: avoid-column; margin-bottom: .4rem }
-  /* A column's first heading must not be pushed down by its own top margin,
-     or the columns start at different heights and look misaligned. */
-  .cols > div:first-child h2 { margin-top: 0 }
-  /* Each table scrolls in its own box. Without this a wide table (jobs,
-     schedules) pushes the whole PAGE sideways on a narrow window, so the
-     header and nav slide out of view to read one error column. */
-  .t { overflow-x: auto; max-width: 100% }
-  .n { text-align: right; font-variant-numeric: tabular-nums }
-  /* Severity carries meaning, so it gets the saturated end of the palette. */
-  .bad { color: var(--magenta-500) } .warn { color: var(--yellow-500) } .ok { color: var(--green-500) }
-  .dim { color: var(--dim) }
-  .wide { white-space: normal; max-width: 38rem }
-  nav { margin: .5rem 0 }
-  nav a { cursor: pointer; margin-right: .9rem; text-decoration: none;
-          border-bottom: 1px dotted var(--void-100); color: var(--chrome-300) }
-  nav a:hover { color: var(--cyan-500) }
-  nav a.on { font-weight: 700; color: var(--cyan-500); border-bottom: 2px solid var(--cyan-500) }
-  footer { color: var(--dim); margin-top: 2.5rem; font-size: .72rem }
-  /* Sparklines take their colour from the cell's class. */
-  .spark { display: block; width: 8rem; height: 1.5rem }
-  .spark polyline { fill: none; stroke: currentColor; stroke-width: 1.5;
-                    vector-effect: non-scaling-stroke }
-  .flow { color: var(--cyan-500) }
-  .bar { display: inline-block; height: .55rem; min-width: 1px;
-         background: var(--cyan-500); opacity: .75; vertical-align: middle }
-</style>
-</head>
-<body data-init="@get('/dashboard/stream?token=__TOKEN__&amp;q=__Q__&amp;s=__S__&amp;j=__J__')">
-  <header><h1>Stampeded</h1><span id="wakeups"></span></header>
-  <!-- The summary panels are narrow by nature -- a name and a count -- so they
-       flow into as many columns as the window fits rather than stacking in one
-       column with the right half of the screen empty. The jobs list and the
-       job detail stay full width: they are the working area, and they are wide. -->
-  <div id="job"></div>
-  <!-- destinations is a health band, not a column panel: one row per
-       dependency, six columns wide. In the masonry it was the widest item and
-       so set the width of EVERY column, forcing two fat columns where three
-       fit -- and at three it lost its last two headings behind a scrollbar.
-       Out here it costs nothing and the columns size to what actually lives
-       in them. -->
-  <div id="destinations"></div>
-  <!-- Full width: three sparklines per queue. -->
-  <div id="trends"></div>
-  <div class="cols">
-    <div id="queues">connecting…</div>
-    <div id="tenants"></div>
-    <div id="health"></div>
-  </div>
-  <!-- Full width: in a column the error text was a word or two wide. -->
-  <div id="failures"></div>
-  <!-- Full width, both of them: schedules needs ~770px for a cron rule plus a
-       timezone and a DST policy, and the jobs list is the working area.
-       Squeezing either into a column just moves the content behind a
-       scrollbar. -->
-  <div id="schedules"></div>
-  <div id="jobs"></div>
-  <footer>live over server-sent events · read-only</footer>
-</body>
-</html>"#;
+const INDEX: &str = include_str!("dashboard/index.html");
+const STYLE: &str = include_str!("dashboard/style.css");
+const QUERY_VALUE: &pct::AsciiSet = &pct::NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
 
 /// Dashboard credentials and filters.
 ///
@@ -180,35 +75,55 @@ impl Params {
         self.s.as_deref().filter(|s| !s.is_empty())
     }
 
-    fn tok(&self) -> String {
-        esc(self.token.as_deref().unwrap_or(""))
-    }
-
     fn job(&self) -> Option<&str> {
         self.j.as_deref().filter(|j| !j.is_empty())
     }
 
-    /// A stream URL with one field swapped. `Some("")` clears a field.
-    fn link(&self, q: Option<&str>, st: Option<&str>, job: Option<&str>) -> String {
+    /// Query string for an HTML attribute. Encode URL values before adding
+    /// HTML-escaped separators; safe inside a Datastar string literal too.
+    fn query(&self, q: Option<&str>, s: Option<&str>, job: &str) -> String {
+        let token = self.token.as_deref().unwrap_or("");
+        let queue = q.unwrap_or_else(|| self.queue());
+        let state = s.or_else(|| self.state()).unwrap_or("");
         format!(
-            "/dashboard/stream?token={}&amp;q={}&amp;s={}&amp;j={}",
-            self.tok(),
-            esc(q.unwrap_or_else(|| self.queue())),
-            esc(st.unwrap_or_else(|| self.state().unwrap_or(""))),
-            esc(job.unwrap_or_else(|| self.job().unwrap_or(""))),
+            "token={}&amp;q={}&amp;s={}&amp;j={}",
+            pct::utf8_percent_encode(token, QUERY_VALUE),
+            pct::utf8_percent_encode(queue, QUERY_VALUE),
+            pct::utf8_percent_encode(state, QUERY_VALUE),
+            pct::utf8_percent_encode(job, QUERY_VALUE),
         )
+    }
+
+    /// A page URL with selected fields swapped. `Some("")` clears a field.
+    fn link(&self, q: Option<&str>, st: Option<&str>, job: &str) -> String {
+        format!("/dashboard?{}#job-browser", self.query(q, st, job))
     }
 }
 
+fn current(selected: bool) -> &'static str {
+    if selected {
+        r#" aria-current="true""#
+    } else {
+        ""
+    }
+}
+
+fn render_index(p: &Params) -> String {
+    let query = p.query(None, None, p.job().unwrap_or(""));
+    INDEX
+        .replace("__STYLE__", STYLE)
+        .replace("__STREAM__", &format!("/dashboard/stream?{query}"))
+}
+
 pub async fn index(Query(p): Query<Params>) -> impl IntoResponse {
-    Html(
-        INDEX
-            .replace("__TOKEN__", &p.tok())
-            .replace("__Q__", &esc(p.queue()))
-            .replace("__S__", &esc(p.state().unwrap_or("")))
-            .replace("__J__", &esc(p.job().unwrap_or(""))),
+    (
+        [
+            (header::CACHE_CONTROL, "no-store"),
+            (header::REFERRER_POLICY, "no-referrer"),
+        ],
+        Html(render_index(&p)),
     )
-    .into_response()
+        .into_response()
 }
 
 /// The live stream, polled so dashboard load stays off the workers' NOTIFY channel.
@@ -229,8 +144,8 @@ pub async fn stream(State(state): State<ApiState>, Query(p): Query<Params>) -> i
             let mut next: Vec<_> = [
                 cached(&state, "health", PANEL_TTL, render_health(&state)).await,
                 cached(&state, "schedules", PANEL_TTL, render_schedules(&state)).await,
-                render_job(&state, &p).await,
                 render_jobs(&state, &p).await,
+                render_job(&state, &p).await,
                 cached(&state, "tenants", TENANT_TTL, render_tenants(&state)).await,
                 cached(&state, "failures", PANEL_TTL, render_failures(&state)).await,
                 // In memory, no query: rendered per client, nothing to cache.
@@ -288,7 +203,8 @@ pub(crate) fn wakeup_badge(status: WakeupStatus) -> (&'static str, &'static str)
 fn render_wakeups(state: &ApiState) -> Option<Event<PatchElements>> {
     let (class, text) = wakeup_badge(state.wakeups);
     patch(&format!(
-        r#"<span id="wakeups" class="{class}">{text}</span>"#
+        r#"<span id="wakeups" class="badge {class}" role="status">
+               {text}</span>"#
     ))
 }
 
@@ -316,9 +232,12 @@ async fn render_queues(state: &ApiState, p: &Params) -> Option<Event<PatchElemen
     let ages = logged("queues", state.queue.oldest_available_age().await).unwrap_or_default();
     let paused = logged("queues", state.queue.paused_queues().await).unwrap_or_default();
 
-    let mut html = String::from(r#"<div id="queues"><h2>queues</h2><div class="t"><table>"#);
-    html.push_str(
-        r#"<tr><th>queue</th><th>state</th><th class="n">jobs</th><th class="n">oldest</th></tr>"#,
+    let mut html = String::from(
+        r#"<section id="queues" class="widget" tabindex="-1">
+             <h2>queues</h2>
+             <p class="hint">Select a queue or state to browse its jobs.</p>
+             <div class="t"><table><tr><th>queue</th><th>state</th>
+             <th class="n">jobs</th><th class="n">oldest</th></tr>"#,
     );
     if rows.is_empty() {
         html.push_str(r#"<tr><td colspan="4" class="dim">no jobs</td></tr>"#);
@@ -333,23 +252,28 @@ async fn render_queues(state: &ApiState, p: &Params) -> Option<Event<PatchElemen
         } else {
             String::new()
         };
-        let on = if queue == p.queue() {
-            r#" class="on""#
-        } else {
-            ""
-        };
+        let selected_queue = queue == p.queue();
         let is_paused = paused.contains(&queue);
         let _ = write!(
             html,
-            r#"<tr><td class="{cls}"><a{on} data-on-click="@get('{href}')">{q}</a>{tag}</td><td>{st}</td><td class="n">{n}</td><td class="n dim">{age}</td></tr>"#,
-            cls = if is_paused { "warn" } else { "" },
-            href = p.link(Some(&queue), None, Some("")),
+            r#"<tr><td><a{on} href="{queue_link}">{q}</a>{tag}</td>
+                 <td><a{state_on} href="{state_link}"
+                        aria-label="{st} jobs in {q}">{st}</a></td>
+                 <td class="n">{n}</td><td class="n dim">{age}</td></tr>"#,
+            on = current(selected_queue),
+            queue_link = p.link(Some(&queue), None, ""),
+            state_on = current(selected_queue && p.state() == Some(&st)),
+            state_link = p.link(Some(&queue), Some(&st), ""),
             q = esc(&queue),
-            tag = if is_paused { " [paused]" } else { "" },
+            tag = if is_paused {
+                r#" <span class="warn">[paused]</span>"#
+            } else {
+                ""
+            },
             st = esc(&st),
         );
     }
-    html.push_str("</table></div></div>");
+    html.push_str("</table></div></section>");
     patch(&html)
 }
 
@@ -361,7 +285,12 @@ async fn render_destinations(state: &ApiState) -> Option<String> {
     }
 
     let mut html = String::from(
-        r#"<div id="destinations"><h2>destinations <span class="dim">· observed from job rows, last hour</span></h2><div class="t"><table><tr><th>destination</th><th class="n">refused</th><th class="n">throttled</th><th class="n">failed</th><th class="n">waiting</th><th>state</th></tr>"#,
+        r#"<div id="destinations" class="widget"><h2>destinations
+             <span class="dim">· observed from job rows, last hour</span></h2>
+             <div class="t"><table><tr><th>destination</th>
+             <th class="n">refused</th><th class="n">throttled</th>
+             <th class="n">failed</th><th class="n">waiting</th>
+             <th>state</th></tr>"#,
     );
     for r in rows {
         let (class, label) = if r.refused > 0 {
@@ -397,7 +326,11 @@ fn tenant_panel(rows: &[crate::queue::TenantLoad]) -> String {
     }
     let backlog: i64 = rows.iter().map(|r| r.waiting).sum();
     let mut html = String::from(
-        r#"<div id="tenants"><h2>tenants <span class="dim">· live jobs, busiest first</span></h2><div class="t"><table><tr><th>tenant</th><th class="n">waiting</th><th class="n">running</th><th class="n">throttled</th><th>share</th></tr>"#,
+        r#"<div id="tenants" class="widget"><h2>tenants
+             <span class="dim">· live jobs, busiest first</span></h2>
+             <div class="t"><table><tr><th>tenant</th><th class="n">waiting</th>
+             <th class="n">running</th><th class="n">throttled</th>
+             <th>share</th></tr>"#,
     );
     for r in rows {
         // Share of the shown backlog, as a bar up to 6rem wide.
@@ -428,7 +361,10 @@ async fn render_failures(state: &ApiState) -> Option<String> {
     }
 
     let mut html = String::from(
-        r#"<div id="failures"><h2>failures <span class="dim">· clustered by fingerprint</span></h2><div class="t"><table><tr><th class="n">n</th><th>kind</th><th>destination</th><th>error</th></tr>"#,
+        r#"<div id="failures" class="widget"><h2>failures
+             <span class="dim">· clustered by fingerprint</span></h2>
+             <div class="t"><table><tr><th class="n">n</th><th>kind</th>
+             <th>destination</th><th>error</th></tr>"#,
     );
     for r in rows {
         let kind = r.failure_kind.unwrap_or_default();
@@ -458,7 +394,9 @@ async fn render_schedules(state: &ApiState) -> Option<String> {
     }
 
     let mut html = String::from(
-        r#"<div id="schedules"><h2>schedules</h2><div class="t"><table><tr><th>key</th><th>rule</th><th>task</th><th>next</th><th>last</th></tr>"#,
+        r#"<div id="schedules" class="widget"><h2>schedules</h2>
+             <div class="t"><table><tr><th>key</th><th>rule</th><th>task</th>
+             <th>next</th><th>last</th></tr>"#,
     );
     for r in rows {
         let rule = match (&r.cron_expr, r.interval_secs) {
@@ -484,6 +422,23 @@ async fn render_schedules(state: &ApiState) -> Option<String> {
 }
 
 async fn render_jobs(state: &ApiState, p: &Params) -> Option<Event<PatchElements>> {
+    let mut html = format!(
+        r#"<div id="jobs" class="widget"><h2>jobs
+             <span class="dim">· {q}, newest first</span></h2>
+             <nav class="actions" aria-label="Job state">"#,
+        q = esc(p.queue())
+    );
+    for s in std::iter::once("").chain(JobState::ALL.map(JobState::as_str)) {
+        let _ = write!(
+            html,
+            r#"<a{on} href="{href}">{label}</a>"#,
+            on = current(p.state().unwrap_or("") == s),
+            href = p.link(None, Some(s), ""),
+            label = if s.is_empty() { "all" } else { s },
+        );
+    }
+    html.push_str("</nav>");
+
     let jobs = match state
         .queue
         .recent_jobs(p.queue(), p.state(), JOB_LIMIT)
@@ -492,41 +447,27 @@ async fn render_jobs(state: &ApiState, p: &Params) -> Option<Event<PatchElements
         Ok(jobs) => jobs,
         Err(e) => {
             // Almost always the statement timeout: a rare state on a large partition seq-scans.
-            return patch(&format!(
-                r#"<div id="jobs"><h2>jobs</h2><p class="warn">this listing timed out -- a rare state on a large queue has no index to use, so it reads most of the partition. Narrow the filter, or query it directly.</p><p class="dim">{}</p></div>"#,
+            let _ = write!(
+                html,
+                r#"<p class="warn">Could not load jobs.
+                     Try another state or queue.</p>
+                     <p class="dim">{}</p></div>"#,
                 esc(&e.to_string())
-            ));
+            );
+            return patch(&html);
         }
     };
 
-    let mut html = format!(
-        r#"<div id="jobs"><h2>jobs <span class="dim">· {q}, newest first</span></h2><nav>"#,
-        q = esc(p.queue())
+    html.push_str(
+        r#"<div class="t"><table><tr><th>task / id</th><th class="n">try</th>
+             <th>state</th><th>progress</th><th>error</th></tr>"#,
     );
-    for s in [
-        "",
-        "available",
-        "executing",
-        "retryable",
-        "discarded",
-        "completed",
-    ] {
-        let on = if p.state().unwrap_or("") == s {
-            r#" class="on""#
-        } else {
-            ""
-        };
-        let _ = write!(
-            html,
-            r#"<a{on} data-on-click="@get('{href}')">{label}</a>"#,
-            href = p.link(None, Some(s), Some("")),
-            label = if s.is_empty() { "all" } else { s },
-        );
-    }
-    html.push_str(r#"</nav><div class="t"><table><tr><th>id</th><th>task</th><th class="n">try</th><th>state</th><th>progress</th><th>error</th></tr>"#);
 
     if jobs.is_empty() {
-        html.push_str(r#"<tr><td colspan="6" class="dim">nothing here</td></tr>"#);
+        html.push_str(
+            r#"<tr><td colspan="5" class="dim">
+                 No jobs match this filter.</td></tr>"#,
+        );
     }
     for j in jobs {
         let state_class = match j.state.as_str() {
@@ -535,11 +476,18 @@ async fn render_jobs(state: &ApiState, p: &Params) -> Option<Event<PatchElements
             "executing" => "ok",
             _ => "dim",
         };
+        let id = j.id.to_string();
         let _ = write!(
             html,
-            r#"<tr><td><a data-on-click="@get('{href}')" class="dim">{id}</a></td><td>{task}</td><td class="n">{a}/{m}</td><td class="{state_class}">{st}</td><td class="dim">{progress}</td><td class="wide dim">{err}</td></tr>"#,
-            href = p.link(None, None, Some(&j.id.to_string())),
-            id = &j.id.to_string()[..8],
+            r#"<tr id="job-row-{id}"><td>
+                 <a{on} href="{href}" title="Inspect job {id}">{task}
+                 <span class="job-id">{short}</span></a></td>
+                 <td class="n">{a}/{m}</td><td class="{state_class}">{st}</td>
+                 <td class="wide dim">{progress}</td>
+                 <td class="wide dim">{err}</td></tr>"#,
+            on = current(p.job() == Some(&id)),
+            href = p.link(None, None, &id),
+            short = &id[..8],
             task = esc(&j.task),
             a = j.attempt,
             m = j.max_attempts,
@@ -557,24 +505,37 @@ async fn render_job(state: &ApiState, p: &Params) -> Option<Event<PatchElements>
     let Some(raw) = p.job() else {
         return patch(r#"<div id="job"></div>"#);
     };
-    let Ok(id) = raw.parse::<uuid::Uuid>() else {
-        return patch(r#"<div id="job"></div>"#);
-    };
-    let Ok(Some(j)) = state.queue.fetch(p.queue(), id).await else {
-        return patch(&format!(
-            r#"<div id="job"><h2>job</h2><p class="dim">{id} is not in {q} -- it may have been pruned</p></div>"#,
-            q = esc(p.queue())
-        ));
-    };
-
     let mut html = format!(
-        r#"<div id="job"><h2>job {id} <a class="dim" data-on-click="@get('{back}')">[close]</a></h2><div class="t"><table>"#,
-        back = p.link(None, None, Some("")),
+        r#"<div id="job" class="widget"><div class="widget-head">
+             <h2>Job details</h2>
+             <a class="action" href="{back}">Close details</a>
+             </div>"#,
+        back = p.link(None, None, ""),
     );
+    let Ok(id) = raw.parse::<uuid::Uuid>() else {
+        html.push_str(r#"<p class="warn">Invalid job ID.</p></div>"#);
+        return patch(&html);
+    };
+    let job = logged("job", state.queue.fetch(p.queue(), id).await);
+    let Some(Some(j)) = job else {
+        let _ = write!(
+            html,
+            r#"<p class="dim">{id} {message}</p></div>"#,
+            message = if job.is_some() {
+                let queue = esc(p.queue());
+                format!("is not in {queue} — it may have been pruned.")
+            } else {
+                "could not be loaded.".to_string()
+            },
+        );
+        return patch(&html);
+    };
 
     let _ = write!(
         html,
-        r#"<tr><th>task</th><td>{task}</td><th>state</th><td class="{sc}">{st}</td></tr>
+        r#"<div class="t"><table><tr><th>id</th><td colspan="3">{id}</td></tr>
+           <tr><th>task</th><td>{task}</td>
+               <th>state</th><td class="{sc}">{st}</td></tr>
            <tr><th>attempt</th><td>{a} of {m}</td><th>interruptions</th><td>{i} of {mi}</td></tr>"#,
         task = esc(&j.task),
         sc = match j.state.as_str() {
@@ -733,7 +694,7 @@ async fn render_health(state: &ApiState) -> Option<String> {
     )
     .unwrap_or_default();
 
-    let mut html = String::from(r#"<div id="health">"#);
+    let mut html = String::from(r#"<div id="health" class="widget">"#);
 
     if !behind.is_empty() {
         html.push_str(r#"<h2 class="bad">autovacuum is behind</h2><div class="t"><table>"#);
@@ -801,7 +762,11 @@ fn render_trends(series: &[(String, Vec<trends::Point>)], now: Instant) -> Strin
         .fold(0.0_f64, f64::max)
         .clamp(60.0, trends::WINDOW.as_secs_f64());
     let mut html = format!(
-        r#"<div id="trends"><h2>trends <span class="dim">· last {}</span></h2><div class="t"><table><tr><th>queue</th><th class="n">done/s</th><th></th><th class="n">waiting</th><th></th><th class="n">oldest</th><th></th></tr>"#,
+        r#"<div id="trends" class="widget"><h2>trends
+             <span class="dim">· last {}</span></h2>
+             <div class="t"><table><tr><th>queue</th>
+             <th class="n">done/s</th><th></th><th class="n">waiting</th>
+             <th></th><th class="n">oldest</th><th></th></tr>"#,
         format_age(span),
     );
     for (queue, points) in series {
@@ -894,7 +859,7 @@ fn patch(html: &str) -> Option<Event<PatchElements>> {
         .ok()
 }
 
-/// Escape for HTML; error text and the token are attacker-controlled.
+/// Escape untrusted text for HTML.
 fn esc(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")

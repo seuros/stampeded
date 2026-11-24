@@ -13,17 +13,33 @@ fn error_text_is_escaped() {
 }
 
 #[test]
-fn the_token_cannot_break_out_of_the_stream_url() {
-    // The token is echoed into a data-on-click attribute and is attacker-chosen.
-    let nasty = esc(r"'><script>alert(1)</script>");
-    assert!(
-        !nasty.contains('\''),
-        "single quote must be escaped: {nasty}"
-    );
-    assert!(
-        !nasty.contains('<'),
-        "angle bracket must be escaped: {nasty}"
-    );
+fn query_values_round_trip_in_the_stream_and_page_urls() {
+    let token = "a+b/='&#%雪";
+    let queue = "mail+bulk & ops";
+    let p = Params {
+        token: Some(token.into()),
+        q: Some(queue.into()),
+        s: Some("available".into()),
+        ..Params::default()
+    };
+    let page = render_index(&p);
+    let stream = page
+        .split_once("data-init=\"@get('")
+        .expect("stream initializer")
+        .1
+        .split_once("')\"")
+        .expect("stream URL")
+        .0;
+    let link = p.link(None, None, "example");
+    for (url, job) in [(stream, None), (link.as_str(), Some("example"))] {
+        assert!(!url.contains(['\'', '"', '<', ' ']), "{url}");
+        let uri = url.replace("&amp;", "&").parse().expect("URL");
+        let Query(p) = Query::<Params>::try_from_uri(&uri).expect("params");
+        assert_eq!(p.token.as_deref(), Some(token));
+        assert_eq!(p.queue(), queue);
+        assert_eq!(p.state(), Some("available"));
+        assert_eq!(p.job(), job);
+    }
 }
 
 #[test]
@@ -34,30 +50,18 @@ fn the_page_has_a_target_for_every_panel() {
         "queues",
         "destinations",
         "failures",
+        "job",
         "jobs",
         "schedules",
         "health",
+        "tenants",
+        "trends",
     ] {
         assert!(
             INDEX.contains(&format!(r#"id="{id}""#)),
             "no target for {id}"
         );
     }
-}
-
-#[test]
-fn the_placeholders_are_all_substituted() {
-    let page = INDEX
-        .replace("__TOKEN__", "t")
-        .replace("__Q__", "mail")
-        .replace("__S__", "")
-        .replace("__J__", "");
-    assert!(
-        !page.contains("__"),
-        "an unsubstituted placeholder would break the stream URL"
-    );
-    assert!(page.contains("token=t"));
-    assert!(page.contains("q=mail"));
 }
 
 #[test]
@@ -79,26 +83,29 @@ fn params_default_to_the_default_queue_and_no_state_filter() {
 }
 
 #[test]
-fn a_link_swaps_one_field_and_keeps_the_rest() {
+fn navigation_links_preserve_the_other_filters() {
     let p = Params {
         token: Some("secret".into()),
         q: Some("mail".into()),
         s: Some("retryable".into()),
-        j: None,
+        j: Some("old-job".into()),
     };
-
-    let same_queue_all_states = p.link(None, Some(""), None);
-    assert!(same_queue_all_states.contains("token=secret"));
-    assert!(same_queue_all_states.contains("q=mail"));
-    assert!(
-        same_queue_all_states.contains("s=&"),
-        "state should be cleared"
-    );
-
-    // Opening a job keeps the filters, so [close] returns to the same list.
-    let opened = p.link(None, None, Some("abc"));
-    assert!(opened.contains("q=mail") && opened.contains("s=retryable"));
-    assert!(opened.contains("j=abc"));
+    for (q, s, j, expected) in [
+        (Some("bulk"), None, "", "q=bulk&amp;s=retryable&amp;j="),
+        (None, Some(""), "", "q=mail&amp;s=&amp;j="),
+        (
+            None,
+            None,
+            "new-job",
+            "q=mail&amp;s=retryable&amp;j=new-job",
+        ),
+        (None, None, "", "q=mail&amp;s=retryable&amp;j="),
+    ] {
+        assert_eq!(
+            p.link(q, s, j),
+            format!("/dashboard?token=secret&amp;{expected}#job-browser"),
+        );
+    }
 }
 
 #[test]
@@ -313,7 +320,7 @@ fn truncation_is_safe_at_every_offset() {
 #[test]
 fn the_dashboard_loads_no_external_assets() {
     use crate::http::test_support::network_fetches;
-    let html = INDEX;
+    let html = render_index(&Params::default());
 
     // The scanner itself: a CDN script counts, an XML namespace does not.
     assert_eq!(
@@ -323,7 +330,7 @@ fn the_dashboard_loads_no_external_assets() {
         ["https://cdn.example/x.js"]
     );
     assert_eq!(
-        network_fetches(html),
+        network_fetches(&html),
         Vec::<String>::new(),
         "the dashboard must serve its own assets"
     );

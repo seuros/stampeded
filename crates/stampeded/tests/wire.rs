@@ -6,7 +6,7 @@ mod common;
 use stampeded::{NewJob, Queue};
 use std::fmt::Write as _;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::watch;
 use uuid::Uuid;
@@ -222,8 +222,7 @@ async fn depth_reports_by_state() {
 
 #[tokio::test]
 async fn every_dashboard_page_and_stream_needs_the_token() {
-    // Secure by default: the dashboard shows job args and offers a retry button,
-    // and a gated page with an open stream would only look protected.
+    // A gated page with an open stream would only look protected.
     let (addr, _q, tx) = server!();
 
     let mut gated = vec!["/dashboard", "/dashboard/stream"];
@@ -255,17 +254,52 @@ async fn every_dashboard_page_and_stream_needs_the_token() {
 }
 
 #[tokio::test]
+async fn the_dashboard_stream_links_to_a_job_page_with_the_current_filters() {
+    let (addr, q, tx) = server!();
+    let id = q
+        .enqueue(NewJob::new("default", "dashboard-test"))
+        .await
+        .expect("enqueue")
+        .expect("id");
+    let mut socket = TcpStream::connect(&addr).await.expect("connect");
+    let query = "token=s3cret&q=default&s=available";
+    let path = format!("/dashboard/stream?{query}");
+    let req = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\n\r\n");
+    socket.write_all(req.as_bytes()).await.expect("write");
+    let patch = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut lines = BufReader::new(socket).lines();
+        while let Some(line) = lines.next_line().await.expect("stream line") {
+            if line.contains(r#"id="jobs""#) {
+                return line;
+            }
+        }
+        panic!("stream closed before the jobs panel");
+    })
+    .await
+    .expect("jobs panel did not arrive");
+    let target = format!("/dashboard?{query}&j={id}");
+    let href = target.replace('&', "&amp;");
+    assert!(patch.contains(&format!(r#"href="{href}#job-browser""#)));
+    let (status, body) = request(&addr, "GET", &target, None).await;
+    assert_eq!(status, 200);
+    let stream = format!("{path}&j={id}").replace('&', "&amp;");
+    assert!(body.contains(&stream));
+    let _ = tx.send(true);
+}
+
+#[tokio::test]
 async fn the_token_is_not_reflected_unescaped_into_the_page() {
-    // The token is echoed into the EventSource URL, and the caller chooses it.
+    // The token gate rejects unknown credentials before rendering the page.
     let (addr, _q, tx) = server!();
 
-    let (_status, body) = request(
+    let (status, body) = request(
         &addr,
         "GET",
         "/dashboard?token=%27%3E%3Cscript%3Ealert(1)%3C/script%3E",
         None,
     )
     .await;
+    assert_eq!(status, 404);
     assert!(!body.contains("<script>alert(1)"), "reflected XSS: {body}");
 
     let _ = tx.send(true);
