@@ -66,6 +66,13 @@ async fn enqueue_and_claim_increments_attempt() {
     // Incremented AT CLAIM, not at failure -- the poison-job brake.
     assert_eq!(jobs[0].attempt, 1);
     assert_eq!(jobs[0].claimed_by, Some(w));
+    assert!(jobs[0].claim_token.is_some());
+    assert!(
+        serde_json::to_value(&jobs[0])
+            .unwrap()
+            .get("claim_token")
+            .is_none()
+    );
     assert_eq!(jobs[0].attempted_by, vec![w.to_string()]);
 }
 
@@ -3153,7 +3160,7 @@ async fn a_stale_execution_cannot_complete_a_job_its_own_worker_has_since_reclai
     assert_eq!(second.id, first.id);
     assert_eq!(second.attempt, 2, "the retry is a new attempt");
 
-    // Attempt 1 returns while attempt 2 runs: same claimed_by, so only the attempt fences it.
+    // Same claimed_by; the new claim token fences the old execution.
     let t = q.complete(&first, w).await.unwrap();
 
     let state: String = sqlx::query_scalar("SELECT state FROM stampeded_jobs WHERE id = $1")
@@ -3170,6 +3177,152 @@ async fn a_stale_execution_cannot_complete_a_job_its_own_worker_has_since_reclai
          attempt 1's.",
         t.owned
     );
+}
+
+#[tokio::test]
+async fn reusing_an_attempt_does_not_reuse_ownership() {
+    let q = q!();
+    let w = q
+        .register_worker("test", 1, &["default".into()])
+        .await
+        .unwrap();
+
+    for reset in ["release", "refund", "resurrect"] {
+        q.enqueue(NewJob::new("default", reset)).await.unwrap();
+        let first = q.claim("default", w, 1).await.unwrap().pop().unwrap();
+        match reset {
+            "release" => assert!(q.release(&first, w).await.unwrap().owned),
+            "refund" => assert!(
+                q.fail(&first, w, FailureKind::Throttled, "", None)
+                    .await
+                    .unwrap()
+                    .owned
+            ),
+            _ => {
+                assert!(
+                    q.fail(&first, w, FailureKind::Unrecoverable, "", None)
+                        .await
+                        .unwrap()
+                        .owned
+                );
+                assert!(q.resurrect("default", first.id).await.unwrap());
+            }
+        }
+
+        let next = q.claim("default", w, 1).await.unwrap().pop().unwrap();
+        assert_eq!((first.id, first.attempt), (next.id, next.attempt));
+        assert_ne!(first.claim_token, next.claim_token);
+        assert!(!q.complete(&first, w).await.unwrap().owned);
+        assert!(!q.release(&first, w).await.unwrap().owned);
+        assert!(
+            !q.fail(&first, w, FailureKind::Unrecoverable, "stale", None)
+                .await
+                .unwrap()
+                .owned
+        );
+        assert!(!q.touch(&first, w).await.unwrap());
+        assert_eq!(q.checkpoint(&first, w, &"stale").await.unwrap(), None);
+        assert!(q.touch(&next, w).await.unwrap());
+        assert_eq!(q.checkpoint(&next, w, &"live").await.unwrap(), Some(1));
+        assert!(q.complete(&next, w).await.unwrap().owned);
+        assert_eq!(
+            q.fetch("default", next.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .claim_token,
+            None
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_losing_terminal_report_writes_no_dead_letter() {
+    let q = q!();
+    q.create_queue("dlq").await.unwrap();
+    let w = q
+        .register_worker("test", 1, &["default".into()])
+        .await
+        .unwrap();
+
+    for terminal_wins in [false, true] {
+        q.enqueue(NewJob::new("default", "race").dead_letter("dlq"))
+            .await
+            .unwrap();
+        let job = q.claim("default", w, 1).await.unwrap().pop().unwrap();
+        let mut winner = q.pool().begin().await.unwrap();
+        let holder: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *winner)
+            .await
+            .unwrap();
+        let (loser_q, loser_job) = (q.clone(), job.clone());
+        let query = if terminal_wins {
+            "SELECT * FROM stampeded_fail($1, $2, $3, $4, 'unrecoverable', '')"
+        } else {
+            "SELECT * FROM stampeded_complete($1, $2, $3, $4)"
+        };
+        // Lock without changing the row so the loser reaches the write and
+        // blocks. Only then run the winner and let the loser see its outcome.
+        sqlx::query("SELECT id FROM stampeded_jobs WHERE id = $1 FOR UPDATE")
+            .bind(job.id)
+            .execute(&mut *winner)
+            .await
+            .unwrap();
+        let loser = tokio::spawn(async move {
+            loser_q
+                .fail(&loser_job, w, FailureKind::Unrecoverable, "late", None)
+                .await
+                .unwrap()
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let blocked: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT FROM pg_stat_activity \
+                     WHERE $1 = ANY(pg_blocking_pids(pid)) \
+                       AND query LIKE '%FROM stampeded_fail(%')",
+                )
+                .bind(holder)
+                .fetch_one(q.pool())
+                .await
+                .unwrap();
+                if blocked {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("terminal report reached the locked row");
+        sqlx::query(query)
+            .bind(&job.queue)
+            .bind(job.id)
+            .bind(w)
+            .bind(job.claim_token)
+            .fetch_one(&mut *winner)
+            .await
+            .unwrap();
+        winner.commit().await.unwrap();
+
+        assert!(!loser.await.unwrap().owned);
+        let letters: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM stampeded_jobs \
+             WHERE queue = 'dlq' AND source_id = $1",
+        )
+        .bind(job.id)
+        .fetch_one(q.pool())
+        .await
+        .unwrap();
+        assert_eq!(letters, i64::from(terminal_wins));
+        let row = q.fetch("default", job.id).await.unwrap().unwrap();
+        assert_eq!(
+            row.state,
+            if terminal_wins {
+                JobState::Discarded
+            } else {
+                JobState::Completed
+            }
+        );
+    }
 }
 
 #[tokio::test]

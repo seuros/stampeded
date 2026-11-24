@@ -158,6 +158,7 @@ fn job_with_backoff(base_ms: i16, max_ms: i32, attempt: i16) -> Job {
         max_attempts: 25,
         attempted_by: vec![],
         claimed_by: None,
+        claim_token: None,
         claimed_at: None,
         dedup_scope: None,
         dedup_period: None,

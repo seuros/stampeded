@@ -160,6 +160,9 @@ pub struct Job {
     pub max_attempts: i16,
     pub attempted_by: Vec<String>,
     pub claimed_by: Option<Uuid>,
+    /// Opaque ownership token for this claim, separate from retry accounting.
+    #[serde(skip)]
+    pub claim_token: Option<Uuid>,
     #[sqlx(try_from = "crate::timestamp::NullableTimestamp")]
     pub claimed_at: Option<Timestamp>,
     pub dedup_scope: Option<String>,

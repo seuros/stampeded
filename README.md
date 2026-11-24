@@ -36,11 +36,16 @@ loop do
   db.exec_params("SELECT stampeded_heartbeat($1)", [worker])
   db.exec_params("SELECT * FROM stampeded_claim($1,$2,$3)", ['default', worker, 5]).each do |job|
     handle(JSON.parse(job['args']))
-    db.exec_params("SELECT stampeded_complete($1,$2,$3,$4)", ['default', job['id'], worker, job['attempt']])
+    db.exec_params("SELECT stampeded_complete($1,$2,$3,$4)",
+                   ['default', job['id'], worker, job['claim_token']])
   end
   sleep 0.5
 end
 ```
+
+Use the `claim_token` returned by each claim for owned writes. `attempt` is
+retry accounting, not proof of ownership. When upgrading to schema 11, stop
+claiming, drain active jobs, then migrate and upgrade all runtimes together.
 
 ## Running it
 
@@ -580,7 +585,7 @@ included. The Ruby suite lives in `ruby/`.
 
 ```
 crates/stampeded/  queue, worker, scheduler, maintenance, planner
-  schema/          migrations (sqlx), NOTES.md (design notes)
+  schema/          PostgreSQL migrations (sqlx)
   src/http/        HTTP API and dashboard    [feature: http]
   src/mcp/         MCP control plane         [feature: mcp]
   src/vitals/      host-vitals admission     [feature: vitals]

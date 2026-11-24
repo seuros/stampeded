@@ -36,6 +36,7 @@ module Stampeded
       state.to_s == name.to_s.delete_suffix("?")
     end
     def attempt  = row["attempt"].to_i
+    def claim_token = row["claim_token"]
     def max_attempts = row["max_attempts"].to_i
     def interruptions = row["interruptions"].to_i
     def deferrals = row["deferrals"].to_i

@@ -141,6 +141,7 @@ fn progress_renders_steps_and_raw_cursors_differently() {
         max_attempts: 25,
         attempted_by: vec![],
         claimed_by: None,
+        claim_token: None,
         claimed_at: None,
         dedup_scope: None,
         dedup_period: None,

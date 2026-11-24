@@ -275,7 +275,7 @@ impl Queue {
             .bind(&job.queue)
             .bind(job.id)
             .bind(worker_id)
-            .bind(job.attempt)
+            .bind(job.claim_token)
             .fetch_optional(&self.pool)
             .await?;
         Ok(Transition::from_row(row))
@@ -311,7 +311,7 @@ impl Queue {
         .bind(&job.queue)
         .bind(job.id)
         .bind(worker_id)
-        .bind(job.attempt)
+        .bind(job.claim_token)
         .bind(kind.as_str())
         .bind(error)
         .bind(retry_delay.map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX)))
@@ -340,7 +340,7 @@ impl Queue {
             .bind(&job.queue)
             .bind(job.id)
             .bind(worker_id)
-            .bind(job.attempt)
+            .bind(job.claim_token)
             .fetch_optional(&self.pool)
             .await?;
         Ok(ok.flatten().unwrap_or(false))
@@ -389,7 +389,7 @@ impl Queue {
                 .bind(&job.queue)
                 .bind(job.id)
                 .bind(worker_id)
-                .bind(job.attempt)
+                .bind(job.claim_token)
                 .bind(&value)
                 .fetch_optional(executor)
                 .await?;

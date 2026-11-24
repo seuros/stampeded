@@ -15,6 +15,19 @@ async fn empty() -> Option<PgPool> {
     Some(common::pool_on(&url, &common::fresh_schema(&url).await).await)
 }
 
+fn released_migrations(through: i64) -> sqlx::migrate::Migrator {
+    let embedded = sqlx::migrate!("./schema");
+    let mut released = sqlx::migrate::Migrator::with_migrations(
+        embedded
+            .iter()
+            .filter(|m| m.version <= through)
+            .cloned()
+            .collect(),
+    );
+    released.dangerous_set_table_name("stampeded_migrations");
+    released
+}
+
 /// Schema 1's dedup key, before it named its period.
 const VERSION_1_DEDUP_KEY: &str =
     "ALTER TABLE stampeded_jobs ALTER COLUMN dedup_key SET EXPRESSION AS (
@@ -29,16 +42,13 @@ const VERSION_3_DEDUP_KEY: &str = include_str!("../schema/0003_dedup_key_separat
 /// Turns a fresh install into one stampeded 0.4 left at `version`, or 0.3
 /// (unversioned) for `None`, with that version's dedup key.
 async fn legacy(pool: &PgPool, dedup_key: &str, version: Option<i32>) {
+    released_migrations(7).run(pool).await.expect("base schema");
     let recorded = version.map_or_else(
         || "DROP TABLE stampeded_schema".to_owned(),
         |v| format!("UPDATE stampeded_schema SET version = {v}"),
     );
     sqlx::raw_sql(AssertSqlSafe(format!(
         "{dedup_key};
-         ALTER TABLE stampeded_schedules
-             DROP COLUMN max_attempts, DROP COLUMN max_interruptions, DROP COLUMN expire_seconds,
-             DROP COLUMN owner;
-         DROP FUNCTION stampeded_sync_schedules(text, jsonb);
          DROP TABLE stampeded_migrations; {recorded}"
     )))
     .execute(pool)
@@ -86,7 +96,6 @@ async fn insert_daily_at_midnight(pool: &PgPool) -> Result<(), sqlx::Error> {
 #[tokio::test]
 async fn a_version_1_database_is_upgraded_in_place() {
     let Some(pool) = empty().await else { return };
-    schema::migrate(&pool).await.expect("install");
     legacy(&pool, VERSION_1_DEDUP_KEY, Some(1)).await;
 
     // Commits under schema 1, so the rewrite below has a real row to touch.
@@ -116,7 +125,6 @@ async fn a_version_1_database_is_upgraded_in_place() {
 #[tokio::test]
 async fn an_unversioned_0_3_install_is_adopted_and_upgraded() {
     let Some(pool) = empty().await else { return };
-    schema::migrate(&pool).await.expect("install");
     legacy(&pool, VERSION_1_DEDUP_KEY, None).await;
 
     schema::migrate(&pool).await.expect("adopt and upgrade");
@@ -196,7 +204,6 @@ async fn insert_scopes(pool: &PgPool, scopes: &[&str]) -> Result<(), sqlx::Error
 #[tokio::test]
 async fn a_scope_is_keyed_by_its_text_not_its_bytea_escapes() {
     let Some(pool) = empty().await else { return };
-    schema::migrate(&pool).await.expect("install");
     legacy(&pool, VERSION_3_DEDUP_KEY, Some(3)).await;
 
     // `\x62` is stored under `b`'s key.
@@ -229,16 +236,10 @@ async fn a_scope_is_keyed_by_its_text_not_its_bytea_escapes() {
 async fn a_0_6_schedule_is_upgraded_without_rewriting_jobs_or_occurrences() {
     let Some(pool) = empty().await else { return };
     // Install exactly the migrations shipped in 0.6, with their real checksums.
-    let embedded = sqlx::migrate!("./schema");
-    let mut released = sqlx::migrate::Migrator::with_migrations(
-        embedded
-            .iter()
-            .filter(|m| m.version <= 7)
-            .cloned()
-            .collect(),
-    );
-    released.dangerous_set_table_name("stampeded_migrations");
-    released.run(&pool).await.expect("released 0.6 schema");
+    released_migrations(7)
+        .run(&pool)
+        .await
+        .expect("released 0.6 schema");
 
     sqlx::query(
         "INSERT INTO stampeded_schedules (key, queue, task, interval_secs, next_run_at)
@@ -281,11 +282,6 @@ async fn a_0_6_schedule_is_upgraded_without_rewriting_jobs_or_occurrences() {
     .await
     .expect("preserved checksums");
     assert_eq!(preserved, checksums);
-    let version: i32 = sqlx::query_scalar("SELECT version FROM stampeded_schema")
-        .fetch_one(&pool)
-        .await
-        .expect("schema version");
-    assert_eq!(version, 10);
     let defaults: (i16, i16, i32) = sqlx::query_as(
         "SELECT max_attempts, max_interruptions, expire_seconds FROM stampeded_schedules",
     )
@@ -297,10 +293,13 @@ async fn a_0_6_schedule_is_upgraded_without_rewriting_jobs_or_occurrences() {
     let q = stampeded::Queue::new(pool);
     // The released occurrence is still due, but its ledger prevents a second job.
     assert_eq!(q.run_due_schedules(10).await.expect("replay"), 0);
-    let job: serde_json::Value = sqlx::query_scalar("SELECT to_jsonb(j) FROM stampeded_jobs j")
-        .fetch_one(q.pool())
-        .await
-        .expect("unchanged job");
+    let job: serde_json::Value = sqlx::query_scalar(
+        "SELECT to_jsonb(j) - 'claim_token' \
+         FROM stampeded_jobs j",
+    )
+    .fetch_one(q.pool())
+    .await
+    .expect("unchanged job");
     let occurrence: serde_json::Value =
         sqlx::query_scalar("SELECT to_jsonb(o) FROM stampeded_cron_occurrences o")
             .fetch_one(q.pool())

@@ -139,13 +139,15 @@ pub unsafe extern "C" fn stampeded_puller_next(
 
         let job = lease.job();
         let text = |s: String| CString::new(s).map_err(|e| e.to_string());
+        let mut wire = serde_json::to_value(job).map_err(|e| e.to_string())?;
+        wire["claim_token"] = serde_json::json!(job.claim_token);
         let leased = LeaseHandle {
             id: text(job.id.hyphenated().to_string())?,
             queue: text(job.queue.clone())?,
             task: text(job.task.clone())?,
             args: text(job.args.to_string())?,
             meta: text(job.meta.to_string())?,
-            job: text(serde_json::to_string(job).map_err(|e| e.to_string())?)?,
+            job: text(wire.to_string())?,
             runtime: handle.runtime.clone(),
             lease: Some(lease),
         };
