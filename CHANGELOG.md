@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.14.0](https://github.com/seuros/stampeded/compare/stampeded-v0.13.0...stampeded-v0.14.0) (2026-11-24)
+
+
+### Features
+
+* **dashboard:** use AM styling and add clickable job navigation ([ed8c407](https://github.com/seuros/stampeded/commit/ed8c407398e2fa6eafb657d415ebcd568c58bea9))
+* **worker:** bound tenant admission and share queue logic ([be1c87d](https://github.com/seuros/stampeded/commit/be1c87d0b5bafc8cff2f8bdce1752dd196973f8c))
+
+
+### Bug Fixes
+
+* **queue:** fence claims and make failure reporting atomic ([e05a897](https://github.com/seuros/stampeded/commit/e05a8971570b4fc739b7932378c1af3740186515))
+
 ## [0.13.0](https://github.com/seuros/stampeded/compare/stampeded-v0.12.0...stampeded-v0.13.0) (2026-11-21)
 
 
