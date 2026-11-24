@@ -266,7 +266,7 @@ async fn the_dashboard_stream_links_to_a_job_page_with_the_current_filters() {
     let path = format!("/dashboard/stream?{query}");
     let req = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\n\r\n");
     socket.write_all(req.as_bytes()).await.expect("write");
-    let patch = tokio::time::timeout(Duration::from_secs(10), async {
+    let jobs_panel = tokio::time::timeout(Duration::from_secs(10), async {
         let mut lines = BufReader::new(socket).lines();
         while let Some(line) = lines.next_line().await.expect("stream line") {
             if line.contains(r#"id="jobs""#) {
@@ -279,7 +279,7 @@ async fn the_dashboard_stream_links_to_a_job_page_with_the_current_filters() {
     .expect("jobs panel did not arrive");
     let target = format!("/dashboard?{query}&j={id}");
     let href = target.replace('&', "&amp;");
-    assert!(patch.contains(&format!(r#"href="{href}#job-browser""#)));
+    assert!(jobs_panel.contains(&format!(r#"href="{href}#job-browser""#)));
     let (status, body) = request(&addr, "GET", &target, None).await;
     assert_eq!(status, 200);
     let stream = format!("{path}&j={id}").replace('&', "&amp;");
