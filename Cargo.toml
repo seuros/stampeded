@@ -12,11 +12,11 @@ authors = ["Abdelkader Boudih"]
 [workspace.dependencies]
 # Path for the workspace, version for crates.io; release-please bumps both.
 stampeded = { path = "crates/stampeded", version = "0.15.0", default-features = false }
-tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "time", "signal", "sync", "net"] }
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "time", "signal", "sync", "net"] }
 # No TLS backend here: each final artifact picks one (stampeded's `tls-aws-lc` /
 # `tls-ring`), so an app embedding the library keeps its own.
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "uuid", "json", "macros", "migrate"] }
-uuid = { version = "1.28", features = ["v7", "serde"] }
+uuid = { version = "1.29", features = ["v7", "serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 jiff = { version = "1", features = ["serde"] }
@@ -25,7 +25,7 @@ thiserror = "2"
 gethostname = "1.1"
 # Jitter draws: chrono-machines takes the caller's, it owns no generator.
 rand = "0.10"
-anyhow = "1.0.104"
+anyhow = "1.0.105"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
@@ -34,13 +34,13 @@ rama = { version = "0.4", default-features = false, features = ["http-backend", 
 # rama re-exports its HTTP server only under `http-full`, which also brings DNS
 # (bindgen, so libclang), compression (zstd, zlib) and WebSockets; none is used.
 rama-http-backend = { version = "0.4", default-features = false }
-mcp-host = { version = "0.28.1", features = ["macros", "stdio"] }
+mcp-host = { version = "0.28.5", features = ["macros", "stdio"] }
 # The game page's three.js, served under hashed URLs, and its Datastar glue.
 rama-x-threejs = "0.1.0"
 schemars = "1"
 
 # The machines family.
-state-machines = "0.35"
+state-machines = "0.36"
 chrono-machines = "0.13"
 breaker-machines = { version = "0.27", features = ["async"] }
 throttle-machines = { version = "0.6.1", features = ["std"] }
@@ -51,7 +51,7 @@ behavior-machines-circuit = "0.6.3"
 # Which queue to claim from next.
 priority-machines = "0.7"
 # Host-vitals admission (disk, thermal), behind stampeded's `vitals` feature.
-vitals-machines = { version = "0.4", features = ["probe"] }
+vitals-machines = { version = "0.6", features = ["probe"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
