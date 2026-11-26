@@ -106,6 +106,16 @@ Worker::new(queue.clone(), config).register_job::<CrateExtractor>();
 queue.enqueue_job(CrateExtractor { .. }).await?;
 ```
 
+`enqueue_on` and `enqueue_job_on` take an executor, so the job is written by the
+transaction that caused it and rolls back with it:
+
+```rust
+let mut tx = pool.begin().await?;
+publish(&mut *tx, &version).await?;
+queue.enqueue_job_on(&mut *tx, CrateExtractor { .. }).await?;
+tx.commit().await?;
+```
+
 The payload is the job's `args`, so it must be a struct with named fields. One
 that no longer deserializes is discarded as `unrecoverable`. The output is
 logged, not stored.

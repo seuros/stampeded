@@ -193,6 +193,22 @@ impl Queue {
 
     /// Enqueue a job; `None` when a deduplicated job was already queued.
     pub async fn enqueue(&self, job: NewJob) -> Result<Option<Uuid>> {
+        self.enqueue_on(&self.pool, job).await
+    }
+
+    /// `enqueue` on a caller's executor, normally the transaction writing the data that
+    /// caused the job, so the job exists exactly when that data does:
+    ///
+    /// ```ignore
+    /// let mut tx = pool.begin().await?;
+    /// insert_order(&mut *tx, &order).await?;
+    /// queue.enqueue_on(&mut *tx, NewJob::new("mail", "send_receipt")).await?;
+    /// tx.commit().await?;
+    /// ```
+    pub async fn enqueue_on<'e, E>(&self, executor: E, job: NewJob) -> Result<Option<Uuid>>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
         let id: Option<Uuid> = sqlx::query_scalar(
             r"
             INSERT INTO stampeded_jobs
@@ -221,7 +237,7 @@ impl Queue {
         .bind(job.backoff_base_ms)
         .bind(job.backoff_max_ms)
         .bind(&job.meta)
-        .fetch_optional(&self.pool)
+        .fetch_optional(executor)
         .await?
         .flatten();
 
@@ -231,6 +247,15 @@ impl Queue {
     /// `enqueue` of `job.new_job()`. See [`crate::async_job`].
     pub async fn enqueue_job<T: crate::AsyncJob>(&self, job: T) -> Result<Option<Uuid>> {
         self.enqueue(job.new_job()?).await
+    }
+
+    /// `enqueue_on` of `job.new_job()`.
+    pub async fn enqueue_job_on<'e, E, T>(&self, executor: E, job: T) -> Result<Option<Uuid>>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+        T: crate::AsyncJob,
+    {
+        self.enqueue_on(executor, job.new_job()?).await
     }
 
     /// Claim up to `limit` jobs for this worker.

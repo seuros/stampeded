@@ -2624,6 +2624,42 @@ async fn counters_survive_a_rolled_back_enqueue() {
 }
 
 #[tokio::test]
+async fn a_job_enqueued_on_a_transaction_shares_its_fate() {
+    let q = q!();
+
+    let mut tx = q.pool().begin().await.unwrap();
+    let rolled_back = q
+        .enqueue_on(&mut *tx, NewJob::new("default", "rolled-back"))
+        .await
+        .unwrap();
+    assert!(rolled_back.is_some());
+    tx.rollback().await.unwrap();
+    assert_eq!(depth_of(&q, "available").await, 0);
+
+    let mut tx = q.pool().begin().await.unwrap();
+    let kept = q
+        .enqueue_on(&mut *tx, NewJob::new("default", "kept").unique("once"))
+        .await
+        .unwrap();
+    let duplicate = q
+        .enqueue_on(&mut *tx, NewJob::new("default", "kept").unique("once"))
+        .await
+        .unwrap();
+    assert!(kept.is_some());
+    assert_eq!(
+        duplicate, None,
+        "deduplication holds inside the transaction"
+    );
+    assert_eq!(
+        depth_of(&q, "available").await,
+        0,
+        "not visible before commit"
+    );
+    tx.commit().await.unwrap();
+    assert_eq!(depth_of(&q, "available").await, 1);
+}
+
+#[tokio::test]
 async fn a_thundering_herd_of_identical_jobs_enqueues_exactly_one() {
     // Under real concurrency: a unique index, not SELECT-then-INSERT.
     let q = q!();
