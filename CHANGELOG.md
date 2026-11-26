@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.0](https://github.com/seuros/stampeded/compare/stampeded-v0.14.0...stampeded-v0.15.0) (2026-11-26)
+
+
+### Features
+
+* **queue:** enqueue on a caller's transaction ([afcd010](https://github.com/seuros/stampeded/commit/afcd010fd46be3729b83b821dba6be466cb060a5))
+
 ## [0.14.0](https://github.com/seuros/stampeded/compare/stampeded-v0.13.0...stampeded-v0.14.0) (2026-11-24)
 
 
