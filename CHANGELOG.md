@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.16.0](https://github.com/seuros/stampeded/compare/stampeded-v0.15.0...stampeded-v0.16.0) (2026-11-26)
+
+
+### ⚠ BREAKING CHANGES
+
+* **deps:** `stampeded::vitals::Phase` is the re-export of vitals-machines 0.6's `Phase`, no longer 0.4's.
+
+### Bug Fixes
+
+* **deps:** state-machines 0.36 and vitals-machines 0.6 ([102a548](https://github.com/seuros/stampeded/commit/102a548576b110ce6f889cbba78fc12c6638f2d2))
+
 ## [0.15.0](https://github.com/seuros/stampeded/compare/stampeded-v0.14.0...stampeded-v0.15.0) (2026-11-26)
 
 
