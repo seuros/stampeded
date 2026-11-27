@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0](https://github.com/seuros/stampeded/compare/stampeded-v0.16.0...stampeded-v0.17.0) (2026-11-27)
+
+
+### Features
+
+* **dashboard:** serve the stylesheet at /dashboard/style.css ([cd2f3b2](https://github.com/seuros/stampeded/commit/cd2f3b2bfb55b4750f64c5e1747a2351ab9517d7))
+
 ## [0.16.0](https://github.com/seuros/stampeded/compare/stampeded-v0.15.0...stampeded-v0.16.0) (2026-11-26)
 
 
