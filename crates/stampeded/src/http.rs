@@ -90,6 +90,7 @@ where
         // Static assets are public; the pages that load them are not.
         let r = router(state.clone())
             // Datastar served from the binary, not a CDN.
+            .with_get("/dashboard/style.css", dashboard::style)
             .with_get("/dashboard/datastar.js", dashboard::script)
             .with_get("/dashboard/datastar.js.map", dashboard::script_map);
 

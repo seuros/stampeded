@@ -337,6 +337,10 @@ fn the_dashboard_loads_no_external_assets() {
     );
 
     assert!(
+        html.contains(r#"<link rel="stylesheet" href="/dashboard/style.css">"#),
+        "the dashboard does not load its stylesheet"
+    );
+    assert!(
         html.contains("/dashboard/datastar.js"),
         "the dashboard does not load Datastar at all"
     );

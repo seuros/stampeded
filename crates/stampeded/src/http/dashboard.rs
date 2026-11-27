@@ -110,9 +110,7 @@ fn current(selected: bool) -> &'static str {
 
 fn render_index(p: &Params) -> String {
     let query = p.query(None, None, p.job().unwrap_or(""));
-    INDEX
-        .replace("__STYLE__", STYLE)
-        .replace("__STREAM__", &format!("/dashboard/stream?{query}"))
+    INDEX.replace("__STREAM__", &format!("/dashboard/stream?{query}"))
 }
 
 pub async fn index(Query(p): Query<Params>) -> impl IntoResponse {
@@ -206,6 +204,12 @@ fn render_wakeups(state: &ApiState) -> Option<Event<PatchElements>> {
         r#"<span id="wakeups" class="badge {class}" role="status">
                {text}</span>"#
     ))
+}
+
+/// The stylesheet, public like Datastar so a page mounted next to the
+/// dashboard can link it and look the same.
+pub async fn style() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], STYLE)
 }
 
 /// Datastar itself, served from the binary so the console works air-gapped.

@@ -372,6 +372,10 @@ async fn the_dashboard_assets_resolve_including_whatever_they_advertise() {
         js.len()
     );
 
+    let (status, css) = request(&addr, "GET", "/dashboard/style.css", None).await;
+    assert_eq!(status, 200, "the dashboard cannot load its stylesheet");
+    assert!(css.contains("--accent"), "style.css is not the stylesheet");
+
     // Follow what the script itself asks for.
     if let Some(line) = js.lines().rev().find(|l| l.contains("sourceMappingURL=")) {
         let name = line.rsplit("sourceMappingURL=").next().unwrap().trim();
