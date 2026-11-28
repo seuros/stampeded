@@ -86,6 +86,10 @@ roots built in; a private CA goes in `sslrootcert`, so on RDS:
   | `GET /queues/{queue}/depth` | depth by state |
   | `GET /health` | |
 
+  These routes take no token. An embedder that only wants the dashboard on the
+  network builds its state with `ApiState::without_job_api()`, which leaves
+  `/health` and the dashboard.
+
 Rust handlers are registered in-process (`crates/stampeded/examples/worker.rs`),
 as closures or as typed jobs:
 

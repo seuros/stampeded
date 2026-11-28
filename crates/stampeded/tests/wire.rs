@@ -21,6 +21,15 @@ async fn serve_extended<F>(extend: F) -> Option<(String, Queue, watch::Sender<bo
 where
     F: FnOnce(stampeded::http::GatedRouter) -> stampeded::http::GatedRouter + Send + 'static,
 {
+    serve_state(|state| state, extend).await
+}
+
+/// [`serve_extended`], with the state passed through `configure` first.
+async fn serve_state<C, F>(configure: C, extend: F) -> Option<(String, Queue, watch::Sender<bool>)>
+where
+    C: FnOnce(stampeded::http::ApiState) -> stampeded::http::ApiState + Send + 'static,
+    F: FnOnce(stampeded::http::GatedRouter) -> stampeded::http::GatedRouter + Send + 'static,
+{
     let queue = common::setup().await?;
     queue.create_queue("default").await.expect("create queue");
     queue.create_queue("dead").await.expect("create dlq");
@@ -36,7 +45,7 @@ where
     let (tx, rx) = watch::channel(false);
     let q = queue.clone();
     tokio::spawn(async move {
-        let state = stampeded::http::ApiState::new(q).with_dashboard_token("s3cret");
+        let state = configure(stampeded::http::ApiState::new(q).with_dashboard_token("s3cret"));
         let _ = stampeded::http::serve_on(listener, state, rx, extend).await;
     });
     Some((addr, queue, tx))
@@ -817,6 +826,37 @@ async fn embedded_pages_sit_behind_the_dashboard_token() {
     assert!(body.contains("from the embedder"), "{body}");
     let (status, _) = request(&addr, "GET", "/embedded/page", None).await;
     assert_eq!(status, 404);
+    let (status, _) = request(&addr, "GET", "/dashboard?token=s3cret", None).await;
+    assert_eq!(status, 200);
+    tx.send_replace(true);
+}
+
+#[tokio::test]
+async fn without_the_job_api_only_health_and_the_dashboard_answer() {
+    let Some((addr, queue, tx)) =
+        serve_state(stampeded::http::ApiState::without_job_api, |routes| routes).await
+    else {
+        return;
+    };
+    let id = queue
+        .enqueue(NewJob::new("default", "greet"))
+        .await
+        .expect("enqueue")
+        .expect("id");
+
+    let body = Some(r#"{"queue":"default","task":"greet"}"#);
+    let (status, _) = request(&addr, "POST", "/jobs", body).await;
+    assert_eq!(status, 404);
+    for path in [
+        "/queues/default/depth".to_owned(),
+        format!("/queues/default/jobs/{id}"),
+        format!("/queues/default/jobs/{id}/events"),
+    ] {
+        let (status, _) = request(&addr, "GET", &path, None).await;
+        assert_eq!(status, 404, "{path}");
+    }
+    let (status, _) = request(&addr, "GET", "/health", None).await;
+    assert_eq!(status, 200);
     let (status, _) = request(&addr, "GET", "/dashboard?token=s3cret", None).await;
     assert_eq!(status, 200);
     tx.send_replace(true);

@@ -79,6 +79,8 @@ pub struct ApiState {
     pub wakeups: WakeupStatus,
     /// Throughput, depth and backlog-age history. See [`crate::http::trends`].
     pub trends: Arc<crate::http::trends::Trends>,
+    /// Whether the job routes are served. They take no token.
+    pub job_api: bool,
 }
 
 impl ApiState {
@@ -89,7 +91,16 @@ impl ApiState {
             dashboard_token: None,
             wakeups: WakeupStatus::NotApplicable,
             trends: Arc::default(),
+            job_api: true,
         }
+    }
+
+    /// Serve the dashboard and `/health` only: no enqueueing or job reads over
+    /// HTTP, for an embedder whose jobs arrive by `INSERT`.
+    #[must_use]
+    pub fn without_job_api(mut self) -> Self {
+        self.job_api = false;
+        self
     }
 
     /// Serve the dashboard, gated on this token.
@@ -211,9 +222,12 @@ pub struct ErrorResponse {
 
 /// Build the router.
 pub fn router(state: ApiState) -> Router<ApiState> {
-    Router::new_with_state(state)
-        .with_get("/health", health)
-        .with_post("/jobs", enqueue)
+    let job_api = state.job_api;
+    let r = Router::new_with_state(state).with_get("/health", health);
+    if !job_api {
+        return r;
+    }
+    r.with_post("/jobs", enqueue)
         .with_get("/queues/{queue}/depth", depth)
         .with_get("/queues/{queue}/jobs/{id}", job_status)
         .with_get("/queues/{queue}/jobs/{id}/events", job_events)
