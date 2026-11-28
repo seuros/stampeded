@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.0](https://github.com/seuros/stampeded/compare/stampeded-v0.17.0...stampeded-v0.18.0) (2026-11-28)
+
+
+### Features
+
+* **http:** serve the dashboard without the job API ([3882b92](https://github.com/seuros/stampeded/commit/3882b92c15e4f7284f5bbcabe3d1dce41d71c9d5))
+
 ## [0.17.0](https://github.com/seuros/stampeded/compare/stampeded-v0.16.0...stampeded-v0.17.0) (2026-11-27)
 
 
